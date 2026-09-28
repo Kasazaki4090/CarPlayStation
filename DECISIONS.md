@@ -373,3 +373,63 @@ Trade-offs:
 * `ARCHITECTURE.md`
 * `PROJECT.md`
 * `TODO.md`
+
+
+## DEC-003 — Wireless-First Priority, MFi Authentication Strategy, and Input Mapping
+
+**Status:** `Accepted`
+
+**Date:** 2026-09-28
+
+### Context
+
+1. **Wired vs. Wireless Viability on PC:**
+   - On typical x86/Windows PC hardware, the Intel xDCI (USB Device Controller Interface) is heavily constrained by BIOS/EC and firmware implementations. Windows lacks general native APIs/drivers to switch the host port into a USB Device / Gadget role (iAP2 + NCM composite device).
+   - In contrast, Wireless CarPlay uses standard PC Wi-Fi (SoftAP/Hotspot) and Bluetooth (RFCOMM/SDP), which can be implemented natively on Windows 10/11.
+
+2. **MFi Authentication Interface:**
+   - iAP2 authentication requires communicating with an Apple MFi authentication coprocessor (or an authorized signing service).
+   - On Windows, this needs flexible backend options:
+     - Local hardware: USB-to-I2C bridge chips (such as WCH CH341, CP2112, FT232H, etc.) interfacing directly with an MFi chip over I2C.
+     - Network daemon / proxy: A configurable TCP/HTTP socket endpoint (e.g. `MfiDaemonEndpoint`, configurable host:port, defaulting to `127.0.0.1:9000`) providing remote signing / MFi emulation or bridge capabilities.
+
+3. **Input Modality Clarification:**
+   - CarPlay native protocol does not define direct PC raw mouse pointer / QWERTY keyboard streams.
+   - Mouse interaction can be directly translated to standard CarPlay Touch / Multi-touch events:
+     - Left-click press / release → Touch Down / Touch Up (Tap)
+     - Left-click hold & move → Touch Move (Drag / Pan / Swipe)
+     - Right-click → CarPlay Back / Home button action
+   - Keyboard interaction maps to vehicle rotary knob / directional navigation buttons:
+     - Arrow keys (Up, Down, Left, Right) → Focus move / rotary knob steps
+     - Enter → Select / Confirm (Knob push)
+     - Backspace / Esc → Back / Return action
+     - Media / Function keys → Siri, Play/Pause, Next/Prev, Call buttons
+
+### Decision
+
+1. **Wireless-First Target:**
+   - Wireless CarPlay is designated as the primary, mandatory, and first implementation target (P0).
+   - Native PC wired USB device-mode is deprioritized (blocked by xDCI / BIOS limitations). Any wired support will rely on external bridge hardware (dongle / MCU) and is deferred.
+
+2. **Pluggable MFi Authentication Backends:**
+   - Support hardware USB-to-I2C adapter interface (CH341 and equivalent bridge chips) for local MFi coprocessors.
+   - Support network daemon interface over configurable endpoint / proxy address (defaulting to `127.0.0.1:9000`) for remote signing / daemon services.
+
+3. **Mouse & Keyboard Input Mapping:**
+   - Mouse input will be mapped to Touch events (left click = tap, drag = swipe, right click = back).
+   - Keyboard input will be mapped to vehicle knob / directional and media navigation controls.
+
+### Consequences
+
+Positive:
+- Removes the blocker of PC xDCI device mode from the primary development path.
+- Clear development roadmap focused on wireless CarPlay (Bluetooth RFCOMM + Wi-Fi SoftAP + AirPlay).
+- Pluggable MFi architecture enables testing with either physical CH341+MFi hardware or a configurable network proxy daemon (`127.0.0.1:9000`).
+- Provides intuitive PC desktop control using standard mouse and keyboard without protocol violations.
+
+### Related
+
+* `PROJECT.md`
+* `ARCHITECTURE.md`
+* `TODO.md`
+

@@ -26,7 +26,7 @@ Display / touch / keyboard and mouse / audio
 - Video output
 - Microphone input
 - Touch input
-- Keyboard and mouse input
+- Keyboard and mouse input (input modality not confirmed in reference implementations; see TODO sections 1 and 9)
 
 ### Features That May Be Limited in Phase 1
 
@@ -70,3 +70,18 @@ The following projects may be consulted for protocol, behavior, and implementati
 
 - XcertPLay
 - Carplayd
+
+## Documentation Corrections
+
+### 2026-09-28 — Keyboard and mouse input flagged for verification
+
+Problem:
+
+* `PROJECT.md` lists "Keyboard and mouse input" as a Phase 1 goal, and `ARCHITECTURE.md` lists "Mouse" and "Keyboard" under the UI initial target.
+* The reference implementations under `Reference/` only demonstrate touch input plus media/Siri/telephony buttons. No keyboard or mouse channel is confirmed in the CarPlay protocol as implemented there.
+* `TODO.md` tracks this as a P1 research task (sections 1 and 9).
+
+Action:
+
+* The goal is kept but explicitly marked as unconfirmed and linked to the research task, rather than silently removed or assumed.
+* Per `DEC-001` and `TODO.md` rule 6, the scope will only be changed after the research concludes and a decision is recorded in `DECISIONS.md`.

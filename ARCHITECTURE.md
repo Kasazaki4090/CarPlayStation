@@ -1,11 +1,17 @@
 # Architecture
 
-CarPlayStation is divided into four major parts:
+CarPlayStation is divided into five major parts:
 
 ```text
 ┌───────────────────────────────────────────────┐
 │                    UI                         │
 │        Win32 / Display / Input / Control      │
+└───────────────────────┬───────────────────────┘
+                        │
+┌───────────────────────▼───────────────────────┐
+│                 Application                   │
+│                                               │
+│  Application API / State / Commands / Events  │
 └───────────────────────┬───────────────────────┘
                         │
 ┌───────────────────────▼───────────────────────┐
@@ -40,6 +46,21 @@ CarPlayStation is divided into four major parts:
 
 ## Layer Responsibilities
 
+### Application
+
+The application layer sits between the UI and the Core, as required by `DEC-002`.
+
+It exposes operations and state to the UI and translates UI requests into Core calls.
+
+Responsibilities:
+
+* Session lifecycle operations (connect, disconnect, reconnect)
+* Application state and event surface for the UI
+* Command handling from the UI toward Core
+* Metadata and status presentation data
+
+The application layer must not depend on a specific UI framework, and it must not implement CarPlay protocol logic itself. Protocol logic stays in Core.
+
 ### Core
 
 Contains the main CarPlay implementation and protocol logic.
@@ -57,8 +78,8 @@ Initial target:
 * Win32
 * Display
 * Touch
-* Mouse
-* Keyboard
+* Mouse (input modality not confirmed in the CarPlay protocol; see `PROJECT.md` corrections and `TODO.md` sections 1 and 9)
+* Keyboard (input modality not confirmed in the CarPlay protocol; see `PROJECT.md` corrections and `TODO.md` sections 1 and 9)
 
 ### Lib
 
@@ -89,7 +110,7 @@ They are not runtime dependencies.
 
 ## Design Principles
 
-1. Keep Core independent from UI.
+1. Keep Core independent from UI; UI talks to Core only through the application layer.
 2. Wired and wireless should converge into the same session layer.
 3. Prefer native Windows APIs.
 4. Use third-party libraries only when they provide practical value.
@@ -142,3 +163,25 @@ Unreal Engine UI
 ## Detailed Architecture
 
 Detailed protocol flows, session states, transport behavior, media pipelines and other implementation details should be added here as the project develops.
+
+## Documentation Corrections
+
+### 2026-09-28 — Application layer added
+
+Problem:
+
+* The overview diagram stated "four major parts" and showed only UI, Core, Lib and Reference, with no Application layer.
+* This conflicted with `DECISIONS.md` DEC-002, which mandates the dependency direction `UI -> Application -> Core -> Platform / Libraries`.
+* The "UI Isolation" section already referenced the application layer, so the document was internally inconsistent with its own diagram.
+
+Change:
+
+* Diagram now shows five parts with an Application layer between UI and Core.
+* Added an "Application" responsibilities subsection under "Layer Responsibilities".
+* Design Principle 1 now names the application layer explicitly.
+
+This correction only documents the layer DEC-002 already requires. It does not change any project goal. If the Application layer boundary needs to be formalized further, record it as a new decision in `DECISIONS.md`.
+
+### 2026-09-28 — Mouse/Keyboard UI targets annotated
+
+The UI "Initial target" list kept Mouse and Keyboard but annotated them as unconfirmed in the CarPlay protocol, matching the note added to `PROJECT.md` and the research task in `TODO.md`. No goal was removed.
