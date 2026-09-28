@@ -2,7 +2,6 @@
 
 #include "Core/Common/Types.h"
 #include "Core/Common/Result.h"
-#include "Core/Common/Config.h"
 #include <functional>
 #include <string_view>
 
@@ -39,11 +38,10 @@ class ICarPlaySession {
 public:
     virtual ~ICarPlaySession() = default;
 
-    // Start discovery and session listener with full dynamic configuration
-    [[nodiscard]] virtual Common::Status Start(const Common::CarPlayStationConfig& config) = 0;
-
-    // Dynamically update runtime configuration (e.g. video/audio settings during session)
-    [[nodiscard]] virtual Common::Status UpdateConfig(const Common::CarPlayStationConfig& config) = 0;
+    // Start discovery and session listener.
+    // All session parameters (codec, resolution, sample rate, ...) are negotiated with the
+    // iPhone at runtime — nothing user-configurable is accepted here (see DEC-004).
+    [[nodiscard]] virtual Common::Status Start() = 0;
 
     // Stop active session
     virtual void Stop() = 0;

@@ -14,11 +14,11 @@ class IVideoDecoder {
 public:
     virtual ~IVideoDecoder() = default;
 
-    // Initialize hardware or software decoder for the specified video config
-    [[nodiscard]] virtual Common::Status Init(const Common::VideoConfig& config) = 0;
+    // Initialize hardware or software decoder for the negotiated stream spec (concrete facts only)
+    [[nodiscard]] virtual Common::Status Init(const Common::VideoStreamSpec& spec) = 0;
 
-    // Dynamically update output parameters (e.g. resolution resize or mode change)
-    [[nodiscard]] virtual Common::Status Reconfigure(const Common::VideoConfig& config) = 0;
+    // Dynamically update the stream spec (e.g. resolution change after renegotiation)
+    [[nodiscard]] virtual Common::Status Reconfigure(const Common::VideoStreamSpec& spec) = 0;
 
     // Feed raw NAL access unit / elementary stream frame
     [[nodiscard]] virtual Common::Status DecodeAccessUnit(Common::ByteSpan nalData, uint64_t ptsUs) = 0;

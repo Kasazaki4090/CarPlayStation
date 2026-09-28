@@ -26,17 +26,20 @@ class IAudioPipeline {
 public:
     virtual ~IAudioPipeline() = default;
 
-    // Start audio output pipeline with configurable sample rate, bit depth and channels
-    [[nodiscard]] virtual Common::Status Start(const Common::AudioConfig& config) = 0;
+    // Start audio output pipeline with a concrete negotiated format (no user preferences)
+    [[nodiscard]] virtual Common::Status Start(const Common::AudioOutputFormat& format) = 0;
 
-    // Dynamically update audio parameters (sample rates, volumes, ducking ratio)
-    [[nodiscard]] virtual Common::Status Reconfigure(const Common::AudioConfig& config) = 0;
+    // Dynamically update the output format (e.g. sample rate change after renegotiation)
+    [[nodiscard]] virtual Common::Status Reconfigure(const Common::AudioOutputFormat& format) = 0;
 
     // Push PCM audio chunk to specified audio lane
     [[nodiscard]] virtual Common::Status WriteAudio(AudioLane lane, Common::ByteSpan pcmData) = 0;
 
-    // Set volume level for a specific lane (0.0 to 1.0)
+    // Set volume level for a specific lane (0.0 to 1.0) — runtime control, not part of format
     virtual void SetLaneVolume(AudioLane lane, float volume) = 0;
+
+    // Media volume multiplier applied while navigation / telephony prompts are active
+    virtual void SetDuckingRatio(float ratio) = 0;
 
     // Stop/flush active audio for a specific lane
     virtual void StopLane(AudioLane lane) = 0;

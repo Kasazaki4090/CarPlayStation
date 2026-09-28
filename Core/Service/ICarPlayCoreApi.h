@@ -14,11 +14,12 @@ class ICarPlayCoreApi {
 public:
     virtual ~ICarPlayCoreApi() = default;
 
-    // Initialize all core subsystems with full dynamic configuration
-    [[nodiscard]] virtual Common::Status Initialize(const Common::CarPlayStationConfig& config) = 0;
+    // Initialize all core subsystems (device identity + network endpoints only).
+    // Media parameters are negotiated per session and flow through the session, not here.
+    [[nodiscard]] virtual Common::Status Initialize(const Common::CoreEnvironmentConfig& env) = 0;
 
-    // Dynamically update runtime configuration
-    [[nodiscard]] virtual Common::Status UpdateConfig(const Common::CarPlayStationConfig& config) = 0;
+    // Hot-update runtime environment configuration (e.g. MFi daemon endpoint, SoftAP identity)
+    [[nodiscard]] virtual Common::Status UpdateEnvironment(const Common::CoreEnvironmentConfig& env) = 0;
 
     // Start CarPlay advertising and discovery
     [[nodiscard]] virtual Common::Status Start() = 0;

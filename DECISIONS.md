@@ -433,3 +433,63 @@ Positive:
 * `ARCHITECTURE.md`
 * `TODO.md`
 
+
+## DEC-004 — Configuration Layering: Core Gets Facts, Application Owns Preferences
+
+**Status:** `Accepted`
+
+**Date:** 2026-09-28
+
+### Context
+
+After the initial C++ skeleton and the "fully configurable" pass (recorded in `result.md`, record 2), user-tunable knobs had leaked into Core:
+
+* `Core/Common/Config.h::VideoConfig` mixed UI concepts (`WindowDisplayMode`, resolution presets, codec `"Auto"` preference) with concrete stream parameters.
+* `AudioConfig` mixed the negotiated output format (sample rate / channels / bit depth) with runtime controls (per-lane volumes, ducking ratio) and an advisory bitrate request.
+* `ICarPlaySession::Start(config)` / `UpdateConfig(config)` accepted a monolithic config blob even though session media parameters are negotiated with the iPhone at runtime, not user-configured.
+
+The low-level layer should only consume facts (negotiated protocol values and environment endpoints), while everything mutable by the user belongs to the Application/UI boundary.
+
+### Decision
+
+1. **Core configuration is split into narrow, fact-only structs** (`Core/Common/Config.h`):
+   * `VideoStreamSpec` — concrete negotiated codec (`H264` / `HEVC`, no `"Auto"`), width, height, fps.
+   * `AudioOutputFormat` — concrete sample rate, channels, bit depth (no volumes, no bitrate).
+   * `DeviceIdentity` — device name / manufacturer / model advertised in the handshake.
+   * `NetworkEndpoints` — MFi daemon endpoint, RTSP bind address and ports, AirPlay audio/video ports, SoftAP SSID/password/gateway, hardware-MFi flag. Consumed by Transport/Hardware only.
+   * `CoreEnvironmentConfig` = `DeviceIdentity` + `NetworkEndpoints`. This is the only config Core accepts at init/update.
+
+2. **User preferences live in the Application layer** (`Application/AppSettings.h`):
+   * `VideoPreferences` — resolution preset (incl. `Auto`/`Custom`), codec preference (incl. `Auto`), fps, `WindowDisplayMode`.
+   * `AudioPreferences` — preferred sample rate, advisory bitrate request, per-lane volumes, ducking ratio.
+   * `DevicePreferences` — user-editable identity strings.
+
+3. **Resolution happens at the boundary**: the Application layer translates preferences into concrete Core parameters (e.g. preset → width/height, codec preference + negotiation result → final codec) before calling into Core. Core never sees presets, `"Auto"` values, or window modes.
+
+4. **Interface changes:**
+   * `IVideoDecoder::Init / Reconfigure` take `VideoStreamSpec`.
+   * `IAudioPipeline::Start / Reconfigure` take `AudioOutputFormat`; volume and ducking become explicit runtime controls (`SetLaneVolume`, new `SetDuckingRatio`).
+   * `ICarPlaySession::Start()` takes no config; media parameters flow from negotiation. `UpdateConfig` removed.
+   * `ICarPlayCoreApi::Initialize / UpdateEnvironment` take `CoreEnvironmentConfig`.
+   * `IApplicationApi::StartCarPlay / ApplySettings` take `AppSettings`; `AppUiState.active_settings` is an `AppSettings` snapshot, and width/height fields report the actual negotiated resolution.
+
+### Alternatives
+
+* Keep one monolithic config struct everywhere — rejected: forces every Core subsystem to depend on knobs it does not use and lets UI concepts (window mode) reach the low level.
+* Put preferences in a separate `Core/Common` header but still pass them through session/decoder interfaces — rejected: interface signatures would still leak mutability into Core; the resolution step must be explicit at the boundary.
+
+### Reason
+
+Negotiated media parameters are protocol facts that change with each handshake, and network endpoints are environment facts that can change while running. Both are legitimately "mutable" inside Core but for different reasons than user preferences. Presets, `"Auto"` modes, window display mode, volumes and ducking ratios have no place in protocol or codec code: they exist to be edited by the user at runtime.
+
+### Consequences
+
+* Core interfaces now accept only concrete facts; adding a new UI knob cannot force changes into Core as long as it resolves to an existing fact.
+* The Application layer owns one explicit resolution step (preferences → concrete parameters), making negotiation and preference logic testable in isolation.
+* Per-lane volume / ducking became first-class audio pipeline controls instead of fields in a config blob, matching how they are actually used at runtime.
+
+### Related
+
+* `ARCHITECTURE.md`
+* `result.md` (record 3)
+* `Core/Common/Config.h`, `Application/AppSettings.h`

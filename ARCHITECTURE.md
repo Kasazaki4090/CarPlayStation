@@ -185,3 +185,15 @@ This correction only documents the layer DEC-002 already requires. It does not c
 ### 2026-09-28 — Mouse/Keyboard UI targets annotated
 
 The UI "Initial target" list kept Mouse and Keyboard but annotated them as unconfirmed in the CarPlay protocol, matching the note added to `PROJECT.md` and the research task in `TODO.md`. No goal was removed.
+
+## Configuration Layering (2026-09-28, DEC-004)
+
+Configuration is split by ownership, per `DECISIONS.md` DEC-004:
+
+* **Core** (`Core/Common/Config.h`) accepts only facts:
+  * `VideoStreamSpec` — negotiated codec / width / height / fps (concrete values, no `"Auto"`).
+  * `AudioOutputFormat` — sample rate / channels / bit depth.
+  * `DeviceIdentity` + `NetworkEndpoints`, combined as `CoreEnvironmentConfig`.
+* **Application** (`Application/AppSettings.h`) owns all user-tunable preferences: resolution presets, codec preference, window display mode, preferred sample rate, bitrate request, per-lane volumes and ducking ratio, device identity strings.
+
+The Application layer resolves preferences into concrete Core parameters at the boundary (e.g. `Auto` preset → actual dimensions). Runtime controls such as lane volume and ducking ratio are exposed directly on `IAudioPipeline` (`SetLaneVolume`, `SetDuckingRatio`) instead of living in a config blob.

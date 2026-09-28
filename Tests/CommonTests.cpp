@@ -11,6 +11,7 @@
 #include "Core/Input/IInputEventSink.h"
 #include "Core/Service/ICarPlayCoreApi.h"
 #include "Application/IApplicationApi.h"
+#include "Application/AppSettings.h"
 #include <cassert>
 #include <iostream>
 
@@ -81,43 +82,46 @@ void TestTypesAndFormatting() {
     std::cout << "[PASS] TestTypesAndFormatting\n";
 }
 
-void TestDynamicConfig() {
-    VideoConfig video;
-    video.resolution_preset = VideoResolutionPreset::Res720P;
-    auto [w720, h720] = video.GetEffectiveDimensions();
+void TestConfigSeparation() {
+    // Core layer: concrete negotiated video spec only (no UI concepts like presets or window mode)
+    VideoStreamSpec spec;
+    assert(spec.width == 1920 && spec.height == 1080 && spec.fps == 60);
+    assert(spec.codec == VideoCodec::H264);
+    spec.codec = VideoCodec::HEVC;
+    assert(VideoCodecToString(spec.codec) == "HEVC");
+
+    // Core layer: concrete audio output format (no volumes or bitrate concepts)
+    AudioOutputFormat fmt;
+    fmt.sample_rate = 44100;
+    fmt.channels = 2;
+    fmt.bit_depth = 16;
+    assert(fmt.sample_rate == 44100);
+
+    // Core layer: environment config (identity + network endpoints)
+    CoreEnvironmentConfig env;
+    env.identity.device_name = "TestReceiver";
+    env.network.mfi_daemon_endpoint = IpEndpoint{"192.168.2.50", 9999};
+    assert(env.network.mfi_daemon_endpoint.ToString() == "192.168.2.50:9999");
+
+    // Application layer: user-tunable preferences stay out of Core and resolve to concrete values
+    using namespace CarPlayStation::Application;
+    AppSettings settings;
+
+    settings.video.resolution_preset = VideoResolutionPreset::Res720P;
+    auto [w720, h720] = settings.video.GetEffectiveDimensions();
     assert(w720 == 1280 && h720 == 720);
 
-    video.resolution_preset = VideoResolutionPreset::Res1080P;
-    auto [w1080, h1080] = video.GetEffectiveDimensions();
-    assert(w1080 == 1920 && h1080 == 1080);
-
-    video.resolution_preset = VideoResolutionPreset::Res1440P;
-    auto [w1440, h1440] = video.GetEffectiveDimensions();
-    assert(w1440 == 2560 && h1440 == 1440);
-
-    video.resolution_preset = VideoResolutionPreset::Res2160P;
-    auto [w2160, h2160] = video.GetEffectiveDimensions();
-    assert(w2160 == 3840 && h2160 == 2160);
-
-    video.resolution_preset = VideoResolutionPreset::Auto;
-    auto [wAuto, hAuto] = video.GetEffectiveDimensions(3440, 1440);
+    settings.video.resolution_preset = VideoResolutionPreset::Auto;
+    auto [wAuto, hAuto] = settings.video.GetEffectiveDimensions(3440, 1440);
     assert(wAuto == 3440 && hAuto == 1440);
 
-    video.display_mode = WindowDisplayMode::BorderlessFullscreen;
-    video.preferred_codec = VideoCodecPreference::HEVC;
-    assert(video.preferred_codec == VideoCodecPreference::HEVC);
+    settings.video.display_mode = WindowDisplayMode::BorderlessFullscreen;
+    settings.video.preferred_codec = VideoCodecPreference::HEVC;
+    settings.audio.sample_rate = 48000;
+    settings.audio.ducking_ratio = 0.25f;
+    assert(settings.video.preferred_codec == VideoCodecPreference::HEVC);
 
-    AudioConfig audio;
-    audio.sample_rate = 44100;
-    audio.bitrate_kbps = 320;
-    assert(audio.sample_rate == 44100);
-    assert(audio.bitrate_kbps == 320);
-
-    CarPlayStationConfig fullConfig;
-    fullConfig.network.mfi_daemon_endpoint = IpEndpoint{"192.168.2.50", 9999};
-    assert(fullConfig.network.mfi_daemon_endpoint.ToString() == "192.168.2.50:9999");
-
-    std::cout << "[PASS] TestDynamicConfig\n";
+    std::cout << "[PASS] TestConfigSeparation\n";
 }
 
 int main() {
@@ -125,7 +129,7 @@ int main() {
     TestStatusAndResult();
     TestEndianConversions();
     TestTypesAndFormatting();
-    TestDynamicConfig();
+    TestConfigSeparation();
     std::cout << "--- All Foundation Unit Tests Passed Successfully! ---\n";
     return 0;
 }

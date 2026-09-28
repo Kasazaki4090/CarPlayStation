@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Core/Common/Result.h"
-#include "Core/Common/Config.h"
+#include "AppSettings.h"
 #include "Core/Session/ICarPlaySession.h"
 #include "Core/Media/IVideoDecoder.h"
 #include "Core/Input/IInputEventSink.h"
@@ -15,10 +15,10 @@ struct AppUiState {
     Core::Session::SessionState session_state{Core::Session::SessionState::Idle};
     std::string connected_device_name;
     bool is_streaming{false};
-    uint32_t current_video_width{1920};
-    uint32_t current_video_height{1080};
+    uint32_t current_video_width{1920};   // Runtime fact: actual negotiated resolution
+    uint32_t current_video_height{1080};  // Runtime fact: actual negotiated resolution
     std::string status_message;
-    Core::Common::CarPlayStationConfig active_config;
+    AppSettings active_settings;          // Snapshot of last-applied user settings
 };
 
 using UiStateChangeCallback = std::function<void(const AppUiState& state)>;
@@ -27,11 +27,11 @@ class IApplicationApi {
 public:
     virtual ~IApplicationApi() = default;
 
-    // Start CarPlay engine with target settings
-    [[nodiscard]] virtual Core::Common::Status StartCarPlay(const Core::Common::CarPlayStationConfig& config) = 0;
+    // Start CarPlay engine with target user preferences (resolved to Core parameters internally)
+    [[nodiscard]] virtual Core::Common::Status StartCarPlay(const AppSettings& settings) = 0;
 
-    // Dynamically adjust user settings during runtime (e.g. 720p/1080p/4k, Fullscreen/Windowed, 44.1/48k, IP endpoints)
-    [[nodiscard]] virtual Core::Common::Status ApplySettings(const Core::Common::CarPlayStationConfig& newConfig) = 0;
+    // Dynamically adjust user preferences during runtime (e.g. 720p/1080p/4k, Fullscreen/Windowed, volumes, endpoints)
+    [[nodiscard]] virtual Core::Common::Status ApplySettings(const AppSettings& newSettings) = 0;
 
     // Stop CarPlay session
     virtual void StopCarPlay() = 0;

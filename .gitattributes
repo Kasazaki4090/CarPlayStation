@@ -1,0 +1,12 @@
+# Normalize all text files to LF in the repository.
+# Git will convert back to CRLF on Windows checkout only if you add "*.crlf" rules;
+# by default this makes working-tree and committed EOL consistent (LF everywhere).
+* text=auto eol=lf
+
+# Explicitly mark known binary types so git never touches them
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.zip binary
+*.7z binary

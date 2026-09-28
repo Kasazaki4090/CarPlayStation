@@ -4,6 +4,37 @@
 
 ---
 
+### 记录 3：配置分层重构 — Core 只收事实，用户可调项归 Application（DEC-004）
+
+* **时间**：`2026-09-28 (UTC+8)`
+* **客户端（Agent）**：`GitHub Copilot`
+* **背景与动机**：记录 2 的"全可配置化"把大量用户可调项（分辨率预设、窗口模式、编解码 Auto 偏好、音量、Ducking、码率请求）和会随环境变动的网络端点混进了同一个 `Config.h`，并通过 `ICarPlaySession::Start(config)` / `UpdateConfig(config)` 这样的单体配置块一路灌进底层。问题：
+  * 底层（会话/解码器/音频管道）被迫依赖它根本不使用的旋钮；
+  * 窗口显示模式这种纯 UI 概念泄漏到了 Core；
+  * 媒体参数实际是每次握手与 iPhone **协商**出来的协议事实，不是用户配置，却伪装成了 config；
+  * 音量/Ducking 本质是运行时控制，塞在配置结构体里语义错位。
+* **做了什么**：
+  1. **Core 配置拆成窄的"事实型"结构体（`Core/Common/Config.h`）**：
+     - `VideoStreamSpec`：协商确定的编解码器（`H264`/`HEVC`，无 Auto）、宽高、fps；
+     - `AudioOutputFormat`：采样率 / 声道数 / 位深（不含音量与码率）；
+     - `DeviceIdentity`：握手广播的设备名 / 厂商 / 型号；
+     - `NetworkEndpoints`：MFi daemon 端点、RTSP 绑定地址/端口、AirPlay 音视频端口、SoftAP SSID/密码/网关、硬件 MFi 开关 —— 网络配置保留在 Core，但作为**环境事实**只被 Transport/Hardware 消费；
+     - `CoreEnvironmentConfig` = Identity + Endpoints，是 Core 初始化时接受的唯一配置。
+     - 删除了旧 `VideoConfig` / `AudioConfig` / `NetworkConfig` / `CarPlayStationConfig` 单体结构体。
+  2. **新增 Application 层用户偏好头（`Application/AppSettings.h`）**：`VideoPreferences`（预设含 Auto/Custom、编解码偏好含 Auto、fps、窗口模式）、`AudioPreferences`（首选采样率、码率请求、三路音量、Ducking 比率）、`DevicePreferences`，组合为 `AppSettings`。所有"一直能变动"的用户项都在这里。
+  3. **边界处显式解析**：Application 层负责把偏好换算成具体参数（预设 → 实际宽高；编解码偏好 + 协商结果 → 最终编解码器），Core 永远看不到预设、Auto 或窗口模式。
+  4. **接口收敛**：
+     - `IVideoDecoder::Init/Reconfigure` 改收 `VideoStreamSpec`；
+     - `IAudioPipeline::Start/Reconfigure` 改收 `AudioOutputFormat`，新增 `SetDuckingRatio()`，与已有 `SetLaneVolume()` 一起成为一等运行时控制；
+     - `ICarPlaySession::Start()` 不再接收任何配置（媒体参数走协商），删除 `UpdateConfig()`；
+     - `ICarPlayCoreApi::Initialize/UpdateEnvironment` 改收 `CoreEnvironmentConfig`；
+     - `IApplicationApi::StartCarPlay/ApplySettings` 改收 `AppSettings`，`AppUiState.active_settings` 存偏好快照，宽高字段改为上报实际协商分辨率。
+  5. **测试更新**：`Tests/CommonTests.cpp` 的 `TestDynamicConfig` 改写为 `TestConfigSeparation`，分别验证 Core 事实型结构体与 Application 偏好的解析换算。
+  6. **决策与文档**：在 `DECISIONS.md` 新增 **DEC-004 — Configuration Layering: Core Gets Facts, Application Owns Preferences**（含备选方案与后果分析）；`ARCHITECTURE.md` 增加 "Configuration Layering" 小节说明配置归属。
+* **效果**：以后新增任何 UI 旋钮，只要它能解析成已有事实参数，就不会再迫使 Core 接口变动；Core 接口的每个入参都是具体的协议/环境事实，"可变性"被明确地留在 Application/UI 一侧。
+
+---
+
 ### 记录 2：视频/音频/窗口模式/网络端点可配置化与动态调节支持
 
 * **时间**：`2026-09-28 17:23:00 (UTC+8)`
