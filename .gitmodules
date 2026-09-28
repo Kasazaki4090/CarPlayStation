@@ -1,0 +1,6 @@
+[submodule "Reference/xcertplay"]
+	path = Reference/xcertplay
+	url = https://github.com/shilapi/xcertplay/
+[submodule "Reference/carplayd"]
+	path = Reference/carplayd
+	url = https://github.com/lvalen91/carplayd
