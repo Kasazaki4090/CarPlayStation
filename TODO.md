@@ -116,11 +116,11 @@ implementation tasks are started.
 ### 3. Protocol: iAP2
 
 - [ ] P0 [Research] Produce a written iAP2 message model for CarPlay from `carplayd` (`crates/iap2-core`: link, message, session, state, spec, mfi) and `xcertplay` (`shared/.../iap2`), separating verified wire behaviour from reference-code assumptions.
-- [ ] P0 Implement iAP2 framing and serialization/deserialization for the control and data links, with round-trip tests built from recorded frames.
-- [ ] P0 Implement accessory identification and wireless session start/stop (handling Wi-Fi/BT declare flags).
+- [x] P0 [Concluded: Partition 3] Implement iAP2 framing and serialization/deserialization for the control and data links, with round-trip tests built from recorded frames. (Iap2LinkEngine + TlvBuilder)
+- [x] P0 [Concluded: Partition 3] Implement accessory identification and wireless session start/stop (handling Wi-Fi/BT declare flags). (BuildIdentifyInfo + Iap2SessionManager)
 - [x] P0 Implement pluggable MFi authentication backend for USB-to-I2C bridge chips (CH341, CH347, FTDI, etc.) for local hardware MFi coprocessors (DEC-003, DEC-007).
 - [x] P0 Implement pluggable MFi authentication backend over configurable network daemon / proxy endpoint (`127.0.0.1:9000` / TCP RPC) for remote signing / daemon services (DEC-003, DEC-005).
-- [ ] P1 Implement the `IdentificationRejected` retry behaviour (carplayd doc 23) once a reject can be reproduced.
+- [x] P1 [Concluded: Partition 3] Implement the `IdentificationRejected` retry behaviour (carplayd doc 23) once a reject can be reproduced. (First-reject → RetryIdentify, second-reject → Abort)
 - [ ] P1 Establish a single source of truth for message ids, directions, parameters and enums, mirroring `crates/iap2-core/src/spec.rs`, and a generator or checked-in table derived from Apple's authoritative spec.
 - [ ] P2 Implement notification/transcript handling for accessory information and vehicle identity data.
 

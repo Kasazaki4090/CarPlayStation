@@ -45,3 +45,20 @@ target_link_libraries(CarPlayStation_TransportTests PRIVATE
 target_compile_features(CarPlayStation_TransportTests PRIVATE cxx_std_20)
 
 add_test(NAME TransportTests COMMAND CarPlayStation_TransportTests)
+
+# Protocol layer tests (iAP2 framing, TLV catalog, session state machine)
+add_executable(CarPlayStation_ProtocolTests
+    ProtocolTests.cpp
+)
+
+target_include_directories(CarPlayStation_ProtocolTests PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_link_libraries(CarPlayStation_ProtocolTests PRIVATE
+    CarPlayCore
+)
+
+target_compile_features(CarPlayStation_ProtocolTests PRIVATE cxx_std_20)
+
+add_test(NAME ProtocolTests COMMAND CarPlayStation_ProtocolTests)

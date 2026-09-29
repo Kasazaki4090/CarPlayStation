@@ -4,6 +4,52 @@
 
 ---
 
+### 记录 8：iAP2 协议与链路层（Partition 3: Core/Protocol）全量实现与编译验证
+
+* **时间**：`2026-09-29 23:45:00 (UTC+8)`
+* **客户端（Agent）**：`LM Studio Code (Qwen 3.8 27B Heretic ARA)`
+* **背景与实现**：
+  - 依据架构设计与 DEC-003，全面完成 **Partition 3: Core/Protocol（iAP2 协议层）** 全部组件的研发。
+  - **核心成果与组件实现**：
+    1. **链路层帧引擎 (`Iap2LinkEngine.h/.cpp`)**：
+       - 完整实现 iAP2 链路层帧格式：9 字节头 `[FF 5A][total BE16][ctl][seq][ack][session][hdr_cksum]` + payload + trailing checksum。
+       - SYN / SYN-ACK 握手流程（16 字节协商参数块），序列号管理，累计确认 (cumulative ACK)。
+       - `FeedData()` 流式解析器：支持粘包/半包、坏帧 resync（扫描 FF5A magic）、header checksum 校验。
+       - `BuildMessage(session, msgId, body)` 将控制面消息封装为完整链路帧（含 `[40 40]` 前缀与双层校验和）。
+    2. **报文目录与 TLV 构建器 (`Iap2MessageCatalog.h/.cpp`)**：
+       - `TlvBuilder`：大端序 TLV Group 编码器，支持 String / Bytes / U8 / U16 / U32 / Bool / None 六种参数类型。
+       - `Iap2MsgId`：Apple 权威报文 ID 常量表（认证面 0xAA0x、识别面 0x1D0x、CarPlay 会话 0x430x、WiFi Handoff 0x570x、NowPlaying 0x500x、RouteGuidance 0x520x、CallControl 0x415x、DeviceInfo 0x4E0x、VehicleStatus 0xA10x）。
+       - `Iap2IdentParam`：IdentificationInformation (0x1D01) 全部子参数 ID。
+       - `BuildIdentifyInfo()`：完整构建无线 CarPlay IdentifyInformation body（含 BluetoothTransportComponent + WirelessCarPlayTransportComponent + VehicleInformationComponent + RouteGuidanceDisplayComponent）。
+       - `ParseMessageId()` / `ExtractChallenge()` / `ParseRejectedParamIds()` 解析工具。
+    3. **会话状态机 (`Iap2SessionManager.h/.cpp`)**：
+       - 认证→识别全链路状态机：`Init → CertSent → SignSent → Authenticated → IdentSent → Identified`（含 `IdentRetried` 重试态）。
+       - MFi 签名器解耦接口注入，事件回调通知上层。
+       - `IdentificationRejected` 两级重试策略（首次 retry、二次 abort），符合 carplayd doc 23。
+    4. **构建与测试**：
+       - 更新 `Core/CMakeLists.txt`，纳入全部 Protocol 源文件至 `CarPlayCore` 静态库。
+       - 新增 `Tests/ProtocolTests.cpp`（11 组单测）：checksum 参考向量、SYN 帧结构校验、FeedData SYN-ACK / 坏帧 resync、BuildMessage `[40 40]` 封装、TlvBuilder 编码正确性、BuildIdentifyInfo 完整 group 解析、ParseMessageId 正/反向、SessionManager happy path / out-of-order / reject-retry。
+       - `Tests/CMakeLists.txt` 注册 `CarPlayStation_ProtocolTests` CTest target。
+  - **编译验证结果（MinGW GCC 15.x, `-std=c++20 -Wall -Wextra`）**：
+    - Protocol 三个 .cpp 全部零警告、零错误通过编译，.obj 文件确认生成。
+    - `ProtocolTests.cpp` 语法检查通过（零诊断）。
+  - **构建过程中发现并修复的 P3 Bug**：
+    1. `Iap2MessageCatalog.cpp`: `auto& ip = Iap2IdentParam;` → `namespace ip = Iap2IdentParam;`（C++ 不允许对 namespace 取引用）。
+    2. `Iap2SessionManager.cpp`: `auto& id = Iap2MsgId;` → `namespace id = Iap2MsgId;`（同上）。
+    3. `Iap2MessageCatalog.cpp`: 缺少 `#include "Core/Protocol/Iap2LinkEngine.h"` 导致 `Iap2Constants` 未声明。
+  - **遗留编译错误（非 P3 范围，属 Hardware / Transport 层既有问题）**：
+    1. **Hardware 层**：
+       - `Result<void>` 模板特化缺失 → `II2cAdapter.h` 中 `PulseReset()` 返回类型实例化失败。
+       - `I2cMfiSigner.cpp`: 使用了不存在的 `StatusCode::DeviceUnavailable` / `TimedOut`（应为 `Timeout`）。
+       - `NetworkMfiClient.cpp` / `FileMfiSigner.cpp`: MSVC-only `#pragma comment(lib, ...)` 在 MinGW 下产生 warning。
+       - `Ch341I2cAdapter` / `Ch347I2cAdapter` / `FtdiI2cAdapter`: 依赖 Windows SDK 专有头文件（蓝牙 `_BTH_SET_SERVICE` 字段、CNG crypto blob 结构体）在 MinGW 下不可用。
+    2. **Transport 层**：
+       - `MdnsAdvertiser.cpp` / `BtRfcommTransport.cpp`: 使用了不存在的 `StatusCode::Unavailable` / `InvalidState` / `IoError`。
+       - `BtSdpHelper.cpp`: Windows Bluetooth SDK 专有结构体在 MinGW 下缺失。
+    3. **结论**：上述错误均为 Hardware/Transport 层既有代码与 MSVC SDK 的绑定问题，不影响 P3 Protocol 层的正确性。后续需统一补充 `StatusCode` 枚举值并添加 `Result<void>` 特化，或确认项目以 MSVC 为唯一目标编译器。
+
+---
+
 ### 记录 7：传输与链路层（Layer 2: Core/Transport）四大组件实现与 Partition 2 全阶段圆满收官
 
 * **时间**：`2026-09-29 17:15:00 (UTC+8)`

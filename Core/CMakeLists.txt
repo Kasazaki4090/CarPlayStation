@@ -12,6 +12,9 @@ add_library(CarPlayCore STATIC
     Transport/WifiSoftApManager.cpp
     Transport/MdnsPacketBuilder.cpp
     Transport/MdnsAdvertiser.cpp
+    Protocol/Iap2LinkEngine.cpp
+    Protocol/Iap2MessageCatalog.cpp
+    Protocol/Iap2SessionManager.cpp
 )
 
 target_include_directories(CarPlayCore PUBLIC
