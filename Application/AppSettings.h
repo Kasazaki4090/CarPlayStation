@@ -76,15 +76,44 @@ struct DevicePreferences {
     std::string model{"CarPlayStationWin"};
 };
 
-// MFi authentication backend selection (DEC-003: pluggable backends).
+// MFi authentication backend selection (DEC-003, DEC-006: pluggable backends).
 // The Application layer constructs the matching Core::Hardware::IMfiSigner
-// implementation from these settings — Core never hardcodes a daemon address.
-struct MFiPreferences {
-    // true  = local USB-to-I2C bridge chip (CH341 or equivalent) driving an MFi coprocessor directly;
-    // false = network signing daemon over TCP at `daemon_endpoint`.
-    bool use_hardware_backend{false};
+// implementation from these settings — Core never hardcodes a daemon address or file path.
+enum class MFiBackendType : uint8_t {
+    LocalFile = 0,     // Pure offline software signer using imported cert & private key (DEC-006)
+    NetworkDaemon = 1, // Remote/Local TCP daemon at daemon_endpoint (DEC-003)
+    HardwareI2C = 2    // Physical USB-to-I2C bridge (CH341) driving an MFi coprocessor (DEC-003)
+};
 
-    Core::Common::IpEndpoint daemon_endpoint{"127.0.0.1", 9000}; // Network backend endpoint (default per DEC-003)
+enum class HardwareI2cDriverType : uint8_t {
+    Auto = 0,    // Probe available drivers in order: CH341 -> CH347 -> FTDI
+    CH341 = 1,   // WCH CH341 USB-to-I2C (CH341DLL.DLL)
+    CH347 = 2,   // WCH CH347 High-Speed USB-to-I2C (CH347DLL.DLL)
+    FTDI = 3,    // FTDI MPSSE (libMPSSE / ftd2xx.dll)
+    Mock = 4     // In-memory mock adapter for offline testing
+};
+
+struct HardwareI2cPreferences {
+    HardwareI2cDriverType driver_type{HardwareI2cDriverType::Auto};
+    uint32_t device_index{0};
+    uint8_t slave_address{0x10}; // 7-bit I2C address of MFi coprocessor (0x10 or 0x11)
+    uint32_t speed_khz{100};     // Bus clock speed in kHz (e.g. 100 or 400)
+    bool pulse_reset_on_init{true};
+    uint8_t reset_gpio_pin{0};   // Reset pin index on bridge chip (e.g. D0 on CH341)
+};
+
+struct MFiPreferences {
+    MFiBackendType backend_type{MFiBackendType::LocalFile};
+
+    // For LocalFile backend (DEC-006):
+    std::string certificate_path{"certs/certificate.p7b"};
+    std::string private_key_path{"certs/identity.pk8"};
+
+    // For NetworkDaemon backend (DEC-003):
+    Core::Common::IpEndpoint daemon_endpoint{"127.0.0.1", 9000};
+
+    // For HardwareI2C backend (DEC-003, DEC-007):
+    HardwareI2cPreferences hardware_i2c{};
 };
 
 // Full user-facing settings container, editable at runtime via IApplicationApi.

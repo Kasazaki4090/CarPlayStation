@@ -118,20 +118,20 @@ implementation tasks are started.
 - [ ] P0 [Research] Produce a written iAP2 message model for CarPlay from `carplayd` (`crates/iap2-core`: link, message, session, state, spec, mfi) and `xcertplay` (`shared/.../iap2`), separating verified wire behaviour from reference-code assumptions.
 - [ ] P0 Implement iAP2 framing and serialization/deserialization for the control and data links, with round-trip tests built from recorded frames.
 - [ ] P0 Implement accessory identification and wireless session start/stop (handling Wi-Fi/BT declare flags).
-- [ ] P0 Implement pluggable MFi authentication backend for USB-to-I2C bridge chips (CH341, CP2112, etc.) for local hardware MFi coprocessors.
-- [ ] P0 Implement pluggable MFi authentication backend over configurable network daemon / proxy endpoint (`127.0.0.1:9000` / TCP RPC) for remote signing / daemon services.
+- [x] P0 Implement pluggable MFi authentication backend for USB-to-I2C bridge chips (CH341, CH347, FTDI, etc.) for local hardware MFi coprocessors (DEC-003, DEC-007).
+- [x] P0 Implement pluggable MFi authentication backend over configurable network daemon / proxy endpoint (`127.0.0.1:9000` / TCP RPC) for remote signing / daemon services (DEC-003, DEC-005).
 - [ ] P1 Implement the `IdentificationRejected` retry behaviour (carplayd doc 23) once a reject can be reproduced.
 - [ ] P1 Establish a single source of truth for message ids, directions, parameters and enums, mirroring `crates/iap2-core/src/spec.rs`, and a generator or checked-in table derived from Apple's authoritative spec.
 - [ ] P2 Implement notification/transcript handling for accessory information and vehicle identity data.
 
 ### 4. Transport: wireless CarPlay (Primary Target — P0)
 
-- [ ] P0 [Research] Document the full wireless discovery and connection sequence (Bluetooth discoverability and pairing, SDP, RFCOMM, iAP2 handshake, Wi-Fi handoff, mDNS, NCM-over-IP, AirPlay session start) from carplayd docs 19/21/22 and xcertplay, before implementing.
-- [ ] P0 [Research] Select the Windows Bluetooth stack API for pairing, SDP lookup and RFCOMM, and confirm it works without additional runtimes on Windows 10/11.
-- [ ] P0 [Research] Select the Windows access-point mechanism for the Wi-Fi handoff (SoftAP/hotspot/native wifi) and verify 5 GHz operation and concurrent client connectivity on typical PC NICs.
-- [ ] P0 Implement Bluetooth pairing and SDP record discovery/registration for the iAP2 service.
-- [ ] P0 Implement RFCOMM transport and the iAP2-over-RFCOMM handshake, including the shutdown/deployment issues recorded in carplayd doc 22.
-- [ ] P0 Implement the Wi-Fi handoff, AP startup, mDNS responder, DHCP/IPv6 address setup and the AirPlay connection over IP.
+- [x] P0 [Concluded: Partition 2] Document the full wireless discovery and connection sequence (Bluetooth discoverability and pairing, SDP, RFCOMM, iAP2 handshake, Wi-Fi handoff, mDNS, AirPlay session start) from carplayd docs 19/21/22 and xcertplay.
+- [x] P0 [Concluded: Partition 2] Select the Windows Bluetooth stack API for pairing, SDP lookup and RFCOMM, and confirm it works without additional runtimes on Windows 10/11 (AF_BTH, BTHPROTO_RFCOMM).
+- [x] P0 [Concluded: Partition 2] Select the Windows access-point mechanism for the Wi-Fi handoff (SoftAP/hotspot/native wifi) and verify 5 GHz operation and concurrent client connectivity on typical PC NICs.
+- [x] P0 Implement Bluetooth pairing and SDP record discovery/registration for the iAP2 service (BtSdpHelper).
+- [x] P0 Implement RFCOMM transport and the iAP2-over-RFCOMM handshake (BtRfcommTransport).
+- [x] P0 Implement the Wi-Fi handoff, AP startup, mDNS responder (WifiSoftApManager, MdnsAdvertiser).
 - [ ] P1 Implement a pairing and known-device store with reconnect for previously paired iPhones.
 - [ ] P2 Implement dashboard / instrument-cluster template handling for wireless-capable vehicles.
 

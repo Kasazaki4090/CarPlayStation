@@ -4,12 +4,21 @@
 This module is located at the lowest layer of Core (Layer 1). It directly interfaces with physical hardware, peripheral driver chips, and background service daemons to provide raw I/O channels and hardware abstractions for upper layers (`Transport` and `Protocol`).
 
 ### Core Subcomponents
-- **MFi Hardware I2C Bridge (`MfiHardwareBridge`)**:
-  - Supports USB-to-I2C driver interfaces for chips such as WCH CH341, Silicon Labs CP2112, FTDI FT232H, etc.
-  - Handles I2C read/write transactions, device addressing (0x22/0x20), and bus timing with an onboard/external Apple MFi authentication coprocessor (CP3.0 / 2.0C).
-- **MFi Network Daemon Client (`MfiNetworkClient`)**:
-  - Configurable TCP/RPC client supporting arbitrary proxy endpoints (host:port or URI, e.g. configurable via `MfiDaemonEndpoint` with default `127.0.0.1:9000`).
-  - Dispatches MFi challenges (Challenge / Digest) to a remote/local signing daemon service and retrieves certificates and cryptographic signatures.
+- **Universal I2C Bus Abstraction (`II2cAdapter`)**:
+  - Pure virtual interface (`Core/Hardware/II2cAdapter.h`) abstracting physical I2C read/write/transaction and GPIO reset pulse operations.
+  - Implementations:
+    - `Ch341I2cAdapter`: Dynamically binds to `CH341DLL.DLL` (with `Ch341Protocol.h` stream frame encoder).
+    - `Ch347I2cAdapter`: Dynamically binds to `CH347DLL.DLL` for high-speed 480Mbps hardware I2C engine.
+    - `FtdiI2cAdapter`: Dynamically binds to `libMPSSE.dll` / `ftd2xx.dll` for FT232H / FT2232H MPSSE I2C.
+    - `MockI2cAdapter`: Pure in-memory virtual MFi coprocessor simulation for 100% deterministic unit testing.
+- **Universal Hardware MFi Signer (`I2cMfiSigner`)**:
+  - Implements `IMfiSigner` by driving an Apple MFi authentication coprocessor (CP 2.0C / 3.0) over any `II2cAdapter`.
+  - Encapsulates register interaction (0x02, 0x05, 0x10, 0x11, 0x12, 0x20, 0x21, 0x30, 0x31..), windowed certificate retrieval, challenge signing, and exponential retry recovery.
+- **Local File MFi Signer (`FileMfiSigner`)**:
+  - Pure offline software signer (DEC-006) loading external X.509/PKCS#7 certificate and PKCS#8 private key, computing ECDSA P-256 signatures via native Windows CNG (`bcrypt.dll`).
+- **MFi Network Daemon Client (`NetworkMfiClient`)**:
+  - Configurable TCP client connecting to a remote/local MFi signing daemon/proxy address (configured and injected by the Application layer via `Application::MFiPreferences::daemon_endpoint`; Core/Lib does not hardcode daemon addresses).
+  - Dispatches MFi challenges (Challenge / Digest) to the signing daemon service and retrieves certificates and cryptographic signatures.
 - **Radio & Adapter Helpers (`RadioAdapterHelper`)**:
   - Windows Bluetooth Radio status inquiry and power state queries.
   - Wi-Fi adapter HostedNetwork / SoftAP capability detection and 5GHz band support checks.

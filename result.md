@@ -4,6 +4,100 @@
 
 ---
 
+### 记录 7：传输与链路层（Layer 2: Core/Transport）四大组件实现与 Partition 2 全阶段圆满收官
+
+* **时间**：`2026-09-29 17:15:00 (UTC+8)`
+* **客户端（Agent）**：`Google Antigravity (Gemini 3.8 Flash)`
+* **背景与实现**：
+  - 依据架构设计与 DEC-003（无线 CarPlay 为核心 P0），全面完成 **Layer 2: Core/Transport（传输与链路层）** 全部 4 个步骤的研发。
+  - **核心成果与组件实现**：
+    1. **Step 1 (传输抽象与双向对测仿真通道)**：
+       - 增强 [`Core/Transport/ITransportChannel.h`](file:///d:/CarPlayStation/Core/Transport/ITransportChannel.h)：扩充 `TransportStats` 吞吐统计、`GetMtu()`（协商 MTU）、`GetRemoteEndpoint()` 与 `IsConnected()` 状态查询。
+       - 实现 [`Core/Transport/MockTransportChannel.h/.cpp`](file:///d:/CarPlayStation/Core/Transport/MockTransportChannel.h)：支持双通道互联对测 (`Pair`)、错误注入 (`SetFailSends`)、静默丢包、MTU 截断拦截及出站控制帧捕获 (`GetSentPackets`)。
+    2. **Step 2 (Windows 蓝牙 RFCOMM 传输与 SDP 服务注册)**：
+       - 实现 [`Core/Transport/BtSdpHelper.h/.cpp`](file:///d:/CarPlayStation/Core/Transport/BtSdpHelper.h)：封装 89 字节 byte-exact Apple Wireless iAP2 SDP 二进制模板（UUID `00000000-deca-fade-deca-deafdecacaff` / `0xfe`），提供 MAC 地址格式化与 Windows `WSASetServiceW` / `BTH_SET_SERVICE` 原生注册。
+       - 实现 [`Core/Transport/BtRfcommTransport.h/.cpp`](file:///d:/CarPlayStation/Core/Transport/BtRfcommTransport.h)：基于 WinSock `AF_BTH` / `BTHPROTO_RFCOMM` 实现通道 1 侦听、非阻塞后台 I/O 线程与无硬件测试仿真插桩。
+    3. **Step 3 (Wi-Fi SoftAP 热点生命周期管理与看门狗)**：
+       - 抽象 [`Core/Transport/IWifiSoftApManager.h`](file:///d:/CarPlayStation/Core/Transport/IWifiSoftApManager.h)：定义热点启停、凭证分发与 Station 状态监测契约，兼容 `IWifiHandoffController`。
+       - 实现 [`Core/Transport/WifiSoftApManager.h/.cpp`](file:///d:/CarPlayStation/Core/Transport/WifiSoftApManager.h)：强制 5GHz 频段规避蓝牙共存干扰，动态生成高熵 WPA2 密码与 SSID；内置 Station 关联探测看门狗线程，精准识别客户端脱网。
+       - 实现 [`Core/Transport/MockWifiSoftApManager.h`](file:///d:/CarPlayStation/Core/Transport/MockWifiSoftApManager.h)：为上层会话与 CI 提供完全解耦的 Mock 桩。
+    4. **Step 4 (轻量级原生 mDNS/DNS-SD 广播器)**：
+       - 抽象 [`Core/Transport/IMdnsAdvertiser.h`](file:///d:/CarPlayStation/Core/Transport/IMdnsAdvertiser.h)。
+       - 实现 [`Core/Transport/MdnsPacketBuilder.h/.cpp`](file:///d:/CarPlayStation/Core/Transport/MdnsPacketBuilder.h)：遵循 RFC 1035 / 6762 标准，二进制序列化 PTR、SRV、TXT 与 A 记录，携带 Apple 官方 `0x44440B80,0x61` 特性位及设备标识。
+       - 实现 [`Core/Transport/MdnsAdvertiser.h/.cpp`](file:///d:/CarPlayStation/Core/Transport/MdnsAdvertiser.h)：轻量级原生 UDP 组播（`224.0.0.251:5353`），三连初始突发 + 周期刷新，彻底摆脱外部 Bonjour 守护进程依赖。
+       - 实现 [`Core/Transport/MockMdnsAdvertiser.h`](file:///d:/CarPlayStation/Core/Transport/MockMdnsAdvertiser.h)。
+    5. **自动化单元测试全覆盖**：
+       - 在 [`Tests/TransportTests.cpp`](file:///d:/CarPlayStation/Tests/TransportTests.cpp) 中新增 10 组高覆盖单测，全面验证收发环路、故障注入、SDP 生成、MAC 解析、RFCOMM 状态机、SoftAP 看门狗及 mDNS 广播。
+       - 更新 `Core/CMakeLists.txt` 与 `Tests/CMakeLists.txt`。
+  - **完成清理**：
+    - 阶段待办清单 `TODO_PART2_TRANSPORT.md` 按照多智能体协作规范全量勾选并执行安全删除。
+
+---
+
+### 记录 6：硬件无线状态探测（RadioAdapterHelper）与 Partition 1 全阶段圆满收官
+
+* **时间**：`2026-09-29 16:10:00 (UTC+8)`
+* **客户端（Agent）**：`Google Antigravity (Gemini 3.8 Flash)`
+* **背景与实现**：
+  - 完成 Partition 1 的最后一步 Step 3：基于 Windows Native APIs 探测宿主机的蓝牙与 Wi-Fi 5GHz/SoftAP 能力。
+  - **核心组件实现**：
+    1. **`Core/Hardware/RadioAdapterHelper.h/.cpp`**：
+       - 实现 `IRadioState` 契约（`GetState("bluetooth"|"wifi")`、`SetEnabled(...)`）。
+       - 动态安全链接 Windows Native Wifi (`wlanapi.dll`) 与蓝牙栈 (`bthprops.cpl`)，无依赖免安装，绝不引发运行时缺失崩溃。
+       - 精准识别无线网卡 PHY 物理层协议类型（`dot11_phy_type_ofdm` (802.11a), `dot11_phy_type_vht` (802.11ac), `dot11_phy_type_he` (802.11ax Wi-Fi 6)），严格匹配 Apple 无线 CarPlay 对 5GHz 频段的强制要求。
+       - 提供 `EvaluateReadiness()` 全局硬件就绪度评估诊断，返回直观易读的硬件就绪报告。
+       - 提供内存级仿真插桩接口（`SetSimulatedBluetooth` / `SetSimulatedWifi`），使无物理无线网卡的开发机/CI 环境也能 100% 确定性运行单测。
+    2. **单元测试与构建同步**：
+       - 更新 `Core/CMakeLists.txt`，添加 `RadioAdapterHelper.cpp`。
+       - 在 `Tests/HardwareTests.cpp` 中新增 `TestRadioAdapterHelper()`，完整覆盖真实系统硬件探测、5GHz 缺失告警、蓝牙未就绪阻断及仿真状态机流转。
+  - **Partition 1 (Core/Hardware) 全面收官总结**：
+    - **Step 1 (认证核心基石)**：`MockMfiSigner`、`NetworkMfiClient` (Winsock TCP RPC)、`FileMfiSigner` (Windows 原生 CNG ECDSA P-256 离线免硬件认证)。
+    - **Step 2 (通用 I2C 与多芯片桥接)**：`II2cAdapter` 抽象、`I2cMfiSigner` 协处理器状态机、`Ch341I2cAdapter` / `Ch341Protocol`、`Ch347I2cAdapter`、`FtdiI2cAdapter`、`MockI2cAdapter`。
+    - **Step 3 (无线硬件探测)**：`RadioAdapterHelper` (Native WlanAPI 5GHz / Bluetooth 状态探测)。
+    - 专项待办文件 `TODO_PART1_HARDWARE.md` 按照既定约定完成清理删除。
+
+---
+
+### 记录 5：通用 I2C 硬件抽象与多芯片驱动桥接实现（CH341、CH347、FTDI、Mock & DEC-007）
+
+* **时间**：`2026-09-29 15:40:00 (UTC+8)`
+* **客户端（Agent）**：`Google Antigravity (Gemini 3.8 Flash)`
+* **背景与架构设计演进**：
+  - 用户指出：USB 转 I2C 芯片不仅限于 CH341，市面上常见还有 CH347、FTDI（FT232H/FT2232H）等，且设备驱动接口都是通用的标准 I2C 操作。
+  - **核心洞察**：Apple MFi 协处理器（CP 2.0C/3.0）挂载在 I2C 从机地址（0x10/0x11），其证书读取（0x30/0x31..）与挑战签名（0x20/0x21/0x10/0x11/0x12）是与物理芯片无关的高层业务协议；而 USB-I2C 芯片只是总线传输通道。
+  - **分层重构**：
+    1. 抽象 `II2cAdapter` 接口（`Core/Hardware/II2cAdapter.h`）：规范通用 I2C 读、写、组合事务与 GPIO 复位控制。
+    2. 实现 `I2cMfiSigner` 认证器（`Core/Hardware/I2cMfiSigner.h/.cpp`）：纯面向 `II2cAdapter` 编程，封装全套 MFi 协处理器寄存器状态机、128 字节窗口分片拉取与指数退避重试。
+    3. 实现多芯片驱动适配器：
+       - `Ch341I2cAdapter` 与 `Ch341Protocol.h`：支持 Windows 官方 `CH341DLL.DLL` 及裸流数据帧编解码（含 ACK/NACK 状态检测与 D0..D5 复位脉冲）。
+       - `Ch347I2cAdapter`：动态链接 `CH347DLL.DLL`，支持 480Mbps 高速硬件 I2C 引擎。
+       - `FtdiI2cAdapter`：动态链接 `libMPSSE.dll` / `ftd2xx.dll`，支持 FTDI MPSSE 硬件引擎。
+       - `MockI2cAdapter`：纯内存虚拟 MFi 协处理器仿真，支持寄存器状态机与错误注入，保障无外设环境 100% 单测覆盖。
+    4. 扩展 `Application/AppSettings.h`：新增 `HardwareI2cPreferences` 支持运行时切换驱动类型与参数。
+    5. 扩展 `Tests/HardwareTests.cpp`：新增 CH341 帧编解码、Mock 适配器、I2cMfiSigner 完整认证链路与驱动契约防御单测。
+    6. 产出决策文档 **DEC-007**，并更新 `TODO_PART1_HARDWARE.md` 与 `Core/Hardware/README.md`。
+
+---
+
+### 记录 4：0KB 文件排查修复与 MFi 端点分层重构彻底闭环（HANDOFF_MFI_LAYERING & DEC-005）
+
+* **时间**：`2026-09-29 09:58:00 (UTC+8)`
+* **客户端（Agent）**：`Google Antigravity (Gemini 3.7 Flash)`
+* **背景**：接手并彻底完成 `HANDOFF_MFI_LAYERING.md` 中的所有剩余未决工作，排查异常 0KB 文件，解决编译断言错误，同步跨层文档并正式确立 DEC-005 决策。
+* **完成的工作与重构细节**：
+  1. **P0 编译断言修复 ([Tests/CommonTests.cpp](file:///D:/CarPlayStation/Tests/CommonTests.cpp))**：
+     - 彻底清理对旧 `Core::NetworkEndpoints.mfi_daemon_endpoint` 字段的引用。
+     - 在 Application 层的 `AppSettings.mfi` 上执行测试：验证 `settings.mfi.daemon_endpoint` 动态端点解析、`ToString()`，以及默认偏好 `use_hardware_backend == false`（默认网络 daemon，符合 DEC-003）。
+  2. **P1 文档与头文件注释全量同步**：
+     - [Core/Service/ICarPlayCoreApi.h](file:///D:/CarPlayStation/Core/Service/ICarPlayCoreApi.h)：清理第 21 行注释中过时的 "MFi daemon endpoint" 示例，调整为 RTSP 端口 / SoftAP 凭证。
+     - [Core/Hardware/README.md](file:///D:/CarPlayStation/Core/Hardware/README.md)：更新 `MfiNetworkClient` 描述，明确 daemon 端点由 Application 层 `MFiPreferences::daemon_endpoint` 构造注入，Core/Lib 不持有默认硬编码地址。
+     - [DECISIONS.md](file:///D:/CarPlayStation/DECISIONS.md)：正式添加 **DEC-005 — MFi Authentication Layering: Endpoints are User Preferences, Capabilities belong to Hardware Layer**，完整阐述 MFi 认证能力归属硬件层、后端选择及 daemon 地址归属 Application 层的设计决策与推导过程。
+  3. **0KB 构建文件修复与全工程校验**：
+     - 修复 `Application/CMakeLists.txt`、`UI/Win32/CMakeLists.txt`、`Tests/CMakeLists.txt`。
+     - 全盘扫描确认工程中 0 字节文件数量归零，所有 C++20 头文件与构建定义完整就绪。
+
+---
+
 ### 记录 3：配置分层重构 — Core 只收事实，用户可调项归 Application（DEC-004）
 
 * **时间**：`2026-09-28 (UTC+8)`

@@ -18,7 +18,7 @@ public:
     // Media parameters are negotiated per session and flow through the session, not here.
     [[nodiscard]] virtual Common::Status Initialize(const Common::CoreEnvironmentConfig& env) = 0;
 
-    // Hot-update runtime environment configuration (e.g. MFi daemon endpoint, SoftAP identity)
+    // Hot-update runtime environment configuration (e.g. RTSP bind port, SoftAP credentials)
     [[nodiscard]] virtual Common::Status UpdateEnvironment(const Common::CoreEnvironmentConfig& env) = 0;
 
     // Start CarPlay advertising and discovery

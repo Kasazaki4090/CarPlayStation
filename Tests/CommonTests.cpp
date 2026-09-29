@@ -100,12 +100,15 @@ void TestConfigSeparation() {
     // Core layer: environment config (identity + network endpoints)
     CoreEnvironmentConfig env;
     env.identity.device_name = "TestReceiver";
-    env.network.mfi_daemon_endpoint = IpEndpoint{"192.168.2.50", 9999};
-    assert(env.network.mfi_daemon_endpoint.ToString() == "192.168.2.50:9999");
+    env.network.rtsp_port = 5001;
+    assert(env.network.rtsp_port == 5001);
 
     // Application layer: user-tunable preferences stay out of Core and resolve to concrete values
     using namespace CarPlayStation::Application;
     AppSettings settings;
+    assert(settings.mfi.use_hardware_backend == false); // Default to network daemon per DEC-003
+    settings.mfi.daemon_endpoint = IpEndpoint{"192.168.2.50", 9999};
+    assert(settings.mfi.daemon_endpoint.ToString() == "192.168.2.50:9999");
 
     settings.video.resolution_preset = VideoResolutionPreset::Res720P;
     auto [w720, h720] = settings.video.GetEffectiveDimensions();

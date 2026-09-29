@@ -1,6 +1,25 @@
-# Core — CarPlay protocol, session, transport and media interfaces (header-only contracts for now)
-add_library(CarPlayCore INTERFACE)
+add_library(CarPlayCore STATIC
+    Hardware/NetworkMfiClient.cpp
+    Hardware/FileMfiSigner.cpp
+    Hardware/Ch341I2cAdapter.cpp
+    Hardware/Ch347I2cAdapter.cpp
+    Hardware/FtdiI2cAdapter.cpp
+    Hardware/I2cMfiSigner.cpp
+    Hardware/RadioAdapterHelper.cpp
+    Transport/MockTransportChannel.cpp
+    Transport/BtSdpHelper.cpp
+    Transport/BtRfcommTransport.cpp
+    Transport/WifiSoftApManager.cpp
+    Transport/MdnsPacketBuilder.cpp
+    Transport/MdnsAdvertiser.cpp
+)
 
-target_include_directories(CarPlayCore INTERFACE ${CMAKE_SOURCE_DIR})
+target_include_directories(CarPlayCore PUBLIC
+    ${CMAKE_SOURCE_DIR}
+)
 
-target_compile_features(CarPlayCore INTERFACE cxx_std_20)
+target_compile_features(CarPlayCore PUBLIC cxx_std_20)
+
+if(WIN32)
+    target_link_libraries(CarPlayCore PUBLIC ws2_32 bcrypt)
+endif()

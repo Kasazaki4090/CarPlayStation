@@ -493,3 +493,173 @@ Negotiated media parameters are protocol facts that change with each handshake, 
 * `ARCHITECTURE.md`
 * `result.md` (record 3)
 * `Core/Common/Config.h`, `Application/AppSettings.h`
+
+
+## DEC-005 — MFi Authentication Layering: Endpoints are User Preferences, Capabilities belong to Hardware Layer
+
+**Status:** `Accepted`
+
+**Date:** 2026-09-29
+
+### Context
+
+During the configuration layering refinement (DEC-004), the placement of MFi authentication parameters was further analyzed:
+* MFi authentication operates at the hardware and cryptographic coprocessor layer (`Core/Hardware`), which is an internal capability not directly operated by users during normal session operation.
+* However, the choice of MFi backend (local physical USB-to-I2C chip vs remote/local TCP signing daemon) and the TCP daemon network endpoint address (host:port) are user-configurable preferences.
+* Hardcoding or keeping daemon endpoints inside Core configuration structs would leak user-configuration policies into the HAL.
+
+### Decision
+
+1. **MFi Authentication Interface Stays in `Core/Hardware`**:
+   - `Core/Hardware/IMfiSigner.h` provides pure virtual authentication capabilities (`GetCertificate`, `GenerateSignature`, `GetChipInfo`, `IsReady`).
+   - Core and Protocol modules depend strictly on `IMfiSigner` abstractions and never hardcode daemon URLs, IP addresses, or bus addresses.
+
+2. **MFi Backend Selection & Daemon Endpoint Belong to `Application` Layer**:
+   - `Application/AppSettings.h :: MFiPreferences` holds `use_hardware_backend` (bool) and `daemon_endpoint` (`IpEndpoint`, default `127.0.0.1:9000`).
+   - The Application layer is responsible for instantiating the appropriate `IMfiSigner` implementation based on user preferences and injecting it into Core.
+
+3. **Core Environment Config Excludes MFi Endpoints**:
+   - `CoreEnvironmentConfig` in `Core/Common/Config.h` contains strictly receiver environment facts (RTSP bind address/port, SoftAP credentials, device identity).
+
+### Reason
+
+MFi cryptographic signing is a low-level capability, but deciding where the signer lives (physical USB hardware vs network daemon) is a deployment/user setting. Separating capability (Core/Hardware) from endpoint configuration (Application) preserves total isolation and allows seamless switching between physical hardware and network proxies without altering protocol or HAL code.
+
+### Consequences
+
+* Core HAL remains completely agnostic to where the daemon is hosted.
+* Application layer can hot-switch between hardware and network backends via `ApplySettings()`.
+* Unit testing of upper layers (Protocol/Session) can inject mock signers without network or hardware dependencies.
+
+### Related
+
+* `HANDOFF_MFI_LAYERING.md`
+* `DEC-003`, `DEC-004`
+* `Application/AppSettings.h`, `Core/Hardware/IMfiSigner.h`, `Core/Common/Config.h`
+
+
+## DEC-006 — Local File-Based MFi Identity Signer (Zero-Hardware & Zero-Network MFi v3 Authentication)
+
+**Status:** `Accepted`
+
+**Date:** 2026-09-29
+
+### Context
+
+1. **Hardware and Network Limitations:**
+   - Physical USB-to-I2C coprocessors (CH341 + Apple MFi chip) require specialized hardware modules and driver installations.
+   - Remote TCP signing daemons (`NetworkMfiClient`) require a secondary device or background daemon service (such as Raspberry Pi / CCPA `mfi_oracle`).
+   - Many desktop environments benefit from a fully self-contained receiver running on a single PC without external hardware or network dependencies.
+
+2. **Reference Discovery (`Reference/diplay`):**
+   - Analysis of `Reference/diplay` (`LocalMfiAuthenticationClient.kt`) demonstrates that Apple MFi 3.0 (v3) authentication utilizes ECDSA over NIST P-256 (secp256r1) with a 32-byte challenge digest and standard X.509/PKCS#7 accessory certificates.
+   - A local software signer loading PKCS#8 private keys (`identity.pk8` or raw/PEM format) and X.509/PKCS#7 certificate files (`certificate.p7b` or `.der`) can compute valid Apple MFi v3 ECDSA signatures directly.
+
+### Decision
+
+1. **Implement `FileMfiSigner` (or `LocalMfiSigner`) in `Core/Hardware`**:
+   - Implements the pure virtual `IMfiSigner` contract.
+   - Uses Windows native **CNG (Cryptography Next Generation / `bcrypt.dll`)** with `BCRYPT_ECDSA_P256_ALGORITHM` to perform raw ECDSA signing (`BCryptSignHash`), outputting raw 64-byte `(R || S)` signatures directly matching Apple MFi v3 on-wire expectations without introducing external crypto libraries.
+   - Loads accessory certificate bytes (`FetchCertificate()`) directly from the configured certificate file (e.g. `.p7b` / `.der`).
+   - Performs startup self-validation (signing a test challenge and verifying with the certificate public key) to fail fast on corrupted or mismatched keypairs.
+
+2. **Application Layer Owns Key/Certificate Paths**:
+   - `Application/AppSettings.h :: MFiPreferences` supports `MFiBackendType::LocalFile` and configurable file paths for `certificate_path` and `private_key_path`.
+   - Allows users to drop in custom certificate and private key files.
+
+### Reason
+
+This allows CarPlayStation to run completely standalone on Windows PCs without physical MFi hardware or network daemons, while retaining 100% interface compatibility with the pluggable `IMfiSigner` architecture.
+
+### Consequences
+
+Positive:
+- Zero external hardware required.
+- Zero network dependencies for authentication.
+- Seamless certificate replacement and testing.
+- Uses Windows native CNG API (zero third-party crypto library dependencies).
+
+Trade-offs:
+- Requires valid Apple accessory certificates and corresponding P-256 private keys provided by the user.
+
+### Related
+
+- `DEC-003`, `DEC-004`, `DEC-005`
+- `Core/Hardware/IMfiSigner.h`
+- `Core/Hardware/FileMfiSigner.h`
+- `Application/AppSettings.h`
+
+
+## DEC-007 — Universal I2C Adapter Abstraction (`II2cAdapter`) and Multi-Chip Hardware MFi Bridge (`I2cMfiSigner`, CH341, CH347, FTDI)
+
+**Status:** `Accepted`
+
+**Date:** 2026-09-29
+
+### Context
+
+1. **Hardware Bridge Coupling:**
+   - Previous designs (Step 2 of Partition 1) targeted a single specific USB-to-I2C bridge silicon: WCH CH341.
+   - However, in practical embedded and custom automotive PC setups, USB-to-I2C bridge chips vary widely:
+     - WCH CH341 (cost-effective, ubiquitous USB 1.1 Full Speed).
+     - WCH CH347 (modern high-speed USB 2.0 480Mbps with hardware I2C controller engine).
+     - FTDI FT232H / FT2232H / FT4232H (industry standard MPSSE engine).
+     - Linux `/dev/i2c-N` native buses, Silicon Labs CP2112, etc.
+   - The Apple MFi authentication coprocessor (CP 2.0C / 3.0) protocol itself is completely independent of the USB-I2C bridge. It communicates via standard I2C (7-bit address 0x10 or 0x11) using fixed register addresses (0x02, 0x05, 0x10, 0x11, 0x12, 0x20, 0x21, 0x30, 0x31..).
+   - Tightly coupling MFi register orchestration directly to CH341 driver calls violates Single Responsibility and Adapter patterns, requiring rewriting MFi logic for every new bridge chip.
+
+### Decision
+
+1. **Introduce `II2cAdapter` as a Universal Hardware Bus Abstraction (`Core/Hardware/II2cAdapter.h`)**:
+   - Pure abstract interface for physical I2C operations:
+     - `Write(address7Bit, data)`
+     - `Read(address7Bit, length)`
+     - `Transaction(address7Bit, writeData, readLength)` (atomic write-then-restart-read)
+     - `PulseReset(pinIndex, duration, driveHigh)` (hardware GPIO reset line control)
+     - `SetSpeed(I2cClockSpeed)`
+     - `ProbeDevice(address7Bit)`
+
+2. **Implement Universal `I2cMfiSigner` (`Core/Hardware/I2cMfiSigner.h/.cpp`)**:
+   - Implements `IMfiSigner` by composing any `std::shared_ptr<II2cAdapter>`.
+   - Encapsulates pure Apple MFi coprocessor register protocol:
+     - Certificate extraction: 0x30 length read followed by 128-byte window reads (0x31..0x3X).
+     - Challenge signing: writes 0x20 length and 0x21 payload, writes 0x01 to 0x10 to start computation, polls 0x10 for 0x10 completion status, reads 0x11 length and 0x12 signature response.
+     - Chip diagnostics: reads 0x02 protocol major.
+     - Exponential backoff & retry mechanism to tolerate coprocessor wake-up NACKs.
+
+3. **Pluggable Multi-Chip Adapter Implementations**:
+   - `Ch341I2cAdapter`: Dynamically binds to Windows vendor `CH341DLL.DLL` (`CH341StreamI2C`, `CH341SetOutput`).
+   - `Ch341Protocol.h`: Standalone CH341 I2C/UIO stream packet frame encoder (pure C++20, enables headless testing and cross-platform stream creation).
+   - `Ch347I2cAdapter`: Dynamically binds to WCH high-speed `CH347DLL.DLL` (`CH347StreamI2C`, `CH347I2C_Init`).
+   - `FtdiI2cAdapter`: Dynamically binds to FTDI `libMPSSE.dll` / `ftd2xx.dll` (MPSSE I2C engine).
+   - `MockI2cAdapter`: Pure in-memory virtual MFi coprocessor simulation for 100% deterministic, offline automated unit tests.
+
+4. **Application Layer Preferences (`Application/AppSettings.h`)**:
+   - Added `HardwareI2cPreferences` to `MFiPreferences` supporting `HardwareI2cDriverType` (Auto, CH341, CH347, FTDI, Mock), configurable device index, slave address (0x10 / 0x11), and bus speed.
+
+### Reason
+
+Separating the generic I2C bus transport from MFi coprocessor register semantics makes the architecture pluggable, future-proof, and immediately portable across any USB-I2C silicon or operating system, while keeping testability strictly decoupled from physical hardware availability.
+
+### Consequences
+
+Positive:
+- Users can plug in CH341, CH347, or FTDI adapters interchangeably.
+- MFi coprocessor state machine logic is written and tested once.
+- Deterministic, headless CI testing via `MockI2cAdapter`.
+- Zero compiler link errors when vendor DLLs are not present (safe dynamic runtime binding).
+
+### Related
+
+- `DEC-003`, `DEC-004`, `DEC-005`
+- `Core/Hardware/II2cAdapter.h`
+- `Core/Hardware/I2cMfiSigner.h`
+- `Core/Hardware/Ch341Protocol.h`
+- `Core/Hardware/Ch341I2cAdapter.h`
+- `Core/Hardware/Ch347I2cAdapter.h`
+- `Core/Hardware/FtdiI2cAdapter.h`
+- `Core/Hardware/MockI2cAdapter.h`
+- `Application/AppSettings.h`
+
+
+
