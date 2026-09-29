@@ -4,3 +4,6 @@
 [submodule "Reference/carplayd"]
 	path = Reference/carplayd
 	url = https://github.com/lvalen91/carplayd
+[submodule "Reference/diplay"]
+	path = Reference/diplay
+	url = https://github.com/shihabal3amri/DiPlay
