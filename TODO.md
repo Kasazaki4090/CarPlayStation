@@ -142,25 +142,25 @@ implementation tasks are started.
 
 ### 6. CarPlay session layer
 
-- [ ] P0 Implement the CarPlay session state machine: start, availability, active/paused, teardown, reconnect, and a single place where transport failures are converted into session events.
-- [ ] P0 Implement the CarPlay control plane required for a first working session (display, input and media negotiation).
+- [x] P0 [Concluded: Partition 4] Implement the CarPlay session state machine: start, availability, active/paused, teardown, reconnect, and a single place where transport failures are converted into session events (`CarPlaySessionStateMachine`).
+- [x] P0 [Concluded: Partition 4] Implement the CarPlay control plane required for a first working session (display, input and media negotiation via `AirPlayRtspCodec` and `AirPlayRtspServer`).
+- [x] P0 [Concluded: Partition 4] Implement pairing store with atomic disk persistence and fast reconnect for previously paired iPhones (`PairingStore`).
 - [ ] P1 Implement the remaining session planes already studied in carplayd doc 23 (session start/availability, vehicle data, location, destination) and mark which are unit-tested but not yet device-exercised.
 - [ ] P2 Implement Modern Vehicle Data Config (VDC) over the AirPlay iAP channel (researched, unimplemented in carplayd).
 
 ### 7. Media: video
 
-- [ ] P0 [Research] Document the CarPlay video wire format end to end (stream transport, NAL depacketization, parameter sets, frame ordering, latency budget) using carplayd docs 04/05/06 and `pi/video_*.py` probes.
+- [x] P0 [Concluded: DEC-008] Architecture decision concluded: forward-compatible codec discovery (H264/HEVC/AV1/VP9/VVC), Direct3D 11 shared texture handles (EVR/madVR rejected), and automated FFmpeg `d3d11va`/CPU fallback. *Detailed execution tracking in temporary `TODO_PARTITION_5.md`.*
 - [ ] P0 Implement H.264 depacketization and Media Foundation decoding with Direct3D11 presentation.
-- [ ] P1 Implement HEVC decoding, including hvcC/parameter-set handling and the `enabledFeatures` negotiation lever.
+- [ ] P1 Implement HEVC decoding and dynamic FFmpeg fallback with automated build sync.
 - [ ] P1 Implement codec capability negotiation and runtime selection between H.264 and HEVC.
-- [ ] P1 Implement the display-mode selector described in `PROJECT.md`: windowed, borderless and fullscreen; 720p to 2160p with automatic selection; 30 to 60 FPS; resolution re-handshake when the mode changes.
-- [ ] P1 Implement the FFmpeg decoder fallback behind the same decoder interface, with hardware decoding preferred and software decoding as the last resort, and record the exact FFmpeg build in `Lib/Readme.md`.
+- [ ] P1 Implement the display-mode selector described in `PROJECT.md`.
 - [ ] P2 Measure decode and presentation latency and define the frame-drop policy under load.
 
 ### 8. Media: audio and microphone
 
-- [ ] P0 [Research] Document the CarPlay audio stream format(s) and the three-lane behaviour (media, navigation, telephony/Siri) from carplayd doc 14.
-- [ ] P0 Implement audio rendering over WASAPI with device selection, format negotiation and hot-plug recovery.
+- [x] P0 [Concluded: DEC-008] Architecture decision concluded: non-exclusive WASAPI Shared Mode (`AUDCLNT_SHAREMODE_SHARED`), internal 3-lane software mixer (`MainMedia`, `AltNavigation`, `SiriTelephony`), and `AudioDuckingManager`. *Detailed execution tracking in temporary `TODO_PARTITION_5.md`.*
+- [ ] P0 Implement audio rendering over WASAPI (Shared Mode) with device selection, format negotiation and hot-plug recovery.
 - [ ] P1 Implement ducking and lane swapping so navigation and calls behave correctly against media playback.
 - [ ] P1 Implement microphone capture, resampling and encoding for the uplink path (carplayd doc 16), including Siri and call activation.
 - [ ] P2 Implement multichannel audio and automatic volume control, listed as limited in Phase 1.

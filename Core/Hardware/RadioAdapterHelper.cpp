@@ -20,6 +20,7 @@ using PFN_WlanOpenHandle       = DWORD(WINAPI*)(DWORD, PVOID, PDWORD, PHANDLE);
 using PFN_WlanCloseHandle      = DWORD(WINAPI*)(HANDLE, PVOID);
 using PFN_WlanEnumInterfaces   = DWORD(WINAPI*)(HANDLE, PVOID, PWLAN_INTERFACE_INFO_LIST*);
 using PFN_WlanQueryInterface   = DWORD(WINAPI*)(HANDLE, const GUID*, WLAN_INTF_OPCODE, PVOID, PDWORD, PVOID*, PWLAN_OPCODE_VALUE_TYPE);
+using PFN_WlanGetInterfaceCapability = DWORD(WINAPI*)(HANDLE, const GUID*, PVOID, PWLAN_INTERFACE_CAPABILITY*);
 using PFN_WlanFreeMemory       = VOID(WINAPI*)(PVOID);
 
 // Function pointer definitions for BluetoothAPIs (bthprops.cpl)
@@ -38,6 +39,7 @@ public:
             fn_close_  = reinterpret_cast<PFN_WlanCloseHandle>(GetProcAddress(h_dll_, "WlanCloseHandle"));
             fn_enum_   = reinterpret_cast<PFN_WlanEnumInterfaces>(GetProcAddress(h_dll_, "WlanEnumInterfaces"));
             fn_query_  = reinterpret_cast<PFN_WlanQueryInterface>(GetProcAddress(h_dll_, "WlanQueryInterface"));
+            fn_get_cap_ = reinterpret_cast<PFN_WlanGetInterfaceCapability>(GetProcAddress(h_dll_, "WlanGetInterfaceCapability"));
             fn_free_   = reinterpret_cast<PFN_WlanFreeMemory>(GetProcAddress(h_dll_, "WlanFreeMemory"));
         }
 #endif
@@ -66,6 +68,7 @@ public:
     PFN_WlanCloseHandle    fn_close_{nullptr};
     PFN_WlanEnumInterfaces fn_enum_{nullptr};
     PFN_WlanQueryInterface fn_query_{nullptr};
+    PFN_WlanGetInterfaceCapability fn_get_cap_{nullptr};
     PFN_WlanFreeMemory     fn_free_{nullptr};
 #endif
 };
@@ -116,7 +119,7 @@ RadioAdapterHelper::RadioAdapterHelper()
 RadioAdapterHelper::~RadioAdapterHelper() = default;
 
 void RadioAdapterHelper::SetSimulatedBluetooth(RadioState state, bool has_adapter, std::string name) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     sim_bt_state_ = state;
     BluetoothCapabilities caps;
     caps.has_bt_adapter = has_adapter;
@@ -127,7 +130,7 @@ void RadioAdapterHelper::SetSimulatedBluetooth(RadioState state, bool has_adapte
 }
 
 void RadioAdapterHelper::SetSimulatedWifi(RadioState state, bool has_5ghz, bool has_softap, std::string desc) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     sim_wifi_state_ = state;
     WifiCapabilities caps;
     caps.has_wifi_adapter = (state != RadioState::Unavailable);
@@ -140,7 +143,7 @@ void RadioAdapterHelper::SetSimulatedWifi(RadioState state, bool has_5ghz, bool 
 }
 
 void RadioAdapterHelper::ClearSimulation() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     sim_bt_state_.reset();
     sim_bt_caps_.reset();
     sim_wifi_state_.reset();
@@ -148,7 +151,7 @@ void RadioAdapterHelper::ClearSimulation() {
 }
 
 RadioState RadioAdapterHelper::GetState(std::string_view radio) const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (radio == "bluetooth" || radio == "bt") {
         if (sim_bt_state_.has_value()) {
             return *sim_bt_state_;
@@ -171,7 +174,7 @@ RadioState RadioAdapterHelper::GetState(std::string_view radio) const noexcept {
 }
 
 Common::Status RadioAdapterHelper::SetEnabled(std::string_view radio, bool enabled) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (radio == "bluetooth" || radio == "bt") {
         if (sim_bt_state_.has_value()) {
             sim_bt_state_ = enabled ? RadioState::On : RadioState::Off;
@@ -194,7 +197,7 @@ Common::Status RadioAdapterHelper::SetEnabled(std::string_view radio, bool enabl
 
 WifiCapabilities RadioAdapterHelper::DetectWifiCapabilities() const {
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (sim_wifi_caps_.has_value()) {
             return *sim_wifi_caps_;
         }
@@ -222,8 +225,11 @@ WifiCapabilities RadioAdapterHelper::DetectWifiCapabilities() const {
         const auto& ifInfo = pIfList->InterfaceInfo[0];
         
         // Convert description wide string to utf-8
-        std::wstring ws(ifInfo.strInterfaceDescription);
-        caps.adapter_description = std::string(ws.begin(), ws.end());
+        int len = WideCharToMultiByte(CP_UTF8, 0, ifInfo.strInterfaceDescription, -1, nullptr, 0, nullptr, nullptr);
+        if (len > 1) {
+            caps.adapter_description.resize(len - 1);
+            WideCharToMultiByte(CP_UTF8, 0, ifInfo.strInterfaceDescription, -1, caps.adapter_description.data(), len, nullptr, nullptr);
+        }
 
         if (ifInfo.isState == wlan_interface_state_connected ||
             ifInfo.isState == wlan_interface_state_disconnected) {
@@ -237,17 +243,12 @@ WifiCapabilities RadioAdapterHelper::DetectWifiCapabilities() const {
         }
 
         // Query physical capabilities (5GHz detection)
-        if (wlan_binding_->fn_query_) {
-            DWORD dataSize = 0;
-            PVOID pData = nullptr;
-            WLAN_OPCODE_VALUE_TYPE opType;
-            DWORD qRes = wlan_binding_->fn_query_(hClient, &ifInfo.InterfaceGuid,
-                                                  wlan_intf_opcode_supported_phy_types,
-                                                  nullptr, &dataSize, &pData, &opType);
-            if (qRes == ERROR_SUCCESS && pData) {
-                auto pPhyList = reinterpret_cast<WLAN_PHY_TYPE_LIST*>(pData);
-                for (DWORD i = 0; i < pPhyList->dwNumberOfSupportedPhysType; ++i) {
-                    DOT11_PHY_TYPE phy = pPhyList->dot11PHYType[i];
+        if (wlan_binding_->fn_get_cap_) {
+            PWLAN_INTERFACE_CAPABILITY pCap = nullptr;
+            DWORD qRes = wlan_binding_->fn_get_cap_(hClient, &ifInfo.InterfaceGuid, nullptr, &pCap);
+            if (qRes == ERROR_SUCCESS && pCap) {
+                for (DWORD i = 0; i < pCap->dwNumberOfSupportedPhys; ++i) {
+                    DOT11_PHY_TYPE phy = pCap->dot11PhyTypes[i];
                     // dot11_phy_type_ofdm (802.11a), dot11_phy_type_ht (802.11n 5GHz),
                     // dot11_phy_type_vht (802.11ac 5GHz), dot11_phy_type_he (802.11ax Wi-Fi 6),
                     // or dot11_phy_type_eht = 11 (802.11be Wi-Fi 7 in Win11 24H2 SDK)
@@ -259,7 +260,7 @@ WifiCapabilities RadioAdapterHelper::DetectWifiCapabilities() const {
                         break;
                     }
                 }
-                wlan_binding_->fn_free_(pData);
+                wlan_binding_->fn_free_(pCap);
             }
         }
 
@@ -278,7 +279,7 @@ WifiCapabilities RadioAdapterHelper::DetectWifiCapabilities() const {
 
 BluetoothCapabilities RadioAdapterHelper::DetectBluetoothCapabilities() const {
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (sim_bt_caps_.has_value()) {
             return *sim_bt_caps_;
         }

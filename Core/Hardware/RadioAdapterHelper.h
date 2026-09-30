@@ -66,7 +66,7 @@ private:
     std::unique_ptr<WlanNativeBinding> wlan_binding_;
     std::unique_ptr<BluetoothNativeBinding> bt_binding_;
 
-    mutable std::mutex mutex_;
+    mutable std::recursive_mutex mutex_;
     std::optional<RadioState> sim_bt_state_;
     std::optional<BluetoothCapabilities> sim_bt_caps_;
     std::optional<RadioState> sim_wifi_state_;

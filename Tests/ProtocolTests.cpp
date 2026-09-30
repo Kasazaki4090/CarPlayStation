@@ -13,9 +13,9 @@ using namespace CarPlayStation::Core::Common;
 // Test: Checksum correctness against reference vectors
 // ============================================================================
 void TestIap2Checksum() {
-    // Reference vector from spec: bytes [0x89, 0x4B] -> checksum 0xD6
+    // Reference vector: bytes [0x89, 0x4B] -> sum=0xD4, (0x100 - 0xD4) & 0xFF = 0x2C
     const uint8_t data1[] = {0x89, 0x4B};
-    assert(Iap2Checksum(ByteSpan(data1, 2)) == 0xD6);
+    assert(Iap2Checksum(ByteSpan(data1, 2)) == 0x2C);
 
     // Empty span: sum=0, (0x100 - 0) & 0xFF = 0x00
     assert(Iap2Checksum(ByteSpan{}) == 0x00);

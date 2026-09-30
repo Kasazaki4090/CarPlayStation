@@ -106,7 +106,7 @@ void TestConfigSeparation() {
     // Application layer: user-tunable preferences stay out of Core and resolve to concrete values
     using namespace CarPlayStation::Application;
     AppSettings settings;
-    assert(settings.mfi.use_hardware_backend == false); // Default to network daemon per DEC-003
+    assert(settings.mfi.backend_type != MFiBackendType::HardwareI2C); // Default to local file/network per DEC-003/DEC-006
     settings.mfi.daemon_endpoint = IpEndpoint{"192.168.2.50", 9999};
     assert(settings.mfi.daemon_endpoint.ToString() == "192.168.2.50:9999");
 

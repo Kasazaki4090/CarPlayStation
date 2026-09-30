@@ -101,7 +101,7 @@ bool ExtractEccComponents(Common::ByteSpan pkcs8, Common::ByteSpan cert,
 
 struct FileMfiSigner::Impl {
     Config config;
-    mutable std::mutex mutex;
+    mutable std::recursive_mutex mutex;
     Common::ByteBuffer certificate_data;
     std::atomic<bool> is_initialized{false};
     std::atomic<bool> is_shutdown{false};
@@ -140,8 +140,12 @@ struct FileMfiSigner::Impl {
             return Common::Status::Error(Common::StatusCode::HardwareError, "Failed to open CNG ECDSA_P256 provider: " + std::to_string(status));
         }
 
+#ifndef BCRYPT_PKCS8_PRIVATEKEY_BLOB
+#define BCRYPT_PKCS8_PRIVATEKEY_BLOB L"PKCS8_PRIVATEKEY_BLOB"
+#endif
+
         // Try direct PKCS#8 blob import first
-        status = BCryptImportKeyPair(alg_handle, nullptr, BCRYPT_PKCS8_PRIVATE_KEY_BLOB, &key_handle,
+        status = BCryptImportKeyPair(alg_handle, nullptr, BCRYPT_PKCS8_PRIVATEKEY_BLOB, &key_handle,
                                      const_cast<PUCHAR>(key_bytes.data()), static_cast<ULONG>(key_bytes.size()), 0);
 
         if (!NT_SUCCESS(status)) {
@@ -222,7 +226,7 @@ FileMfiSigner::~FileMfiSigner() {
 }
 
 Common::Status FileMfiSigner::Initialize() {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
 
     auto cert_res = ReadBoundedFile(impl_->config.certificate_path);
     if (cert_res.IsError()) {
@@ -238,12 +242,12 @@ Common::Status FileMfiSigner::Initialize() {
 }
 
 Common::Status FileMfiSigner::LoadFromMemory(Common::ByteSpan cert_bytes, Common::ByteSpan pkcs8_key_bytes) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
     return impl_->SetupKeyAndSelfCheck(cert_bytes, pkcs8_key_bytes);
 }
 
 Common::Result<Common::ByteBuffer> FileMfiSigner::FetchCertificate() {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
     if (impl_->is_shutdown) {
         return Common::Status::Error(Common::StatusCode::TransportDisconnected, "FileMfiSigner is shut down");
     }
@@ -257,7 +261,7 @@ Common::Result<Common::ByteBuffer> FileMfiSigner::FetchCertificate() {
 }
 
 Common::Result<Common::ByteBuffer> FileMfiSigner::SignChallenge(Common::ByteSpan challenge) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
     if (impl_->is_shutdown) {
         return Common::Status::Error(Common::StatusCode::TransportDisconnected, "FileMfiSigner is shut down");
     }
@@ -297,7 +301,7 @@ Common::Result<Common::ByteBuffer> FileMfiSigner::SignChallenge(Common::ByteSpan
 }
 
 MFiChipInfo FileMfiSigner::GetChipInfo() const noexcept {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
     MFiChipInfo info{};
     info.chip_id = 0x00030000; // MFi 3.0 (ECDSA P-256) Identity Profile
     info.firmware_version = "Offline-File-MFi-v3 (" + impl_->config.certificate_path + ")";
@@ -306,19 +310,19 @@ MFiChipInfo FileMfiSigner::GetChipInfo() const noexcept {
 }
 
 void FileMfiSigner::Shutdown() {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
     impl_->is_shutdown = true;
     impl_->Cleanup();
 }
 
 void FileMfiSigner::SetConfig(Config config) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
     impl_->config = std::move(config);
     impl_->is_initialized = false;
 }
 
 FileMfiSigner::Config FileMfiSigner::GetConfig() const {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
     return impl_->config;
 }
 

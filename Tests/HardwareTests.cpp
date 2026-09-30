@@ -616,6 +616,12 @@ void TestRadioAdapterHelper() {
 }
 
 int main() {
+    std::cout << std::unitbuf;
+    std::cerr << std::unitbuf;
+#ifdef _WIN32
+    _set_error_mode(_OUT_TO_STDERR);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG);
+#endif
     std::cout << "========================================\n";
     std::cout << "CarPlayStation Hardware & MFi Unit Tests\n";
     std::cout << "========================================\n";

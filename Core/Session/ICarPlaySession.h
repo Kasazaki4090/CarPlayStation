@@ -15,7 +15,8 @@ enum class SessionState {
     AirPlayStreaming,
     Paused,
     Teardown,
-    Error
+    Error,
+    Reconnecting
 };
 
 [[nodiscard]] constexpr std::string_view SessionStateToString(SessionState state) noexcept {
@@ -28,6 +29,7 @@ enum class SessionState {
         case SessionState::Paused: return "Paused";
         case SessionState::Teardown: return "Teardown";
         case SessionState::Error: return "Error";
+        case SessionState::Reconnecting: return "Reconnecting";
     }
     return "Unknown";
 }

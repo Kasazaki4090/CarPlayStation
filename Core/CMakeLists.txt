@@ -15,6 +15,10 @@ add_library(CarPlayCore STATIC
     Protocol/Iap2LinkEngine.cpp
     Protocol/Iap2MessageCatalog.cpp
     Protocol/Iap2SessionManager.cpp
+    Session/PairingStore.cpp
+    Session/AirPlayRtspCodec.cpp
+    Session/AirPlayRtspServer.cpp
+    Session/CarPlaySessionStateMachine.cpp
 )
 
 target_include_directories(CarPlayCore PUBLIC

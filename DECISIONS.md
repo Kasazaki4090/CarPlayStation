@@ -661,5 +661,90 @@ Positive:
 - `Core/Hardware/MockI2cAdapter.h`
 - `Application/AppSettings.h`
 
+---
+
+## DEC-008 — Media Streaming Pipeline Architecture: Extensible Video Decoders (MF + Dynamic FFmpeg Fallback), Direct3D 11 Shared Textures, and App-Internal 3-Lane WASAPI Shared Mode Audio Ducking
+
+### Context
+
+CarPlay video and audio pipelines on Windows face several platform-specific challenges and forward-compatibility considerations:
+
+1. **Future Video Codecs (AV1, VP9, VVC)**:
+   - While AirPlay 2 video is currently negotiated as H.264 or HEVC (H.265), modern Apple silicon (A17 Pro / M3 and newer) provides hardware AV1 decode. Future protocol extensions may introduce AV1 (AV01), VP9, or H.266 (VVC).
+   - The video decoder interface must decouple codec identification from implementation, supporting extensible codec discovery and plugin registration.
+
+2. **Windows HEVC Store Extension Barrier & FFmpeg Fallback**:
+   - Clean retail/OEM installations of Windows 10/11 do not include the HEVC Media Foundation Transform (MFT) by default (it is a paid $0.99 extension in the Microsoft Store). Querying `CLSID_CMSH265DecoderMFT` directly fails with `MF_E_NOT_FOUND`.
+   - To guarantee out-of-the-box HEVC playback without requiring users to purchase store packages, the receiver must support an FFmpeg hardware/software fallback (`d3d11va` / CPU).
+   - Native 32-bit (x86) support is deprecated; the project strictly targets **x64** and **ARM64** (e.g. Snapdragon Windows devices).
+   - FFmpeg libraries (`avcodec`, `avutil`, `swscale`) should have an automated build-time mechanism to acquire the latest stable release (e.g. via CMake / GitHub releases) with zero manual downloading, and be loaded dynamically/optionally so the core build never breaks if FFmpeg binaries are temporarily absent.
+
+3. **Presentation Pipeline: Direct3D 11 Shared Textures vs. EVR / madVR**:
+   - EVR (Enhanced Video Renderer) is legacy DirectShow/MF technology with heavy topology state machines and high latency. madVR is an external heavy filter with significant render queue delays.
+   - Modern Windows video presentation should output decoded video frames directly into `ID3D11Texture2D` (NV12 format) and share them with the UI presentation window via `IDXGIResource::GetSharedHandle`, achieving sub-frame latency (0–1 frame) and zero CPU/GPU memory copy.
+
+4. **Audio Management: WASAPI Shared Mode vs. Audio Hijacking / Exclusive Mode**:
+   - High-fidelity audiophile software (e.g. foobar2000) often uses WASAPI Exclusive Mode or ASIO, which monopolizes sound cards and mutes all other system sounds (browsers, notifications, games). This is unacceptable for an in-car desktop environment.
+   - Windows Audio Endpoint Volume (system mixer) treats the entire application as a single audio session and cannot natively arbitrate internal stream priority.
+   - Therefore, CarPlayStation must use **WASAPI Shared Mode (`AUDCLNT_SHAREMODE_SHARED`)** to seamlessly coexist with all other desktop audio, while implementing an **application-internal 3-Lane Software Audio Mixer** (`MainMedia`, `AltNavigation`, `SiriTelephony`) with an automatic `AudioDuckingManager` providing smooth attack/release volume attenuation.
+
+### Decision
+
+1. **Extensible Codec & Decoder Architecture (`Core/Media/IVideoDecoder.h`)**:
+   - Support `VideoCodec` enumeration with forward-compatible entries (`H264`, `HEVC`, `AV1`, `VP9`, `VVC`).
+   - Implement `MfVideoDecoder` as primary hardware decoder for H.264/HEVC using Windows Media Foundation Transforms with `CODECAPI_AVLowLatencyMode = TRUE`.
+   - Implement `FFmpegVideoDecoder` as fallback decoder using FFmpeg `d3d11va` hardware decoding (bypassing Microsoft Store HEVC licensing) and CPU fallback.
+   - Implement dynamic runtime binding (`LoadLibrary` / delay loading) so core builds remain 100% self-contained even before external DLLs are placed.
+
+2. **Automated FFmpeg Package Sync (x64 & ARM64)**:
+   - Provide a CMake synchronization script (`cmake/FindOrDownloadFFmpeg.cmake`) and maintenance helper (`scripts/Update-FFmpeg.ps1`) targeting official latest stable releases (Gyan.dev / BtbN `FFmpeg-Builds`).
+   - Automatically detect host target architecture (`x64` vs `winarm64`), download stripped shared release packages, cache version tags to prevent repeated network delays during incremental compilation, and configure CMake `POST_BUILD` to deploy DLLs alongside `CarPlayStation.exe`.
+
+3. **Direct3D 11 Display Scaling (No Resize Renegotiation) & Fullscreen Resolution Jumps**:
+   - Window Resizing Isolation: When the user resizes or drags window borders (regardless of window dimensions or aspect ratio), the underlying physical video stream resolution NEVER renegotiates with the iPhone. The presentation layer handles this purely at the Direct3D 11 rendering level based on user preference:
+     - **Aspect Ratio with Black Bars (Default)**: Automatically preserves native aspect ratio and fills excess borders with black bars (Letterboxing / Pillarboxing).
+     - **Stretch to Fill (Optional)**: Directly scales the quad/viewport across the client area without aspect preservation.
+   - Strict Trigger for Physical Stream Resolution Jumps:
+     - Physical video renegotiation with the iPhone is strictly restricted to:
+       1. Explicit resolution selection by the user in Application settings (e.g. 720p, 1080p, 2K);
+       2. Entering/exiting **Borderless Fullscreen / Fullscreen mode**, where the stream renegotiates to match the physical display's native resolution and refresh rate.
+     - Ordinary window maximization or manual resizing never triggers stream renegotiation.
+
+4. **Adaptive WASAPI Shared Mode Audio Engine (`GetMixFormat`)**:
+   - Single system-level audio stream using **WASAPI Shared Mode** (`AUDCLNT_SHAREMODE_SHARED`), guaranteeing zero device monopolization.
+   - Hardware Self-Adaptive Mode: Utilizes `IAudioClient::GetMixFormat` to automatically query and match the soundcard's native hardware mix format (supporting audiophile soundcards up to 24-bit / 32-bit Float, 44.1k / 48k / 88.2k / 96k / 176.4k / 192kHz), eliminating Windows system-level destructive resampling.
+   - Internal Resampler & Formats: High-precision internal resampler converts incoming iPhone audio streams (typically 44.1kHz or 48kHz 16-bit) to the target DAC format.
+   - Application-internal software mixer routing:
+     - `MainMedia` (Music, Podcasts)
+     - `AltNavigation` (Turn-by-turn prompts)
+     - `SiriTelephony` (Voice calls, Siri)
+   - `AudioDuckingManager` providing smooth linear/exponential gain ducking:
+     - Ducking Attack: Attenuates `MainMedia` to 20%~25% within 100ms when navigation/telephony starts.
+     - Ducking Release: Smoothly restores `MainMedia` to 100% over 300ms–500ms after navigation prompts finish.
+     - Soft-limiter protection preventing clipping when all 3 lanes output concurrently.
+
+
+### Consequences
+
+Positive:
+- No user friction: plays HEVC even without the $0.99 Microsoft Store HEVC package.
+- Automated dependency management: developers and users do not need to manually hunt for FFmpeg DLLs.
+- Sub-frame display latency with zero UI thread coupling.
+- No audio monopolization: CarPlay audio plays harmoniously with other PC apps, with clean automotive ducking.
+- Future-proof for AV1/VP9 if Apple expands CarPlay specifications.
+
+### Related
+
+- `DEC-002`, `DEC-003`, `DEC-004`
+- `Core/Media/IVideoDecoder.h`
+- `Core/Media/IAudioPipeline.h`
+- `Core/Media/IMicrophoneUplink.h`
+- `Core/Media/AirPlayVideoDemuxer.h`
+- `Core/Media/MfVideoDecoder.h`
+- `Core/Media/FFmpegVideoDecoder.h`
+- `Core/Media/AudioDuckingManager.h`
+- `Core/Media/WasapiAudioPipeline.h`
+
+
 
 

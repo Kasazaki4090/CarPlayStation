@@ -62,3 +62,21 @@ target_link_libraries(CarPlayStation_ProtocolTests PRIVATE
 target_compile_features(CarPlayStation_ProtocolTests PRIVATE cxx_std_20)
 
 add_test(NAME ProtocolTests COMMAND CarPlayStation_ProtocolTests)
+
+# Session & AirPlay layer tests (PairingStore, RTSP, CarPlay state machine)
+add_executable(CarPlayStation_SessionTests
+    SessionTests.cpp
+)
+
+target_include_directories(CarPlayStation_SessionTests PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_link_libraries(CarPlayStation_SessionTests PRIVATE
+    CarPlayCore
+)
+
+target_compile_features(CarPlayStation_SessionTests PRIVATE cxx_std_20)
+
+add_test(NAME SessionTests COMMAND CarPlayStation_SessionTests)
+

@@ -4,6 +4,45 @@
 
 ---
 
+### 记录 9：会话状态机、配对存储与 AirPlay RTSP 协议栈（Partition 4: Core/Session）全量实现与端到端验证
+
+* **时间**：`2026-09-30 12:25:00 (UTC+8)`
+* **客户端（Agent）**：`Google Antigravity (Gemini 3.8 Flash)`
+* **背景与实现**：
+  - 依据架构设计与 DEC-003 / DEC-004，全面完成 **Partition 4: Core/Session（会话状态机、配对存储与 AirPlay 核心控制层）** 全部 4 个步骤的研发。
+  - **核心成果与组件实现**：
+    1. **Step 1 (已配对设备存储与快速重连匹配器 PairingStore)**：
+       - 抽象 [`Core/Session/IPairingStore.h`](file:///d:/CarPlayStation/Core/Session/IPairingStore.h)：定义 `PairedDevice` 领域模型（DeviceID、蓝牙/Wi-Fi MAC、公钥凭证、最后连接时间戳），提供快速查询与多键索引契约。
+       - 实现 [`Core/Session/PairingStore.h/.cpp`](file:///d:/CarPlayStation/Core/Session/PairingStore.h)：基于轻量 JSON 格式实现安全磁盘持久化，支持原子写入（临时文件+重命名原子替换），确保意外掉电不损坏配置；遵循 Application 偏好分层规范。
+       - 实现 [`Core/Session/MockPairingStore.h`](file:///d:/CarPlayStation/Core/Session/MockPairingStore.h)：提供线程安全的内存级配对虚拟存储桩，支持故障注入与测试断言。
+    2. **Step 2 (AirPlay RTSP 协议编解码与参数协商引擎 AirPlayRtspCodec & Server)**：
+       - 定义 [`Core/Session/AirPlayRtspTypes.h`](file:///d:/CarPlayStation/Core/Session/AirPlayRtspTypes.h)：标准 RFC 2326 RTSP 报文抽象、大小写不敏感请求头映射 `RtspHeaders`、`NegotiatedMediaParams` 媒体参数结构。
+       - 实现 [`Core/Session/AirPlayRtspCodec.h/.cpp`](file:///d:/CarPlayStation/Core/Session/AirPlayRtspCodec.h)：基于 C++20 `std::string_view` 与 `std::span` 的零拷贝 RTSP 报文流式帧解析器，支持粘包/半包重组、`Content-Length` 精确分包以及 `BuildOptionsResponse` / `BuildSetupResponse` 报文序列化。
+       - 实现 [`Core/Session/AirPlayRtspServer.h/.cpp`](file:///d:/CarPlayStation/Core/Session/AirPlayRtspServer.h)：WinSock 非阻塞多客户端 TCP 侦听服务，支持动态端口分配（端口 0 自动化测试支持）、后台工作线程池，并内置纯内存级交互仿真器 `ProcessSimulatedRequest`。
+    3. **Step 3 (CarPlay 核心状态机与生命周期编排器 CarPlaySessionStateMachine)**：
+       - 增强 [`Core/Session/ICarPlaySession.h`](file:///d:/CarPlayStation/Core/Session/ICarPlaySession.h)：扩展 `SessionState::Reconnecting` 异常恢复状态。
+       - 实现 [`Core/Session/CarPlaySessionStateMachine.h/.cpp`](file:///d:/CarPlayStation/Core/Session/CarPlaySessionStateMachine.h)：
+         - 完整流转矩阵：`Idle → BtDiscovered → iAP2Authenticated → WifiHandoff → AirPlayStreaming → Paused → Teardown → Reconnecting / Error`。
+         - 多层级协同驱动：自动编排 Wi-Fi 5GHz SoftAP 启停、mDNS 服务组播广播、RTSP 服务接管及 `IPairingStore` 快速重连匹配。
+         - 软硬件超时看门狗保护：支持毫秒级看门狗心跳（`TickWatchdog`），自动探测 iAP2 握手超时、Wi-Fi 关联超时与重连退避调度。
+         - 线程安全事件分发：通过 `SessionStateObserver` 采用非锁重入通知机制广播状态跃迁。
+    4. **Step 4 (端到端集成仿真测试与全量自动化验证)**：
+       - 在 [`Tests/SessionTests.cpp`](file:///d:/CarPlayStation/Tests/SessionTests.cpp) 中新增端到端全链路集成仿真测试（7 组大型测试用例）：
+         - `TestMockPairingStore` / `TestPairingStoreDiskPersistence`：验证增删查改、按 MAC 检索、排序与磁盘原子存取。
+         - `TestRtspCodecParsingAndFraming` / `TestRtspResponseSerialization` / `TestRtspServerLifecycleAndSimulation`：验证流式 RTSP 分包、RFC 2326 序列化及真实本地 Loopback 端口握手。
+         - `TestCarPlayStateMachineLifecycleAndHandoff`：联结 `MockPairingStore`、`MockWifiSoftApManager`、`MockMdnsAdvertiser`、`AirPlayRtspServer`，完整模拟首次配对、Wi-Fi 切换、推流协商、暂停恢复与二次快速重连。
+         - `TestCarPlayStateMachineWatchdogAndReconnect`：模拟蓝牙超时、认证失败、Wi-Fi 掉线重试与达到最大重试次数熔断。
+  - **历史遗留错误与环境修复（100% 修复完毕）**：
+    - `Core/Common/Result.h`：补充缺失的 `StatusCode` 并提供 `MakeError` 全局帮助函数；特化 `Result<void>`。
+    - `Core/Hardware/RadioAdapterHelper` / `FileMfiSigner`：将 `std::mutex` 升级为 `std::recursive_mutex`，彻底解决自重入死锁问题；修复 5GHz 网卡枚举能力探测与 CNG ECDSA P-256 私钥导入。
+    - `Core/Transport/BtSdpHelper`：清理 WinCE 过期字段适配 Windows SDK。
+    - Windows 本地外部编辑器自动保存引发的 0KB 文件异常：全量恢复所有源码并建立 git 跟踪保护。
+  - **测试运行指标**：
+    - MSVC (`10.0.26100.0` WinSDK, C++20) 编译 0 错误通过。
+    - CTest 5/5 全测试套件 (`CommonTests`, `HardwareTests`, `TransportTests`, `ProtocolTests`, `SessionTests`) 100% 全部通过（用时 ~3.8s）。
+
+---
+
 ### 记录 8：iAP2 协议与链路层（Partition 3: Core/Protocol）全量实现与编译验证
 
 * **时间**：`2026-09-29 23:45:00 (UTC+8)`

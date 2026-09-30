@@ -79,7 +79,7 @@ Common::Result<Common::ByteBuffer> I2cMfiSigner::ReadRegister(uint8_t reg, size_
     }
 
     auto deadline = std::chrono::steady_clock::now() + options_.io_retry_timeout;
-    Common::Result<Common::ByteBuffer> last_res = Common::Status::Error(Common::StatusCode::TimedOut, "I2C read timed out");
+    Common::Result<Common::ByteBuffer> last_res = Common::Status::Error(Common::StatusCode::Timeout, "I2C read timed out");
 
     while (std::chrono::steady_clock::now() < deadline) {
         // Repeated-start transaction: write reg, read length
@@ -106,7 +106,7 @@ Common::Result<void> I2cMfiSigner::WriteRegister(uint8_t reg, Common::ByteSpan d
     payload.insert(payload.end(), data.begin(), data.end());
 
     auto deadline = std::chrono::steady_clock::now() + options_.io_retry_timeout;
-    Common::Result<void> last_res = Common::Status::Error(Common::StatusCode::TimedOut, "I2C write timed out");
+    Common::Result<void> last_res = Common::Status::Error(Common::StatusCode::Timeout, "I2C write timed out");
 
     while (std::chrono::steady_clock::now() < deadline) {
         auto res = adapter_->Write(slave_address_, payload);

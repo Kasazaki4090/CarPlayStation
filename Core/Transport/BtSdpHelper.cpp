@@ -125,10 +125,7 @@ Common::Status BtSdpHelper::RegisterSdpService(SOCKET socket, uint8_t channel, H
     HANDLE recordHandle = nullptr;
     bthSetService->pSdpVersion = &sdpVersion;
     bthSetService->pRecordHandle = &recordHandle;
-    bthSetService->fSdpVersion = 0;
     bthSetService->fCodService = 0;
-    bthSetService->fCopts = 0;
-    bthSetService->fPublishRecord = TRUE;
     bthSetService->ulRecordLength = static_cast<ULONG>(sdpRecord.size());
     std::memcpy(bthSetService->pRecord, sdpRecord.data(), sdpRecord.size());
 
@@ -163,7 +160,6 @@ void BtSdpHelper::UnregisterSdpService(HANDLE handle) {
     ULONG sdpVersion = BTH_SDP_VERSION;
     bthSetService->pSdpVersion = &sdpVersion;
     bthSetService->pRecordHandle = &handle;
-    bthSetService->fPublishRecord = FALSE;
 
     BLOB blob{};
     blob.cbSize = sdpBlobSize;

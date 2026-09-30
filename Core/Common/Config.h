@@ -21,16 +21,22 @@ namespace CarPlayStation::Core::Common {
 //     user preferences: see Application::MFiPreferences (DEC-003, DEC-004).
 // ============================================================================
 
-// Protocol-level video codecs (negotiated facts; no "Auto" — that is a user preference)
+// Protocol-level video codecs (negotiated facts; extensible per DEC-008)
 enum class VideoCodec : uint8_t {
     H264 = 0,
-    HEVC = 1
+    HEVC = 1,
+    AV1  = 2,
+    VP9  = 3,
+    VVC  = 4
 };
 
 [[nodiscard]] constexpr std::string_view VideoCodecToString(VideoCodec codec) noexcept {
     switch (codec) {
         case VideoCodec::H264: return "H264";
         case VideoCodec::HEVC: return "HEVC";
+        case VideoCodec::AV1:  return "AV1";
+        case VideoCodec::VP9:  return "VP9";
+        case VideoCodec::VVC:  return "VVC";
     }
     return "Unknown";
 }
@@ -41,14 +47,34 @@ struct VideoStreamSpec {
     uint32_t width{1920};
     uint32_t height{1080};
     uint32_t fps{60};                   // 30 or 60 fps
+    uint32_t max_bitrate_kbps{0};       // 0 = automatic / unrestricted
 };
+
+// Audio sample container type (for standard PCM integer and 32-bit floating point)
+enum class AudioSampleType : uint8_t {
+    PcmInt16   = 0,
+    PcmInt24   = 1,
+    PcmInt32   = 2,
+    PcmFloat32 = 3
+};
+
+[[nodiscard]] constexpr std::string_view AudioSampleTypeToString(AudioSampleType type) noexcept {
+    switch (type) {
+        case AudioSampleType::PcmInt16:   return "PcmInt16";
+        case AudioSampleType::PcmInt24:   return "PcmInt24";
+        case AudioSampleType::PcmInt32:   return "PcmInt32";
+        case AudioSampleType::PcmFloat32: return "PcmFloat32";
+    }
+    return "Unknown";
+}
 
 // Concrete audio output format consumed by the pipeline.
 // Volumes and ducking are runtime controls, not part of the format.
 struct AudioOutputFormat {
-    uint32_t sample_rate{48000};  // e.g., 44100, 48000, 96000 Hz
+    uint32_t sample_rate{48000};  // e.g., 32000, 44100, 48000, 88200, 96000, 176400, 192000 Hz
     uint8_t channels{2};          // 1 = Mono, 2 = Stereo
-    uint8_t bit_depth{16};        // 16-bit or 24-bit PCM
+    uint8_t bit_depth{16};        // 16, 24, 32-bit
+    AudioSampleType sample_type{AudioSampleType::PcmInt16};
 };
 
 // Device identity advertised during Bluetooth / protocol handshake.

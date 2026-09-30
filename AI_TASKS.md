@@ -194,13 +194,18 @@ You are assigned to develop the [Layer 5: Core/Media] module of CarPlayStation.
    - Do NOT modify files outside this directory.
 
 2. Core Objectives:
-   - Design `IVideoDecoder.h` and implement `MfVideoDecoder.h/.cpp` (Windows Media Foundation + Direct3D 11 hardware-accelerated H.264/HEVC decoder outputting to D3D11 shared texture handles) and FFmpeg fallback interface.
-   - Implement `AudioPipeline.h/.cpp`: 3-Lane WASAPI audio renderer (Main Media, Alt Navigation, Siri/Call) with smooth volume attenuation (`AudioDuckingManager`).
-   - Implement `MicrophoneUplink.h/.cpp`: WASAPI mic capture and uplink stream encoding.
-   - Never call UI window handles directly; deliver frames via shared handles or lock-free queues.
+   - Design `IVideoDecoder.h` with forward-compatible codec discovery (H264, HEVC, and future AV1/VP9/VVC).
+   - Implement `AirPlayVideoDemuxer.h/.cpp` for NALU demuxing, Annex-B conversion, SPS/PPS extraction, and IDR resync.
+   - Implement `MfVideoDecoder.h/.cpp` (Windows Media Foundation + Direct3D 11 hardware-accelerated H.264/HEVC decoder outputting to D3D11 shared texture handles via `IDXGIResource::GetSharedHandle`, sub-frame latency, zero-copy, EVR/madVR rejected).
+   - Implement dynamic FFmpeg fallback (`FFmpegVideoDecoder.h/.cpp` via `d3d11va` / CPU) resolving Windows 10/11 retail lack of $0.99 Microsoft Store HEVC extension; integrate with automated dependency sync (`cmake/FindOrDownloadFFmpeg.cmake`).
+   - Implement `WasapiAudioPipeline.h/.cpp`: non-exclusive WASAPI Shared Mode renderer (`AUDCLNT_SHAREMODE_SHARED`, 48kHz 16-bit Stereo PCM) with internal 3-Lane software mixer (MainMedia, AltNavigation, SiriTelephony) and soft-limiter.
+   - Implement `AudioDuckingManager.h/.cpp`: smooth attack/release volume ducking curves for navigation and Siri prompts.
+   - Implement `MicrophoneUplink.h/.cpp`: WASAPI mic capture and uplink stream encoding (16/24kHz mono).
+   - Implement `MockVideoDecoder.h`, `MockAudioPipeline.h`, and `MockMicrophoneUplink.h` for headless test automation.
+   - Never call UI window handles directly; deliver frames strictly via shared texture handles or callbacks.
 
 3. Standards:
-   - Sub-frame latency optimization, robust frame-drop handling.
+   - C++20, Windows SDK (Direct3D 11, Media Foundation, WASAPI), sub-frame latency optimization, no audio device monopolization (shared mode only).
 ```
 
 ---

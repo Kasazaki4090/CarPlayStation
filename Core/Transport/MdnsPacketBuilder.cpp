@@ -120,7 +120,7 @@ Common::ByteBuffer MdnsPacketBuilder::BuildAirPlayAnnouncement(const MdnsService
 
     uint8_t ipBytes[4] = {192, 168, 137, 1};
     int b0 = 192, b1 = 168, b2 = 137, b3 = 1;
-    if (std::sscanf(config.ipv4Address.c_str(), "%d.%d.%d.%d", &b0, &b1, &b2, &b3) == 4) {
+    if (sscanf_s(config.ipv4Address.c_str(), "%d.%d.%d.%d", &b0, &b1, &b2, &b3) == 4) {
         ipBytes[0] = static_cast<uint8_t>(b0);
         ipBytes[1] = static_cast<uint8_t>(b1);
         ipBytes[2] = static_cast<uint8_t>(b2);

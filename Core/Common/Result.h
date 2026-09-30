@@ -15,13 +15,20 @@ enum class StatusCode : uint32_t {
     NotFound,
     NotSupported,
     Timeout,
+    TimedOut = Timeout,
     NetworkError,
     TransportDisconnected,
     AuthenticationFailed,
     ProtocolError,
     MediaPipelineError,
     HardwareError,
-    ResourceExhausted
+    ResourceExhausted,
+    Unavailable,
+    DeviceUnavailable,
+    InvalidState,
+    IoError,
+    PermissionDenied,
+    ConnectionReset
 };
 
 [[nodiscard]] constexpr std::string_view StatusCodeToString(StatusCode code) noexcept {
@@ -39,6 +46,12 @@ enum class StatusCode : uint32_t {
         case StatusCode::MediaPipelineError: return "MediaPipelineError";
         case StatusCode::HardwareError: return "HardwareError";
         case StatusCode::ResourceExhausted: return "ResourceExhausted";
+        case StatusCode::Unavailable: return "Unavailable";
+        case StatusCode::DeviceUnavailable: return "DeviceUnavailable";
+        case StatusCode::InvalidState: return "InvalidState";
+        case StatusCode::IoError: return "IoError";
+        case StatusCode::PermissionDenied: return "PermissionDenied";
+        case StatusCode::ConnectionReset: return "ConnectionReset";
     }
     return "Unknown";
 }
@@ -66,6 +79,10 @@ private:
     StatusCode code_{StatusCode::Ok};
     std::string message_{};
 };
+
+[[nodiscard]] inline Status MakeError(StatusCode code, std::string message = {}) {
+    return Status::Error(code, std::move(message));
+}
 
 // Single-value or error wrapper (modern C++ alternative to out-parameters).
 // T must be default constructible.
@@ -96,6 +113,23 @@ public:
 private:
     bool ok_{false};
     T value_{};
+    Status status_{};
+};
+
+// Specialization for Result<void>
+template <>
+class Result<void> {
+public:
+    Result() : status_(Status::Ok()) {}
+    Result(Status status) : status_(status) {}
+
+    [[nodiscard]] static Result<void> Ok() noexcept { return Result<void>(); }
+
+    [[nodiscard]] bool IsOk() const noexcept { return status_.IsOk(); }
+    [[nodiscard]] bool IsError() const noexcept { return status_.IsError(); }
+    [[nodiscard]] Status Error() const noexcept { return status_; }
+
+private:
     Status status_{};
 };
 
