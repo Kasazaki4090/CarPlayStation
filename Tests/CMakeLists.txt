@@ -80,3 +80,20 @@ target_compile_features(CarPlayStation_SessionTests PRIVATE cxx_std_20)
 
 add_test(NAME SessionTests COMMAND CarPlayStation_SessionTests)
 
+# Media layer tests (video demuxer, decoders, audio pipeline, mic uplink)
+add_executable(CarPlayStation_MediaTests
+    MediaTests.cpp
+)
+
+target_include_directories(CarPlayStation_MediaTests PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_link_libraries(CarPlayStation_MediaTests PRIVATE
+    CarPlayCore
+)
+
+target_compile_features(CarPlayStation_MediaTests PRIVATE cxx_std_20)
+
+add_test(NAME MediaTests COMMAND CarPlayStation_MediaTests)
+

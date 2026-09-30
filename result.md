@@ -4,6 +4,82 @@
 
 ---
 
+### 记录 10-A：视频解复用器、Media Foundation 硬件解码器与 FFmpeg 自动同步（Partition 5: Core/Media 步骤 2）实现与验证
+
+* **时间**：`2026-09-30 14:10:00 (UTC+8)`
+* **客户端（Agent）**：`Google Antigravity (Gemini 3.8 Flash)`
+* **背景与实现**：
+  - 依据架构设计与 DEC-008（可扩展视频解码器、FFmpeg 自动同步回退、D3D11 共享纹理、WASAPI 共享模式 3 通道混音器），完成 **Partition 5: Core/Media 步骤 2（视频解复用器、Media Foundation 解码器与 FFmpeg 自动同步）** 全部 4 个子任务。
+  - **核心成果与组件实现**：
+    1. **2.1 流解复用器与 NALU 提取器 (`AirPlayVideoDemuxer.h/.cpp`)**：
+       - 解析 AirPlay 视频负载：将 4 字节大端长度前缀 NALU 转换为 Annex-B（`00 00 00 01` 起始码）。
+       - 支持非标准超宽宽高比（`1920x720`、`2560x720`）；识别 SPS/PPS/VPS 与 IDR 关键帧（H.264 取低 5 位、HEVC 取低 6 位 NALU 类型）。
+       - 实现丢帧检测与重同步到下一个 IDR 关键帧（`RequestResync` / 丢弃非 IDR 帧直至关键帧）。
+       - 关键帧组装时前置 Annex-B 编码的参数集（SPS/PPS/VPS），保证解码器可直接消费。
+    2. **2.2 Media Foundation 硬件解码器与 D3D11 共享表面 (`MfVideoDecoder.h/.cpp`)**：
+       - 基于 Windows Media Foundation Transform（MFT）的 H.264 / HEVC 硬件解码器（`MFCreateSample` + `ProcessInput` + `MFT_OUTPUT_DATA_BUFFER` 的 `ProcessOutput` 排空循环）。
+       - 启用 `MF_LOW_LATENCY`（对应 `CODECAPI_AVLowLatencyMode = TRUE`）；Direct3D 11 DXGI 设备管理器集成，经 `IDXGIResource::GetSharedHandle` 输出共享表面句柄。
+       - 窗口拖拽时零开销 GPU 视口 letterboxing；带防抖（`reconfigure_debounce_ms_`）的重协商触发。
+       - 非 MSVC 平台提供优雅回退（`Init` 返回 `NotSupported`，其余为桩实现）。
+    3. **2.3 自动化 FFmpeg 同步（x64 / ARM64）(`cmake/FindOrDownloadFFmpeg.cmake` + `scripts/Update-FFmpeg.ps1`)**：
+       - CMake 模块自动检测宿主目标架构（x64 / ARM64），自动下载 Gyan.dev / BtbN 的 release-shared ZIP（版本 7.1），提取 `avcodec`、`avutil` 与头文件并带本地版本缓存；配置 `POST_BUILD` 将 DLL 复制到输出目录。
+       - 提供导入目标 `FFmpeg_avcodec` / `FFmpeg_avutil` / `FFmpeg_Face`；当 FFmpeg 缺失时优雅降级为空 `FFmpeg_Face` INTERFACE 目标（回退到 MF/CPU 路径）。
+       - `scripts/Update-FFmpeg.ps1` 提供手动一键更新（参数 Version/Arch/OutputDir，自动检测架构、下载、解压、扁平化并复制 DLL）。
+    4. **2.4 FFmpeg 硬件/软件回退解码器 (`FFmpegVideoDecoder.h/.cpp`)**：
+       - 动态运行时绑定（`LoadLibrary` / `GetProcAddress`，`CPS_FFMPEG_DLLOAD` / `CPS_FFMPEG_DLSYM` 宏），DLL 缺失时核心构建保持零依赖。
+       - `d3d11va` 硬件解码（绕过 Windows Store HEVC 包要求），并带 CPU 软件回退；`Reconfigure` 在调用 `Shutdown`/`Init` 前解锁互斥量以避免死锁。
+  - **构建与测试**：
+    - 更新 `Core/CMakeLists.txt`（纳入 3 个新 .cpp，WIN32 块链接 `mfplat`、`mfuuid`、`d3d11`、`dxgi`，并 `include(cmake/FindOrDownloadFFmpeg.cmake)`）与 `Tests/CMakeLists.txt`（新增 `CarPlayStation_MediaTests` 可执行目标与 CTest 注册）。
+    - 在 `Tests/MediaTests.cpp` 中新增 3 组步骤 2 测试：`TestAirPlayVideoDemuxer`（NALU 解复用、长度前缀→Annex-B、SPS/PPS 解析、IDR 检测、参数集前置）、`TestAirPlayVideoDemuxerResync`（截断→重同步、等待关键帧期间丢弃非 IDR 帧）、`TestHardwareDecoderGracefulFallback`（FFmpeg/MF `Init` 返回 `NotSupported` 或干净的能力查询，不崩溃）。
+  - **编译与测试运行指标**：
+    - 构建环境：MSVC BuildTools 14.44（`/utf-8 /W4 /permissive-`，C++20），NMake Makefiles 生成器（`build-msvc`）。
+    - 新增文件（`AirPlayVideoDemuxer.cpp`、`MfVideoDecoder.cpp`、`FFmpegVideoDecoder.cpp`、`MediaTests.cpp`）编译 0 警告 / 0 错误。
+    - CTest 6/6 全测试套件（`CommonTests`、`HardwareTests`、`TransportTests`、`ProtocolTests`、`SessionTests`、`MediaTests`）100% 全部通过。
+  - **本会话修复的关键缺陷**：
+    1. `MfVideoDecoder.cpp`：`HResultToCommonStatus` 返回类型由 `HRESULT` 修正为 `Common::Status`；移除错误的 `SetGUID(MFT_CATEGORY_VIDEO_DECODER, nullptr)`；`ProcessInput` 改用 `MFCreateSample` + `AddBuffer` 封装样本；`DrainOutput` 改用 `MFT_OUTPUT_DATA_BUFFER`；`Flush` 改用 `MFT_MESSAGE_COMMAND_FLUSH`。
+    2. `FFmpegVideoDecoder.cpp`：`GetProcAddress`/`FreeLibrary` 经宏将 `void*` 转换为 `HMODULE`；`MakeError` 由 3 参改为 2 参（消息拼接）；`AVPacket` 字段访问改用 `reinterpret_cast` 并按 FFmpeg 7.x 布局取偏移 48（data）/ 56（size）。
+    3. `AirPlayVideoDemuxer.cpp`：关键帧检测由 `firstNaluType`（可能为 SPS）改为 `hasIdrSlice` 标志；参数集改为存储 Annex-B 编码形式，避免关键帧组装时双重前缀。
+    4. `MediaTests.cpp`：`ASSERT_EQ` 对枚举（`NalUnitType`/`StatusCode`）使用 `<<` 失败，新增 `PrintValue` 模板（`std::is_enum_v` 分支）修复。
+
+---
+
+### 记录 10-B：3 通道音频混音器、闪避管理器与麦克风上行（Partition 5: Core/Media 步骤 3+4）全量实现与测试验证
+
+* **时间**：`2026-09-30 21:15:00 (UTC+8)`
+* **客户端（Agent）**：`GitHub Copilot (qwen3.8-27b)`
+* **背景与实现**：
+  - 依据架构设计与 DEC-008（WASAPI 共享模式 3 通道混音器），在 Partition 5: Core/Media 中完成 **步骤 3（3 通道音频混音器、闪避管理器与麦克风上行）** 与 **步骤 4（测试套件、验证与 CMake 集成）** 的全部研发。步骤 1（接口契约/Mock）与步骤 2（视频解复用器/MF 解码器/FFmpeg 自动同步）已在先前会话完成。
+  - **核心成果与组件实现**：
+    1. **3.1 音频闪避状态机 (`AudioDuckingManager.h/.cpp`)**：
+       - 监控 `MainMedia` / `AltNavigation` / `SiriTelephony` 三通道活动状态，`Config{fullGain=1.0, duckedGain=0.20, attackMs=100, releaseMs=400}`。
+       - 攻击曲线：导航/电话提示开始时于 100ms 内由 100% 平滑淡出至 20%；释放曲线：提示结束后于 400ms 内恢复至 100%。
+       - `Tick(dtMs)` 步进式增益推进，并在步进到达/越过目标时以 epsilon 精确吸附至目标值，规避浮点 1-ULP 漂移，保证 `IsSettled()` 判定稳定。
+    2. **3.2 自适应 WASAPI 共享模式渲染器与软件混音器 (`WasapiAudioPipeline.h/.cpp`)**：
+       - 实现 `IAudioPipeline`，非独占共享模式与系统声音和平共存；WASAPI COM 后端以 `#ifdef _WIN32` 守卫并降级为 null 渲染器（`wasapiActive_=false`），使纯软件混音/重采样/限幅逻辑可无头单测。
+       - 平台无关的 3 通道软件混音器：`PushLaneSamples` 按通道音量乘数与闪避比累加至 `laneBuffers_[3]`，`RenderMixed` 逐样本求和并施加软限幅（阈值 0.95，软膝压缩超调 0.5 倍并钳制）。
+       - 平台无关的多速率线性重采样器 `ResampleLinear`（`srcRate→dstRate` 线性插值）。
+       - `PcmToFloat` 支持 PcmFloat32 / PcmInt16 / PcmInt24 / PcmInt32 四种格式转 float32。
+    3. **3.3 WASAPI 麦克风上行 (`WasapiMicrophoneUplink.h/.cpp`)**：
+       - 实现 `IMicrophoneUplink`，WASAPI 采集客户端以 `#ifdef _WIN32` 守卫并降级为 null 采集源。
+       - `ProcessCapturedSamples` 将采集样本按 `srcCount * dstRate / srcRate` 重采样至 16/24kHz 单声道，施加输入增益后按 `packetSamples` 分包，逐包分发 `UplinkAudioCallback`（回调在锁外调用，避免死锁）。
+  - **步骤 4（测试与构建集成）**：
+    - 在 [`Tests/MediaTests.cpp`](file:///d:/CarPlayStation/Tests/MediaTests.cpp) 新增 5 组测试（Test 8–12）：`TestAudioDuckingManager`（闪避增益曲线与时序）、`TestWasapiAudioPipelineMixer`（3 通道数学加法 + 软限幅钳制 + 闪避/通道音量 + WriteAudio 计数）、`TestWasapiAudioPipelineResampler`（48k→24k 线性重采样）、`TestWasapiMicrophoneUplink`（48k→16k 重采样 + 10ms 分包 + 回调分发 + 输入增益）、`TestMockEndToEndIntegration`（MockVideoDecoder + MockAudioPipeline 端到端 A/V 同步）。
+    - 更新 [`Core/CMakeLists.txt`](file:///d:/CarPlayStation/Core/CMakeLists.txt)：纳入 3 个新 .cpp 至 `CarPlayCore`，WIN32 块新增链接 `ole32 oleaut32 mmdevapi ksuser`（WASAPI）。
+  - **构建过程中发现并修复的 Bug**：
+    1. `WasapiAudioPipeline.h`：`IsRunning()` 对普通 `bool running_` 误用 `.load()`（C2228），改为直接返回 `running_`。
+    2. `WasapiAudioPipeline`：`WriteAudio` 持有 `mutex_` 后调用同样加锁的 `PushLaneSamples` 导致死锁，新增私有 `PushLaneSamplesLocked`（无锁）供其调用。
+    3. `WasapiMicrophoneUplink`：`ResampleLinear` 误以 `srcCount` 作为输出样本数，导致 `GetCapturedSampleCount()` 返回源计数 48000 而非重采样后 16000，修正为 `srcCount * dstRate / srcRate`。
+    4. `AudioDuckingManager::Tick`：浮点 1-ULP 漂移导致 `ASSERT_EQ(g, 0.20f)` 失败，加入 epsilon 精确吸附。
+    5. `MediaTests.cpp`：`duck.Tick(...)` 丢弃 `[[nodiscard]]` 返回值触发 C4834，改为接收返回值并断言。
+  - **测试运行指标**：
+    - MSVC 14.44.35207（`/utf-8 /W4 /permissive-`, C++20）：3 个新 .cpp 与 `MediaTests.cpp` 全部 0 警告 / 0 错误通过编译。
+    - CTest 6/6 全测试套件（`CommonTests`, `HardwareTests`, `TransportTests`, `ProtocolTests`, `SessionTests`, `MediaTests`）100% 全部通过（用时 ~2.8s）。
+    - `MediaTests` 内部 12 组测试（Test 1–12）全部 `[PASS]`。
+
+---
+
+
+
 ### 记录 9：会话状态机、配对存储与 AirPlay RTSP 协议栈（Partition 4: Core/Session）全量实现与端到端验证
 
 * **时间**：`2026-09-30 12:25:00 (UTC+8)`

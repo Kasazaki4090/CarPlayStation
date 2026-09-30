@@ -150,19 +150,19 @@ implementation tasks are started.
 
 ### 7. Media: video
 
-- [x] P0 [Concluded: DEC-008] Architecture decision concluded: forward-compatible codec discovery (H264/HEVC/AV1/VP9/VVC), Direct3D 11 shared texture handles (EVR/madVR rejected), and automated FFmpeg `d3d11va`/CPU fallback. *Detailed execution tracking in temporary `TODO_PARTITION_5.md`.*
-- [ ] P0 Implement H.264 depacketization and Media Foundation decoding with Direct3D11 presentation.
-- [ ] P1 Implement HEVC decoding and dynamic FFmpeg fallback with automated build sync.
+- [x] P0 [Concluded: DEC-008] Architecture decision concluded: forward-compatible codec discovery (H264/HEVC/AV1/VP9/VVC), Direct3D 11 shared texture handles (EVR/madVR rejected), and automated FFmpeg `d3d11va`/CPU fallback.
+- [x] P0 [Concluded: Partition 5] Implement H.264 depacketization and Media Foundation decoding with Direct3D11 presentation. (`AirPlayVideoDemuxer` + `MfVideoDecoder`)
+- [x] P1 [Concluded: Partition 5] Implement HEVC decoding and dynamic FFmpeg fallback with automated build sync. (`FFmpegVideoDecoder` + `FindOrDownloadFFmpeg.cmake`)
 - [ ] P1 Implement codec capability negotiation and runtime selection between H.264 and HEVC.
 - [ ] P1 Implement the display-mode selector described in `PROJECT.md`.
 - [ ] P2 Measure decode and presentation latency and define the frame-drop policy under load.
 
 ### 8. Media: audio and microphone
 
-- [x] P0 [Concluded: DEC-008] Architecture decision concluded: non-exclusive WASAPI Shared Mode (`AUDCLNT_SHAREMODE_SHARED`), internal 3-lane software mixer (`MainMedia`, `AltNavigation`, `SiriTelephony`), and `AudioDuckingManager`. *Detailed execution tracking in temporary `TODO_PARTITION_5.md`.*
-- [ ] P0 Implement audio rendering over WASAPI (Shared Mode) with device selection, format negotiation and hot-plug recovery.
-- [ ] P1 Implement ducking and lane swapping so navigation and calls behave correctly against media playback.
-- [ ] P1 Implement microphone capture, resampling and encoding for the uplink path (carplayd doc 16), including Siri and call activation.
+- [x] P0 [Concluded: DEC-008] Architecture decision concluded: non-exclusive WASAPI Shared Mode (`AUDCLNT_SHAREMODE_SHARED`), internal 3-lane software mixer (`MainMedia`, `AltNavigation`, `SiriTelephony`), and `AudioDuckingManager`.
+- [x] P0 [Concluded: Partition 5] Implement audio rendering over WASAPI (Shared Mode) with device selection, format negotiation and hot-plug recovery. (`WasapiAudioPipeline` 3-lane mixer + soft-limiter + multi-rate resampler)
+- [x] P1 [Concluded: Partition 5] Implement ducking and lane swapping so navigation and calls behave correctly against media playback. (`AudioDuckingManager` attack/release gain curve)
+- [ ] P1 Implement microphone capture, resampling and encoding for the uplink path (carplayd doc 16), including Siri and call activation. (`WasapiMicrophoneUplink` resample to 16/24kHz mono + packet dispatch; encoding/Siri/call activation still pending)
 - [ ] P2 Implement multichannel audio and automatic volume control, listed as limited in Phase 1.
 
 ### 9. Input
