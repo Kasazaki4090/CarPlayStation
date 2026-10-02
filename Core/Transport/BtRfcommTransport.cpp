@@ -1,5 +1,14 @@
 #include "Core/Transport/BtRfcommTransport.h"
+#include "Core/Common/Logging.h"
 #include <chrono>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <combaseapi.h>
+#endif
 
 namespace CarPlayStation::Core::Transport {
 
@@ -20,8 +29,11 @@ Common::Status BtRfcommTransport::StartServer(uint8_t channel) {
     if (m_simulatedMode.load()) {
         m_isListening = true;
         m_state = TransportState::Connecting;
+        CPS_LOG_INFO("BtRfcomm", "StartServer in simulated mode (no real Bluetooth)");
         return Common::Status::Ok();
     }
+
+    CPS_LOG_INFO("BtRfcomm", "StartServer: creating AF_BTH RFCOMM socket ...");
 
 #ifdef _WIN32
     WSADATA wsaData;
@@ -41,13 +53,27 @@ Common::Status BtRfcommTransport::StartServer(uint8_t channel) {
     sa.btAddr = 0; // Local radio
     sa.port = m_channel;
 
+    CPS_LOG_INFO("BtRfcomm", "Binding RFCOMM socket to channel ", std::to_string(m_channel), " ...");
     if (bind(m_serverSocket, reinterpret_cast<const sockaddr*>(&sa), sizeof(sa)) == SOCKET_ERROR) {
         int err = WSAGetLastError();
-        closesocket(m_serverSocket);
-        m_serverSocket = INVALID_SOCKET;
-        return Common::Status::Error(Common::StatusCode::Unavailable,
-            "Failed to bind Bluetooth RFCOMM socket to channel " + std::to_string(m_channel) + ": code " + std::to_string(err));
+        CPS_LOG_WARN("BtRfcomm", "bind() to channel ", std::to_string(m_channel),
+                     " failed (code ", std::to_string(err), "), falling back to BT_PORT_ANY dynamic channel allocation...");
+        sa.port = BT_PORT_ANY;
+        if (bind(m_serverSocket, reinterpret_cast<const sockaddr*>(&sa), sizeof(sa)) == SOCKET_ERROR) {
+            int err2 = WSAGetLastError();
+            closesocket(m_serverSocket);
+            m_serverSocket = INVALID_SOCKET;
+            CPS_LOG_ERROR("BtRfcomm", "bind(BT_PORT_ANY) failed: code ", std::to_string(err2));
+            return Common::Status::Error(Common::StatusCode::Unavailable,
+                "Failed to bind Bluetooth RFCOMM socket: code " + std::to_string(err2));
+        }
     }
+
+    int saLen = sizeof(sa);
+    if (getsockname(m_serverSocket, reinterpret_cast<sockaddr*>(&sa), &saLen) == 0) {
+        m_channel = static_cast<uint8_t>(sa.port);
+    }
+    CPS_LOG_INFO("BtRfcomm", "bind() OK on channel ", std::to_string(m_channel), "; calling listen() ...");
 
     if (listen(m_serverSocket, 1) == SOCKET_ERROR) {
         int err = WSAGetLastError();
@@ -56,10 +82,12 @@ Common::Status BtRfcommTransport::StartServer(uint8_t channel) {
         return Common::Status::Error(Common::StatusCode::Unavailable,
             "Failed to listen on RFCOMM socket: code " + std::to_string(err));
     }
+    CPS_LOG_INFO("BtRfcomm", "listen() OK; registering SDP service (WSASetServiceW may block) ...");
 
     // Register SDP service
     HANDLE sdpH = nullptr;
     auto sdpRes = BtSdpHelper::RegisterSdpService(m_serverSocket, m_channel, &sdpH);
+    CPS_LOG_INFO("BtRfcomm", "SDP registration returned (", sdpRes.IsOk() ? "ok" : "failed", ")");
     if (sdpRes.IsOk()) {
         m_sdpHandle = sdpH;
     }
@@ -69,6 +97,8 @@ Common::Status BtRfcommTransport::StartServer(uint8_t channel) {
     m_state = TransportState::Connecting;
     m_workerThread = std::thread(&BtRfcommTransport::ServerWorkerLoop, this);
 
+    CPS_LOG_INFO("BtRfcomm", "RFCOMM server listening on channel ", std::to_string(m_channel),
+                 " (SDP ", sdpRes.IsOk() ? "registered" : "not registered", ")");
     return Common::Status::Ok();
 #else
     return Common::Status::Error(Common::StatusCode::NotImplemented, "Bluetooth RFCOMM only supported on Windows");
@@ -106,6 +136,17 @@ void BtRfcommTransport::StopServer() {
 
 void BtRfcommTransport::ServerWorkerLoop() {
 #ifdef _WIN32
+    // Initialize a COM apartment on this worker thread. The MFi signer (CH341
+    // WDM driver) is invoked from this thread via the iAP2 data callback, and
+    // the driver path touches COM. Without an apartment, COM calls from a
+    // raw std::thread fail with RPC_E_DEADLOCK_DETECTED (Win32 2048,
+    // "resource deadlock would occur").
+    HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const bool comInitialized = SUCCEEDED(comHr);
+    if (comInitialized) {
+        CPS_LOG_INFO("BtRfcomm", "Worker thread COM apartment initialized");
+    }
+
     while (m_running.load()) {
         fd_set readFds;
         FD_ZERO(&readFds);
@@ -128,7 +169,12 @@ void BtRfcommTransport::ServerWorkerLoop() {
         }
 
         std::string remoteMac = BtSdpHelper::FormatBluetoothAddress(clientAddr.btAddr);
+        CPS_LOG_INFO("BtRfcomm", "Accepted Bluetooth client: ", remoteMac);
         HandleClientIo(client, remoteMac);
+    }
+
+    if (comInitialized) {
+        CoUninitialize();
     }
 #endif
 }
@@ -142,6 +188,7 @@ void BtRfcommTransport::HandleClientIo(SOCKET clientSock, const std::string& rem
     }
 
     m_state = TransportState::Connected;
+    CPS_LOG_INFO("BtRfcomm", "Client connected: ", remoteAddr);
     StateChangedCallback stateCb;
     DataReceivedCallback dataCb;
     {
@@ -150,7 +197,13 @@ void BtRfcommTransport::HandleClientIo(SOCKET clientSock, const std::string& rem
         dataCb = m_dataCallback;
     }
     if (stateCb) {
-        stateCb(TransportState::Connected, Common::Status::Ok());
+        try {
+            stateCb(TransportState::Connected, Common::Status::Ok());
+        } catch (const std::exception& ex) {
+            CPS_LOG_ERROR("BtRfcomm", "Exception in stateCb (Connected): ", ex.what());
+        } catch (...) {
+            CPS_LOG_ERROR("BtRfcomm", "Unknown exception in stateCb (Connected)");
+        }
     }
 
     std::vector<uint8_t> recvBuf(2048);
@@ -185,20 +238,33 @@ void BtRfcommTransport::HandleClientIo(SOCKET clientSock, const std::string& rem
         }
 
         if (dataCb) {
-            dataCb(Common::ByteSpan(recvBuf.data(), bytesRead));
+            try {
+                dataCb(Common::ByteSpan(recvBuf.data(), bytesRead));
+            } catch (const std::exception& ex) {
+                CPS_LOG_ERROR("BtRfcomm", "Exception in dataCb: ", ex.what());
+            } catch (...) {
+                CPS_LOG_ERROR("BtRfcomm", "Unknown exception in dataCb");
+            }
         }
     }
 
     closesocket(m_clientSocket);
     m_clientSocket = INVALID_SOCKET;
     m_state = TransportState::Disconnected;
+    CPS_LOG_INFO("BtRfcomm", "Client disconnected: ", remoteAddr);
 
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         stateCb = m_stateCallback;
     }
     if (stateCb) {
-        stateCb(TransportState::Disconnected, Common::Status::Ok());
+        try {
+            stateCb(TransportState::Disconnected, Common::Status::Ok());
+        } catch (const std::exception& ex) {
+            CPS_LOG_ERROR("BtRfcomm", "Exception in stateCb (Disconnected): ", ex.what());
+        } catch (...) {
+            CPS_LOG_ERROR("BtRfcomm", "Unknown exception in stateCb (Disconnected)");
+        }
     }
 #else
     (void)clientSock;

@@ -144,6 +144,13 @@ public:
         const Common::MacAddress& btMac,
         bool declareWired = false);
 
+    // Build the AccessoryWiFiConfigurationInformation (0x5703) body.
+    [[nodiscard]] static Common::ByteBuffer BuildAccessoryWiFiConfig(
+        std::string_view ssid,
+        std::string_view passphrase,
+        uint8_t securityType = 2,
+        uint8_t channel = 36);
+
     // Parse rejected top-level param IDs from a 0x1D03 body (after stripping the 6-byte header).
     [[nodiscard]] static std::vector<uint16_t> ParseRejectedParamIds(Common::ByteSpan body);
 

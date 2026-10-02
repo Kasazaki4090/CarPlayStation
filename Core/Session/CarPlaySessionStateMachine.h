@@ -18,6 +18,7 @@
 namespace CarPlayStation::Core::Session {
 
 struct SessionConfig {
+    std::string device_id{"00:1A:7D:DA:71:05"};
     std::string ap_ssid{"CarPlayStation"};
     std::string ap_passphrase{"CarPlayStationSecret123"};
     uint8_t ap_channel{36}; // 5GHz
@@ -81,7 +82,8 @@ public:
         std::string_view device_name = {});
 
     [[nodiscard]] Common::Status OnWifiConnected(
-        const Common::MacAddress& client_mac);
+        const Common::MacAddress& client_mac,
+        std::string_view client_ip = {});
 
     [[nodiscard]] Common::Status OnAirPlayStreamingStarted(
         const NegotiatedMediaParams& params);
@@ -105,6 +107,11 @@ public:
      * @brief Reset state back to Idle without tearing down dependencies.
      */
     void Reset();
+
+    /**
+     * @brief Update or inject session dependencies at runtime.
+     */
+    void SetDependencies(SessionDependencies deps);
 
 private:
     void SetStateLocked(SessionState new_state, Common::Status status, std::vector<SessionStateObserver>& out_observers);

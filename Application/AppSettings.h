@@ -38,11 +38,11 @@ enum class VideoCodecPreference : uint8_t {
 };
 
 struct VideoPreferences {
-    VideoResolutionPreset resolution_preset{VideoResolutionPreset::Res1080P};
+    VideoResolutionPreset resolution_preset{VideoResolutionPreset::Res720P};
     VideoCodecPreference preferred_codec{VideoCodecPreference::H264};
-    uint32_t custom_width{1920};
-    uint32_t custom_height{1080};
-    uint32_t fps{60};                     // 30 or 60 fps
+    uint32_t custom_width{1280};
+    uint32_t custom_height{720};
+    uint32_t fps{30};                     // 30 or 60 fps
     WindowDisplayMode display_mode{WindowDisplayMode::Windowed};
 
     // Resolve preset / custom into concrete dimensions (UI helper; stays out of Core)
@@ -96,7 +96,7 @@ enum class HardwareI2cDriverType : uint8_t {
 struct HardwareI2cPreferences {
     HardwareI2cDriverType driver_type{HardwareI2cDriverType::Auto};
     uint32_t device_index{0};
-    uint8_t slave_address{0x10}; // 7-bit I2C address of MFi coprocessor (0x10 or 0x11)
+    uint8_t slave_address{0x11}; // 7-bit I2C address of the MFi coprocessor
     uint32_t speed_khz{100};     // Bus clock speed in kHz (e.g. 100 or 400)
     bool pulse_reset_on_init{true};
     uint8_t reset_gpio_pin{0};   // Reset pin index on bridge chip (e.g. D0 on CH341)

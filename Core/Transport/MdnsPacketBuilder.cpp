@@ -134,6 +134,27 @@ Common::ByteBuffer MdnsPacketBuilder::BuildAirPlayAnnouncement(const MdnsService
     return packet;
 }
 
+Common::ByteBuffer MdnsPacketBuilder::BuildCarPlayControlQuery() {
+    Common::ByteBuffer packet;
+    packet.reserve(64);
+
+    // DNS Header (12 bytes)
+    AppendU16(packet, 0x0000); // Transaction ID
+    AppendU16(packet, 0x0000); // Flags: Standard query
+    AppendU16(packet, 1);      // QDCOUNT: 1 question
+    AppendU16(packet, 0);      // ANCOUNT: 0
+    AppendU16(packet, 0);      // NSCOUNT: 0
+    AppendU16(packet, 0);      // ARCOUNT: 0
+
+    // Question: _carplay-ctrl._tcp.local. PTR
+    auto qName = EncodeDnsName("_carplay-ctrl._tcp.local.");
+    packet.insert(packet.end(), qName.begin(), qName.end());
+    AppendU16(packet, kDnsTypePtr);
+    AppendU16(packet, kDnsClassIn);
+
+    return packet;
+}
+
 bool MdnsPacketBuilder::ValidateMdnsHeader(Common::ByteSpan packet, uint16_t expectedAnswers) {
     if (packet.size() < 12) {
         return false;

@@ -23,7 +23,7 @@ public:
     };
 
     explicit I2cMfiSigner(std::shared_ptr<II2cAdapter> adapter,
-                         uint8_t slave_address7Bit = 0x10,
+                         uint8_t slave_address7Bit = 0x11,
                          Options options = {});
     ~I2cMfiSigner() override;
 
@@ -47,8 +47,11 @@ private:
     [[nodiscard]] Common::Result<Common::ByteBuffer> ReadRegister(uint8_t reg, size_t length);
     [[nodiscard]] Common::Result<void> WriteRegister(uint8_t reg, Common::ByteSpan data);
 
+    // Lazily open the I2C adapter on first use. Must be called with mutex_ held.
+    void EnsureOpen() const;
+
     std::shared_ptr<II2cAdapter> adapter_;
-    uint8_t slave_address_{0x10};
+    uint8_t slave_address_{0x11};
     Options options_{};
     mutable std::mutex mutex_;
     bool is_shutdown_{false};

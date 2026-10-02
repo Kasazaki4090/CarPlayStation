@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+      version="1.0.0.0"
+      processorArchitecture="*"
+      name="CarPlayStation"
+      type="win32"/>
+  <description>CarPlayStation - Wireless CarPlay Receiver</description>
+
+  <!--
+    Binding an AF_BTH RFCOMM server socket (and registering an SDP service)
+    requires administrator privileges on Windows. Without elevation the
+    Bluetooth listener fails with WSAEACCES (10013) and CarPlay can never
+    be triggered. Request elevation so the Bluetooth transport can start.
+  -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 / 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-40fd0f0390a9}"/>
+      <!-- Windows 8.1 -->
+      <supportedOS Id="{1f676c76-80e1-42f9-b0c4-39d824971d6f}"/>
+      <!-- Windows 8 -->
+      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d699e1e4037a}"/>
+      <!-- Windows 7 -->
+      <supportedOS Id="{35138b9a-5d96-4b05-9f25-0b91e10e2d9f}"/>
+    </application>
+  </compatibility>
+</assembly>

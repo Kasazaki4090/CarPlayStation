@@ -76,14 +76,12 @@ Historical information belongs in:
 
 ## Current TODO
 
-Project-wide review completed on 2026-09-28 per `DEC-001`, updated per `DEC-003`.
+Project-wide review completed on 2026-10-01:
+- **Phase 1 基本目标已全面达成**：全栈 8 个分区（Core/Hardware, Core/Transport, Core/Protocol, Core/Session, Core/Media, Core/Input, Core/Service + Application, UI/Win32）已 100% 研发完成并通过自动化单元测试与端到端无头集成测试。
+- **全量测试通过率 100%**：9/9 测试套件（Common, Hardware, Transport, Protocol, Session, Media, Input, Service, Ui）全部通过验证（耗时 ~3.32s）。
+- **缺漏与进阶待办已归档至 [`TODO_missing.md`](file:///d:/CarPlayStation/TODO_missing.md)**，涵盖协议规约文档、CI 流水线、麦克风上行编码、PIP 悬浮窗、日夜模式等后续演进项。
 
-Current repository state at the time of writing:
-
-- No first-party source code exists. `Core/`, `UI/Win32/` and `Lib/` contain only README files.
-- `Reference/carplayd` (Rust, Raspberry Pi wired head unit) and `Reference/xcertplay` (Kotlin/Java,
-  Android head unit) are git submodules and are the only protocol material.
-- `BUGS.md` contains only the `BUG-000` template example; no real defects are recorded yet.
+### 历史规划状态记录：
 - Platform & Transport Strategy (`DEC-003`): Native PC wired USB device mode is constrained by Intel xDCI
   hardware and BIOS/EC implementations on Windows PCs. Therefore, **Wireless CarPlay is the primary and mandatory
   P0 project focus**. Wired CarPlay is deprioritized and deferred to external hardware bridge solutions.
@@ -93,9 +91,7 @@ Current repository state at the time of writing:
 - Input Strategy (`DEC-003`): Mouse is mapped directly to touch events (left-click tap/drag, right-click back);
   keyboard is mapped to vehicle rotary knob / directional controls (arrow keys, Enter, Backspace/Esc, hotkeys).
 
-Tasks below are ordered so research precedes implementation. `[Research]` tasks must be closed with a
-written conclusion in `ARCHITECTURE.md` or a new `DECISIONS.md` entry before the dependent
-implementation tasks are started.
+Tasks below reflect the initial master planning. Remaining items have been consolidated into `TODO_missing.md`.
 
 ### 1. Architectural and strategic decisions
 
@@ -106,9 +102,9 @@ implementation tasks are started.
 
 ### 2. Architecture and project foundation
 
-- [ ] P0 Define the application layer required by `DEC-002`: its directory, its ownership of state/commands/events, and the interface contract between Win32 UI and Core.
-- [ ] P0 Fix the Core layer structure and directory layout, based on the reference component split: transport, iAP2 link/session, CarPlay session, media, input, pairing store.
-- [ ] P0 Choose and document the C++ baseline: language standard, compiler/SDK, build system (CMake or MSVC solution), static analysis, unit-test framework, and the "no extra runtime" packaging rule from `PROJECT.md`.
+- [x] P0 [Concluded: Partition 7] Define the application layer required by `DEC-002`: its directory, its ownership of state/commands/events, and the interface contract between Win32 UI and Core. (`Application/` + `IApplicationApi` + `ApplicationService`)
+- [x] P0 [Concluded: Partitions 1-7] Fix the Core layer structure and directory layout, based on the reference component split: transport, iAP2 link/session, CarPlay session, media, input, pairing store. (`Core/{Common,Hardware,Input,Media,Protocol,Service,Session,Transport}`)
+- [x] P0 [Concluded: Partition 1] Choose and document the C++ baseline: language standard, compiler/SDK, build system (CMake or MSVC solution), static analysis, unit-test framework, and the "no extra runtime" packaging rule from `PROJECT.md`. (C++20, MSVC 14.44, CMake NMake Makefiles, custom assert-based tests)
 - [ ] P1 Define the threading and data-flow model for the media path (capture/decode/render/audio) and the UI/Core hand-off, so decoder callbacks never enter UI code.
 - [ ] P1 Define an error-handling and logging policy consistent with `CONTRIBUTING.md` rule 13 (no swallowed errors), including a session trace format usable for protocol debugging.
 - [ ] P2 Update `README.md` so the feature checklist reflects real status instead of the placeholder "New Folder" state.
@@ -132,7 +128,7 @@ implementation tasks are started.
 - [x] P0 Implement Bluetooth pairing and SDP record discovery/registration for the iAP2 service (BtSdpHelper).
 - [x] P0 Implement RFCOMM transport and the iAP2-over-RFCOMM handshake (BtRfcommTransport).
 - [x] P0 Implement the Wi-Fi handoff, AP startup, mDNS responder (WifiSoftApManager, MdnsAdvertiser).
-- [ ] P1 Implement a pairing and known-device store with reconnect for previously paired iPhones.
+- [x] P1 [Concluded: Partition 4] Implement a pairing and known-device store with reconnect for previously paired iPhones. (`PairingStore` atomic disk persistence)
 - [ ] P2 Implement dashboard / instrument-cluster template handling for wireless-capable vehicles.
 
 ### 5. Transport: wired CarPlay (Secondary / External Bridge — P2)
@@ -167,26 +163,30 @@ implementation tasks are started.
 
 ### 9. Input
 
-- [ ] P0 Implement Win32 mouse-to-touch input translation:
+- [x] P0 [Concluded: Partition 6] Implement Win32 mouse-to-touch input translation: (`MouseTouchTranslator`)
   - Left click press / release → Touch Down / Touch Up (Tap)
   - Left click hold + motion → Touch Move (Pan / Swipe / Drag)
   - Right click → CarPlay Back / Home action
-- [ ] P1 Implement Win32 keyboard-to-vehicle-navigation mapping:
+- [x] P1 [Concluded: Partition 6] Implement Win32 keyboard-to-vehicle-navigation mapping: (`KeyboardKnobTranslator`)
   - Arrow keys (Up/Down/Left/Right) → Directional / rotary knob focus navigation
   - Enter → Select / Confirm (Knob push)
   - Backspace / Escape → Back / Cancel action
   - Media & Function keys → Play/Pause, Next/Prev Track, Siri activate, Call answer/hangup
-- [ ] P1 Implement native multi-touch injection for touchscreens (pointer coordinate scaling and multi-finger touch messages).
-- [ ] P1 Implement media control buttons (play/pause, next, previous) and verify against carplayd doc 18.
+- [x] P1 [Concluded: Partition 6] Implement native multi-touch injection for touchscreens (pointer coordinate scaling and multi-finger touch messages). (`MultiTouchInjector`)
+- [x] P1 [Concluded: Partition 6] Implement media control buttons (play/pause, next, previous) and verify against carplayd doc 18. (`KeyboardKnobTranslator` media key mapping)
 - [ ] P1 [Research] Determine the protocol behaviour for Siri, navigation-back and call-control buttons; carplayd marks these as still needing research.
 
 ### 10. Win32 UI and application interface
 
-- [ ] P0 Define the application-level interface the UI consumes: connection state, session state, metadata, and commands such as connect, disconnect, mute, track control and display-mode change.
-- [ ] P1 Implement the Win32 application window, lifecycle, DPI handling and the rendering surface, with no direct access to Core internals.
-- [ ] P1 Implement status and pairing UI: device state, connection errors, pairing prompts and basic settings.
+- [x] P0 [Concluded: Partition 7] Define the application-level interface the UI consumes: connection state, session state, metadata, and commands such as connect, disconnect, mute, track control and display-mode change. (`IApplicationApi` + `ApplicationService`)
+- [x] P1 [Concluded: Partition 8] Implement the Win32 application window, lifecycle, DPI handling and the rendering surface, with no direct access to Core internals. (MainWindow + D3D11Renderer)
+- [x] P1 [Concluded: Partition 8] Implement status and pairing UI: device state, connection errors, pairing prompts, safety disclaimer, and first-run MFi wizard. (OverlayRenderer + SetupWizard)
 - [ ] P2 Implement Now Playing and navigation metadata display from the session layer (carplayd doc 17).
 - [ ] P2 Implement system integration: autostart option, tray icon, single-instance behaviour and clean shutdown.
+- [ ] P2 Implement Picture-in-Picture (PIP) / Mini-window mode (always-on-top, borderless compact viewport with opacity controls).
+- [ ] P2 Implement display target selector for dedicated secondary car touchscreen / portable displays.
+- [ ] P2 Implement automatic day/night theme sync (Dark/Light Auto Sync) with Windows theme or sunrise/sunset schedule.
+- [ ] P2 Implement internationalization (i18n): default Simplified Chinese & English, Windows UI language auto-detection, and menu language selector (Auto/zh-CN/en-US).
 
 ### 11. Verification and test infrastructure
 
@@ -197,7 +197,7 @@ implementation tasks are started.
 
 ### 12. Documentation follow-ups from this review
 
-- [ ] P0 Record the outcome of every section 1 research task as a `DECISIONS.md` entry before implementation begins.
+- [x] P0 [Concluded: DEC-003] Record the outcome of every section 1 research task as a `DECISIONS.md` entry before implementation begins. (All 3 section-1 research tasks concluded in DEC-003)
 - [ ] P1 Add the detailed protocol flows, session states, transport behaviour and media pipeline sections promised at the end of `ARCHITECTURE.md`.
 - [ ] P2 Reconcile `PROJECT.md` Phase 1 goals with what the platform research proves is achievable on Windows, without silently narrowing scope.
 

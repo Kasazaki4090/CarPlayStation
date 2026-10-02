@@ -34,6 +34,7 @@ public:
     [[nodiscard]] bool IsRunning() const noexcept override;
     [[nodiscard]] MdnsServiceConfig GetConfig() const override;
     [[nodiscard]] Common::Status BroadcastAnnouncement() override;
+    [[nodiscard]] Common::Status AnnounceTo(const std::string& targetIp) override;
 
     // --- Test & Simulation Controls ---
     void EnableSimulatedMode(bool enable);
@@ -44,6 +45,7 @@ public:
 private:
     void BroadcastWorkerLoop();
     Common::Status SendRawMulticast(Common::ByteSpan packet);
+    void DialCarPlayControl(const std::string& host, uint16_t port);
 
     mutable std::mutex m_mutex;
     std::atomic<bool> m_running{false};
@@ -52,6 +54,7 @@ private:
     MdnsServiceConfig m_config{};
     size_t m_broadcastCount{0};
     Common::ByteBuffer m_lastPacket{};
+    std::vector<std::string> m_dialedTargets{};
 
 #ifdef _WIN32
     SOCKET m_socket{INVALID_SOCKET};

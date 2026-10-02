@@ -46,6 +46,9 @@ public:
 
     // Trigger an immediate multicast announcement packet
     [[nodiscard]] virtual Common::Status BroadcastAnnouncement() = 0;
+
+    // Send targeted announcement to specific IP (e.g. unicast to connected iPhone)
+    [[nodiscard]] virtual Common::Status AnnounceTo(const std::string& targetIp) = 0;
 };
 
 } // namespace CarPlayStation::Core::Transport

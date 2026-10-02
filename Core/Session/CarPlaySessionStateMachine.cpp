@@ -6,6 +6,11 @@ namespace CarPlayStation::Core::Session {
 CarPlaySessionStateMachine::CarPlaySessionStateMachine(SessionConfig config, SessionDependencies deps)
     : config_(std::move(config)), deps_(std::move(deps)) {
     running_ = true;
+    if (deps_.rtsp_server) {
+        deps_.rtsp_server->SetStreamingStartedCallback([this](const NegotiatedMediaParams& params) {
+            (void)OnAirPlayStreamingStarted(params);
+        });
+    }
     if (config_.enable_background_watchdog) {
         watchdog_thread_ = std::thread(&CarPlaySessionStateMachine::WatchdogLoop, this);
     }
@@ -211,8 +216,17 @@ Common::Status CarPlaySessionStateMachine::OnIap2Authenticated(
 
     if (deps_.mdns_advertiser) {
         Transport::MdnsServiceConfig mdns_cfg{};
-        mdns_cfg.instanceName = config_.ap_ssid;
+        if (deps_.wifi_manager) {
+            auto creds = deps_.wifi_manager->GetCredentials();
+            if (!creds.gatewayIp.empty()) {
+                mdns_cfg.ipv4Address = creds.gatewayIp;
+            }
+        }
+        mdns_cfg.instanceName = active_session_.device_name.empty() ? (config_.ap_ssid.empty() ? "CarPlayStation" : config_.ap_ssid) : active_session_.device_name;
         mdns_cfg.port = config_.rtsp_port;
+        if (!config_.device_id.empty()) {
+            mdns_cfg.deviceId = config_.device_id;
+        }
         deps_.mdns_advertiser->Start(mdns_cfg);
     }
 
@@ -228,7 +242,7 @@ Common::Status CarPlaySessionStateMachine::OnIap2Authenticated(
     return Common::Status::Ok();
 }
 
-Common::Status CarPlaySessionStateMachine::OnWifiConnected(const Common::MacAddress& client_mac) {
+Common::Status CarPlaySessionStateMachine::OnWifiConnected(const Common::MacAddress& client_mac, std::string_view client_ip) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_ != SessionState::WifiHandoff) {
         return Common::MakeError(Common::StatusCode::InvalidState, "Station connected outside WifiHandoff state");
@@ -242,6 +256,15 @@ Common::Status CarPlaySessionStateMachine::OnWifiConnected(const Common::MacAddr
             dev.wifi_mac = client_mac;
             dev.last_connected_timestamp = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
             deps_.pairing_store->SaveDevice(dev);
+        }
+    }
+
+    // Station joined! Trigger immediate mDNS announcement burst and target unicast!
+    if (deps_.mdns_advertiser) {
+        if (!client_ip.empty()) {
+            deps_.mdns_advertiser->AnnounceTo(std::string(client_ip));
+        } else {
+            deps_.mdns_advertiser->BroadcastAnnouncement();
         }
     }
     return Common::Status::Ok();
@@ -450,6 +473,11 @@ void CarPlaySessionStateMachine::Reset() {
     }
 
     DispatchObservers(observers_to_notify, old_state, SessionState::Idle, Common::Status::Ok());
+}
+
+void CarPlaySessionStateMachine::SetDependencies(SessionDependencies deps) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    deps_ = std::move(deps);
 }
 
 void CarPlaySessionStateMachine::DispatchObservers(

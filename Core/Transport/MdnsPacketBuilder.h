@@ -32,6 +32,11 @@ public:
     static Common::ByteBuffer BuildAirPlayAnnouncement(const MdnsServiceConfig& config, uint32_t ttl = 4500);
 
     /**
+     * @brief Builds an RFC 6762 mDNS query for _carplay-ctrl._tcp.local. PTR to discover iPhone's control port.
+     */
+    static Common::ByteBuffer BuildCarPlayControlQuery();
+
+    /**
      * @brief Parses and validates that a raw buffer has a valid mDNS response header.
      */
     static bool ValidateMdnsHeader(Common::ByteSpan packet, uint16_t expectedAnswers = 4);

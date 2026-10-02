@@ -14,17 +14,18 @@ namespace CarPlayStation::Core::Session {
  * @brief Callback signature for handling inbound RTSP requests and generating responses.
  */
 using RtspRequestHandler = std::function<RtspResponse(const RtspRequest& req)>;
+using StreamingStartedCallback = std::function<void(const NegotiatedMediaParams&)>;
 
 /**
  * @brief High-performance asynchronous RTSP control channel server for AirPlay & CarPlay.
  *
- * Listens on a TCP port (default 7000 or dynamic 0 for testing), parses incoming RTSP requests,
+ * Listens on a TCP port (default 5000 or dynamic 0 for testing), parses incoming RTSP requests,
  * negotiates streaming parameters, and delivers responses to the connecting iPhone.
  */
 class AirPlayRtspServer {
 public:
     struct Options {
-        uint16_t port{7000};                           // 0 = ephemeral dynamic port
+        uint16_t port{5000};                           // 0 = ephemeral dynamic port
         std::string bind_address{"0.0.0.0"};
         uint32_t default_video_width{1280};
         uint32_t default_video_height{720};
@@ -63,6 +64,11 @@ public:
      * @brief Override or intercept standard request handling with a custom handler.
      */
     void SetRequestHandler(RtspRequestHandler handler);
+
+    /**
+     * @brief Register a callback invoked when RTSP streaming starts (RECORD request).
+     */
+    void SetStreamingStartedCallback(StreamingStartedCallback callback);
 
     /**
      * @brief Query currently negotiated streaming parameters.

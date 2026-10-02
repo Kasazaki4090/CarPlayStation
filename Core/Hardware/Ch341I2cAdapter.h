@@ -39,6 +39,11 @@ public:
     [[nodiscard]] bool IsDriverLoaded() const noexcept;
 
 private:
+    // Apply the I2C clock mode to an already-open device. The caller MUST
+    // already hold mutex_ (this does not lock it, to avoid reentrant
+    // self-deadlock when called from Open()/SetSpeed()).
+    void ApplySpeedLocked();
+
     class DriverBinding;
     std::unique_ptr<DriverBinding> driver_;
     mutable std::mutex mutex_;

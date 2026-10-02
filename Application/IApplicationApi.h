@@ -15,8 +15,8 @@ struct AppUiState {
     Core::Session::SessionState session_state{Core::Session::SessionState::Idle};
     std::string connected_device_name;
     bool is_streaming{false};
-    uint32_t current_video_width{1920};   // Runtime fact: actual negotiated resolution
-    uint32_t current_video_height{1080};  // Runtime fact: actual negotiated resolution
+    uint32_t current_video_width{1280};   // Runtime fact: actual negotiated resolution
+    uint32_t current_video_height{720};  // Runtime fact: actual negotiated resolution
     std::string status_message;
     AppSettings active_settings;          // Snapshot of last-applied user settings
 };

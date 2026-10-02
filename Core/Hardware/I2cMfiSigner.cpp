@@ -1,4 +1,5 @@
 #include "Core/Hardware/I2cMfiSigner.h"
+#include "Core/Common/Logging.h"
 #include <thread>
 #include <vector>
 #include <algorithm>
@@ -18,7 +19,6 @@ constexpr uint8_t REG_CERT_DATA      = 0x31;
 
 constexpr uint8_t AUTH_CMD_START     = 0x01;
 constexpr uint8_t AUTH_STATUS_OK     = 0x10;
-constexpr size_t  CERT_WINDOW_SIZE   = 128;
 } // namespace
 
 I2cMfiSigner::I2cMfiSigner(std::shared_ptr<II2cAdapter> adapter,
@@ -27,8 +27,22 @@ I2cMfiSigner::I2cMfiSigner(std::shared_ptr<II2cAdapter> adapter,
     : adapter_(std::move(adapter))
     , slave_address_(slave_address7Bit)
     , options_(options) {
-    if (adapter_ && !adapter_->IsOpen()) {
-        adapter_->Open(0);
+    // NOTE: The I2C adapter is opened lazily on first use (see EnsureOpen),
+    // NOT here. Opening in the constructor would call the vendor driver's
+    // CH341OpenDevice(), which blocks when the physical USB bridge is not
+    // plugged in. That would hang the entire application startup (the MFi
+    // signer is built during StartCarPlay, before the Bluetooth transport and
+    // the UI window are brought up).
+}
+
+void I2cMfiSigner::EnsureOpen() const {
+    // Caller must hold mutex_.
+    if (!adapter_ || adapter_->IsOpen() || is_shutdown_) {
+        return;
+    }
+    auto res = adapter_->Open(0);
+    if (res.IsError()) {
+        CPS_LOG_WARN("I2cMfiSigner", "Failed to open I2C adapter: ", res.Error().Message());
     }
 }
 
@@ -125,6 +139,7 @@ Common::Result<Common::ByteBuffer> I2cMfiSigner::FetchCertificate() {
     if (is_shutdown_) {
         return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "Signer is shut down");
     }
+    EnsureOpen();
 
     // 1. Read certificate length from register 0x30
     auto len_res = ReadBigEndianShort(REG_CERT_LEN);
@@ -138,27 +153,8 @@ Common::Result<Common::ByteBuffer> I2cMfiSigner::FetchCertificate() {
             "Invalid MFi certificate length: " + std::to_string(cert_len));
     }
 
-    // 2. Read certificate body chunk by chunk (128 bytes window)
-    Common::ByteBuffer certificate;
-    certificate.reserve(cert_len);
-
-    uint8_t current_reg = REG_CERT_DATA;
-    size_t offset = 0;
-
-    while (offset < cert_len) {
-        size_t chunk_size = std::min(CERT_WINDOW_SIZE, static_cast<size_t>(cert_len - offset));
-        auto chunk_res = ReadRegister(current_reg, chunk_size);
-        if (chunk_res.IsError()) {
-            return chunk_res.Error();
-        }
-
-        const auto& chunk = chunk_res.Value();
-        certificate.insert(certificate.end(), chunk.begin(), chunk.end());
-        offset += chunk.size();
-        ++current_reg;
-    }
-
-    return certificate;
+    // Certificate bytes are exposed as one sequential read from the data register.
+    return ReadRegister(REG_CERT_DATA, cert_len);
 }
 
 Common::Result<Common::ByteBuffer> I2cMfiSigner::SignChallenge(Common::ByteSpan challenge) {
@@ -166,6 +162,7 @@ Common::Result<Common::ByteBuffer> I2cMfiSigner::SignChallenge(Common::ByteSpan 
     if (is_shutdown_) {
         return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "Signer is shut down");
     }
+    EnsureOpen();
 
     if (challenge.empty() || challenge.size() > 128) {
         return Common::Status::Error(Common::StatusCode::InvalidArgument, "Invalid challenge length");
@@ -224,7 +221,11 @@ MFiChipInfo I2cMfiSigner::GetChipInfo() const noexcept {
     MFiChipInfo info{};
     info.present = false;
 
-    if (!adapter_ || !adapter_->IsOpen() || is_shutdown_) {
+    if (!adapter_ || is_shutdown_) {
+        return info;
+    }
+    EnsureOpen();
+    if (!adapter_->IsOpen()) {
         return info;
     }
 

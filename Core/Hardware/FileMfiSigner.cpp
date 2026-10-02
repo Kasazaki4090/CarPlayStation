@@ -73,25 +73,50 @@ bool ExtractEccComponents(Common::ByteSpan pkcs8, Common::ByteSpan cert,
         return false;
     }
 
-    // 2. Look for uncompressed EC public key (0x04 || X[32] || Y[32]) in PKCS#8 or Certificate
+    // 2. Look for uncompressed EC public key (0x04 || X[32] || Y[32])
+    // In X.509 SubjectPublicKeyInfo and PKCS#8, the 64-byte uncompressed point is wrapped in a BIT STRING:
+    // [0x03, 0x42, 0x00, 0x04, X[32], Y[32]]
     auto find_point = [](Common::ByteSpan span, std::vector<uint8_t>& x, std::vector<uint8_t>& y) -> bool {
-        for (size_t i = 0; i + 65 <= span.size(); ++i) {
-            if (span[i] == 0x04) {
-                // Verify candidate point coordinates look non-trivial
-                x.assign(span.begin() + static_cast<ptrdiff_t>(i + 1), span.begin() + static_cast<ptrdiff_t>(i + 33));
-                y.assign(span.begin() + static_cast<ptrdiff_t>(i + 33), span.begin() + static_cast<ptrdiff_t>(i + 65));
+        // Look for BIT STRING header: 0x03 (tag), 0x42 (len 66), 0x00 (0 unused bits), 0x04 (uncompressed)
+        for (size_t i = 0; i + 68 <= span.size(); ++i) {
+            if (span[i] == 0x03 && span[i + 1] == 0x42 && span[i + 2] == 0x00 && span[i + 3] == 0x04) {
+                x.assign(span.begin() + static_cast<ptrdiff_t>(i + 4), span.begin() + static_cast<ptrdiff_t>(i + 36));
+                y.assign(span.begin() + static_cast<ptrdiff_t>(i + 36), span.begin() + static_cast<ptrdiff_t>(i + 68));
                 return true;
+            }
+        }
+        // Fallback: look for 0x04, 0x41, 0x04 (OCTET STRING of 65 bytes)
+        for (size_t i = 0; i + 67 <= span.size(); ++i) {
+            if (span[i] == 0x04 && span[i + 1] == 0x41 && span[i + 2] == 0x04) {
+                x.assign(span.begin() + static_cast<ptrdiff_t>(i + 3), span.begin() + static_cast<ptrdiff_t>(i + 35));
+                y.assign(span.begin() + static_cast<ptrdiff_t>(i + 35), span.begin() + static_cast<ptrdiff_t>(i + 67));
+                return true;
+            }
+        }
+        // Fallback: look for secp256r1 OID (1.2.840.10045.3.1.7) followed by 0x04
+        const uint8_t secp256r1_oid[] = {0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07};
+        for (size_t i = 0; i + 8 + 4 + 64 <= span.size(); ++i) {
+            if (std::memcmp(span.data() + i, secp256r1_oid, 8) == 0) {
+                for (size_t j = i + 8; j + 65 <= span.size() && j < i + 24; ++j) {
+                    if (span[j] == 0x04) {
+                        x.assign(span.begin() + static_cast<ptrdiff_t>(j + 1), span.begin() + static_cast<ptrdiff_t>(j + 33));
+                        y.assign(span.begin() + static_cast<ptrdiff_t>(j + 33), span.begin() + static_cast<ptrdiff_t>(j + 65));
+                        return true;
+                    }
+                }
             }
         }
         return false;
     };
 
-    // First try extracting public key point from PKCS#8 (often embedded in BIT STRING)
-    if (!find_point(pkcs8, out_x, out_y)) {
-        // Fallback to extracting from X.509 / PKCS#7 certificate SubjectPublicKeyInfo
-        if (!cert.empty()) {
-            find_point(cert, out_x, out_y);
-        }
+    // First try extracting public key point from Certificate SubjectPublicKeyInfo
+    if (!cert.empty() && find_point(cert, out_x, out_y)) {
+        return out_d.size() == 32;
+    }
+
+    // Next try extracting from PKCS#8 (if embedded)
+    if (find_point(pkcs8, out_x, out_y)) {
+        return out_d.size() == 32;
     }
 
     return out_d.size() == 32;
@@ -155,10 +180,8 @@ struct FileMfiSigner::Impl {
                 return Common::Status::Error(Common::StatusCode::AuthenticationFailed, "Failed to parse ECDSA P-256 private key components");
             }
 
-            // If public coordinates were not present in PKCS#8, generate zeroed/dummy or derive point
             if (x.size() != 32 || y.size() != 32) {
-                x.assign(32, 0);
-                y.assign(32, 0);
+                return Common::Status::Error(Common::StatusCode::AuthenticationFailed, "Public key coordinates (X, Y) missing or incomplete");
             }
 
             // Build BCRYPT_ECCKEY_BLOB (dwMagic=BCRYPT_ECDSA_PRIVATE_P256_MAGIC, cbKey=32, X[32], Y[32], d[32])

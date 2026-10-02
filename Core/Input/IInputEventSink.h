@@ -20,8 +20,18 @@ struct TouchPoint {
 };
 
 enum class KnobAction {
+    // Rotation (1-DOF rotary, driven by the mouse wheel).
     RotateClockwise,
     RotateCounterClockwise,
+
+    // Directional press (4-way d-pad style knob, driven by arrows / WASD).
+    // The vehicle knob can be pressed toward each of the four edges.
+    PressUp,
+    PressDown,
+    PressLeft,
+    PressRight,
+
+    // Center push (select / confirm).
     PushDown,
     PushUp
 };

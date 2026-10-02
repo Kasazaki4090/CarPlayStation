@@ -1,4 +1,5 @@
 #include "Core/Hardware/Ch341I2cAdapter.h"
+#include "Core/Common/Logging.h"
 #include <thread>
 #include <vector>
 
@@ -20,17 +21,109 @@ using PFN_CH341StreamI2C    = BOOL(WINAPI*)(ULONG iIndex, ULONG iWriteLength, PV
 using PFN_CH341SetOutput    = BOOL(WINAPI*)(ULONG iIndex, ULONG iEnable, ULONG iSetDirOut, ULONG iSetDataOut);
 #endif
 
+// Build the ordered list of candidate CH341 DLL locations to try.
+// The WCH driver installer registers the device but leaves the DLL in
+// DriverStore\FileRepository\ch341wdm.inf_*, which is NOT in the default
+// DLL search path, so a bare LoadLibraryA("CH341DLL.DLL") fails. We therefore
+// probe the exe directory, System32, and the DriverStore ch341wdm.inf_* folder.
+// On x64 we prefer the A64 build (CH341DLLA64.DLL) since a 32-bit DLL cannot
+// be loaded into a 64-bit process.
+static std::vector<std::string> BuildCh341DllCandidates() {
+    std::vector<std::string> names;
+#ifdef _WIN64
+    names.push_back("CH341DLLA64.DLL");
+    names.push_back("CH341DLL.DLL");
+#else
+    names.push_back("CH341DLL.DLL");
+    names.push_back("CH341DLLA64.DLL");
+#endif
+
+    std::vector<std::string> dirs;
+    dirs.push_back(""); // bare name -> default search path (exe dir, System32, ...)
+
+    auto wideToUtf8 = [](const wchar_t* w) {
+        if (!w || !*w) return std::string();
+        int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+        if (len <= 0) return std::string();
+        std::string out(static_cast<size_t>(len - 1), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), len, nullptr, nullptr);
+        return out;
+    };
+
+    // Directory of the running executable.
+    {
+        wchar_t exePath[MAX_PATH]{};
+        if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) > 0) {
+            std::string full = wideToUtf8(exePath);
+            auto pos = full.find_last_of("/\\");
+            if (pos != std::string::npos) {
+                dirs.push_back(full.substr(0, pos));
+            }
+        }
+    }
+
+    // System32.
+    {
+        wchar_t sysPath[MAX_PATH]{};
+        if (GetSystemDirectoryW(sysPath, MAX_PATH) > 0) {
+            dirs.push_back(wideToUtf8(sysPath));
+        }
+    }
+
+    // DriverStore ch341wdm.inf_* folder (where the WCH installer puts the DLL).
+    {
+        std::string base = "C:\\Windows\\System32\\DriverStore\\FileRepository";
+        WIN32_FIND_DATAA fd{};
+        HANDLE h = FindFirstFileA((base + "\\ch341wdm.inf_*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                if (fd.cFileName[0] == '.') continue;
+                dirs.push_back(base + "\\" + fd.cFileName);
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+    }
+
+    std::vector<std::string> candidates;
+    for (const auto& dir : dirs) {
+        for (const auto& name : names) {
+            if (dir.empty()) {
+                candidates.push_back(name);
+            } else {
+                candidates.push_back(dir + "\\" + name);
+            }
+        }
+    }
+    return candidates;
+}
+
 class Ch341I2cAdapter::DriverBinding {
 public:
     DriverBinding() {
 #ifdef _WIN32
-        h_dll_ = LoadLibraryA("CH341DLL.DLL");
-        if (h_dll_) {
-            fn_open_device_  = reinterpret_cast<PFN_CH341OpenDevice>(GetProcAddress(h_dll_, "CH341OpenDevice"));
-            fn_close_device_ = reinterpret_cast<PFN_CH341CloseDevice>(GetProcAddress(h_dll_, "CH341CloseDevice"));
-            fn_set_stream_   = reinterpret_cast<PFN_CH341SetStream>(GetProcAddress(h_dll_, "CH341SetStream"));
-            fn_stream_i2c_   = reinterpret_cast<PFN_CH341StreamI2C>(GetProcAddress(h_dll_, "CH341StreamI2C"));
-            fn_set_output_   = reinterpret_cast<PFN_CH341SetOutput>(GetProcAddress(h_dll_, "CH341SetOutput"));
+        for (const auto& candidate : BuildCh341DllCandidates()) {
+            h_dll_ = LoadLibraryA(candidate.c_str());
+            if (h_dll_) {
+                fn_open_device_  = reinterpret_cast<PFN_CH341OpenDevice>(GetProcAddress(h_dll_, "CH341OpenDevice"));
+                fn_close_device_ = reinterpret_cast<PFN_CH341CloseDevice>(GetProcAddress(h_dll_, "CH341CloseDevice"));
+                fn_set_stream_   = reinterpret_cast<PFN_CH341SetStream>(GetProcAddress(h_dll_, "CH341SetStream"));
+                fn_stream_i2c_   = reinterpret_cast<PFN_CH341StreamI2C>(GetProcAddress(h_dll_, "CH341StreamI2C"));
+                fn_set_output_   = reinterpret_cast<PFN_CH341SetOutput>(GetProcAddress(h_dll_, "CH341SetOutput"));
+                if (fn_open_device_ && fn_close_device_ && fn_stream_i2c_) {
+                    loaded_path_ = candidate;
+                    break;
+                }
+                FreeLibrary(h_dll_);
+                h_dll_ = nullptr;
+            }
+        }
+        if (IsValid()) {
+            CPS_LOG_INFO("Ch341I2c", "CH341 driver loaded from: ", loaded_path_);
+        } else {
+            CPS_LOG_WARN("Ch341I2c", "CH341 driver DLL not found in any candidate location "
+                "(exe dir, System32, DriverStore ch341wdm.inf_*). Install the WCH CH341 driver "
+                "or place CH341DLLA64.DLL next to the executable.");
         }
 #endif
     }
@@ -52,13 +145,18 @@ public:
 #endif
     }
 
+    [[nodiscard]] const std::string& LoadedPath() const noexcept {
+        return loaded_path_;
+    }
+
 #ifdef _WIN32
     HMODULE h_dll_{nullptr};
     PFN_CH341OpenDevice  fn_open_device_{nullptr};
-    PFN_CH341CloseDevice fn_close_device_{nullptr};
-    PFN_CH341SetStream   fn_set_stream_{nullptr};
-    PFN_CH341StreamI2C   fn_stream_i2c_{nullptr};
-    PFN_CH341SetOutput   fn_set_output_{nullptr};
+    PFN_CH341CloseDevice  fn_close_device_{nullptr};
+    PFN_CH341SetStream    fn_set_stream_{nullptr};
+    PFN_CH341StreamI2C    fn_stream_i2c_{nullptr};
+    PFN_CH341SetOutput    fn_set_output_{nullptr};
+    std::string loaded_path_;
 #endif
 };
 
@@ -72,6 +170,29 @@ Ch341I2cAdapter::~Ch341I2cAdapter() {
 
 bool Ch341I2cAdapter::IsDriverLoaded() const noexcept {
     return driver_->IsValid();
+}
+
+// Apply the I2C clock mode to an already-open device WITHOUT taking mutex_
+// (the caller must already hold it). This avoids the reentrant self-deadlock
+// that occurred when Open() called SetSpeed() while holding the same
+// non-recursive mutex_.
+void Ch341I2cAdapter::ApplySpeedLocked() {
+#ifdef _WIN32
+    if (!driver_->IsValid() || !driver_->fn_set_stream_) {
+        return;
+    }
+    // CH341 mode bits for I2C clock:
+    // bit 1-0: 00=20KHz, 01=100KHz, 10=400KHz, 11=750KHz
+    ULONG mode = 0x01; // default 100KHz
+    switch (speed_) {
+        case I2cClockSpeed::Khz20:  mode = 0x00; break;
+        case I2cClockSpeed::Khz100: mode = 0x01; break;
+        case I2cClockSpeed::Khz400: mode = 0x02; break;
+        case I2cClockSpeed::Khz750:
+        case I2cClockSpeed::Khz1000: mode = 0x03; break;
+    }
+    driver_->fn_set_stream_(device_index_, mode);
+#endif
 }
 
 Common::Result<void> Ch341I2cAdapter::Open(uint32_t device_index) {
@@ -95,8 +216,8 @@ Common::Result<void> Ch341I2cAdapter::Open(uint32_t device_index) {
     device_index_ = device_index;
     is_open_ = true;
 
-    // Apply default speed
-    SetSpeed(speed_);
+    // Apply default speed WITHOUT re-locking mutex_ (would self-deadlock).
+    ApplySpeedLocked();
     return Common::Result<void>::Ok();
 #else
     return Common::Status::Error(Common::StatusCode::NotImplemented, "CH341 driver only supported on Windows.");
@@ -125,21 +246,8 @@ Common::Result<void> Ch341I2cAdapter::SetSpeed(I2cClockSpeed speed) {
 
     if (!is_open_) return Common::Result<void>::Ok();
 
-#ifdef _WIN32
-    if (driver_->IsValid() && driver_->fn_set_stream_) {
-        // CH341 mode bits for I2C clock:
-        // bit 1-0: 00=20KHz, 01=100KHz, 10=400KHz, 11=750KHz
-        ULONG mode = 0x01; // default 100KHz
-        switch (speed) {
-            case I2cClockSpeed::Khz20:  mode = 0x00; break;
-            case I2cClockSpeed::Khz100: mode = 0x01; break;
-            case I2cClockSpeed::Khz400: mode = 0x02; break;
-            case I2cClockSpeed::Khz750:
-            case I2cClockSpeed::Khz1000: mode = 0x03; break;
-        }
-        driver_->fn_set_stream_(device_index_, mode);
-    }
-#endif
+    // Apply the new clock mode (caller already holds mutex_).
+    ApplySpeedLocked();
     return Common::Result<void>::Ok();
 }
 

@@ -305,11 +305,12 @@ BluetoothCapabilities RadioAdapterHelper::DetectBluetoothCapabilities() const {
         radioInfo.dwSize = sizeof(BLUETOOTH_RADIO_INFO);
         DWORD res = bt_binding_->fn_get_info_(hRadio, &radioInfo);
         if (res == ERROR_SUCCESS) {
-            std::wstring ws(radioInfo.szName);
-            caps.adapter_name = std::string(ws.begin(), ws.end());
+            char nameBuf[256] = {0};
+            WideCharToMultiByte(CP_UTF8, 0, radioInfo.szName, -1, nameBuf, sizeof(nameBuf), nullptr, nullptr);
+            caps.adapter_name = nameBuf;
 
             std::ostringstream ss;
-            ss << std::hex << std::setfill('0');
+            ss << std::uppercase << std::hex << std::setfill('0');
             for (int i = 5; i >= 0; --i) {
                 ss << std::setw(2) << static_cast<int>(radioInfo.address.rgBytes[i]);
                 if (i > 0) ss << ":";

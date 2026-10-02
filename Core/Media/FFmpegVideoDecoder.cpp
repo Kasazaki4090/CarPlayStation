@@ -90,16 +90,35 @@ bool FFmpegVideoDecoder::LoadRuntime() {
     }
 
     // Load the FFmpeg runtime DLLs. On Windows the import libraries are
-    // resolved through the shared avcodec / avutil DLLs.
-    void* avcodec = CPS_FFMPEG_DLLOAD("avcodec-61.dll");
-    void* avutil = CPS_FFMPEG_DLLOAD("avutil-59.dll");
-    if (avcodec == nullptr || avutil == nullptr) {
-        // Try version-agnostic names (some builds ship without the suffix).
-        if (avcodec == nullptr) {
-            avcodec = CPS_FFMPEG_DLLOAD("avcodec.dll");
+    // resolved through the shared avcodec / avutil DLLs. The DLL file name
+    // encodes the library version (e.g. avcodec-63.dll for FFmpeg 9.x), so
+    // probe the known versions newest-first, then fall back to the
+    // version-agnostic names (some builds ship without the suffix).
+    static const char* kAvcodecNames[] = {
+        "avcodec-63.dll",  // FFmpeg 9.x
+        "avcodec-62.dll",  // FFmpeg 8.x
+        "avcodec-61.dll",  // FFmpeg 7.x
+        "avcodec.dll",
+    };
+    static const char* kAvutilNames[] = {
+        "avutil-61.dll",  // FFmpeg 9.x
+        "avutil-60.dll",  // FFmpeg 8.x
+        "avutil-59.dll",  // FFmpeg 7.x
+        "avutil.dll",
+    };
+
+    void* avcodec = nullptr;
+    for (const char* name : kAvcodecNames) {
+        avcodec = CPS_FFMPEG_DLLOAD(name);
+        if (avcodec != nullptr) {
+            break;
         }
-        if (avutil == nullptr) {
-            avutil = CPS_FFMPEG_DLLOAD("avutil.dll");
+    }
+    void* avutil = nullptr;
+    for (const char* name : kAvutilNames) {
+        avutil = CPS_FFMPEG_DLLOAD(name);
+        if (avutil != nullptr) {
+            break;
         }
     }
     if (avcodec == nullptr || avutil == nullptr) {

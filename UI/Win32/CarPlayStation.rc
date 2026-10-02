@@ -1,0 +1,5 @@
+#include <windows.h>
+
+// Embed the UAC manifest so the process runs elevated (required for the
+// AF_BTH RFCOMM Bluetooth server socket and SDP registration).
+1 RT_MANIFEST "CarPlayStation.manifest"

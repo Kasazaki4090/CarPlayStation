@@ -1,0 +1,714 @@
+#include "Core/Service/CarPlayCoreService.h"
+#include "Core/Hardware/FileMfiSigner.h"
+#include "Core/Transport/BtRfcommTransport.h"
+#include "Core/Transport/BtSdpHelper.h"
+#include "Core/Transport/WifiSoftApManager.h"
+#include "Core/Transport/MdnsAdvertiser.h"
+#include "Core/Hardware/RadioAdapterHelper.h"
+#include "Core/Protocol/Iap2LinkEngine.h"
+#include "Core/Protocol/Iap2MessageCatalog.h"
+#include "Core/Session/CarPlaySessionStateMachine.h"
+#include "Core/Session/PairingStore.h"
+#include "Core/Session/AirPlayRtspServer.h"
+#include "Core/Media/MfVideoDecoder.h"
+#include "Core/Media/WasapiAudioPipeline.h"
+#include "Core/Media/WasapiMicrophoneUplink.h"
+#include "Core/Media/AirPlayVideoReceiver.h"
+#include "Core/Common/Logging.h"
+
+#include <algorithm>
+#include <cstdio>
+
+namespace CarPlayStation::Core::Service {
+
+// ============================================================================
+// No-op input sink (used when no real input sink is provided via dependencies).
+// Accepts and discards all input events.
+// ============================================================================
+namespace {
+
+class NoOpInputSink final : public Input::IInputEventSink {
+public:
+    [[nodiscard]] Common::Status SendTouchEvent(Input::TouchAction, const Input::TouchPoint&) override {
+        return Common::Status::Ok();
+    }
+    [[nodiscard]] Common::Status SendKnobEvent(Input::KnobAction, uint32_t) override {
+        return Common::Status::Ok();
+    }
+    [[nodiscard]] Common::Status SendButtonEvent(Input::ButtonType, bool) override {
+        return Common::Status::Ok();
+    }
+};
+
+// MFi authentication message IDs (iAP2 control session, session 1).
+namespace {
+    constexpr uint16_t MfiMsgReqAuthCert = 0xAA00;  // device -> accessory: request certificate
+    constexpr uint16_t MfiMsgAuthCert    = 0xAA01;  // accessory -> device: certificate
+    constexpr uint16_t MfiMsgChallenge   = 0xAA02;  // device -> accessory: challenge
+    constexpr uint16_t MfiMsgSignature   = 0xAA03;  // accessory -> device: signature
+    constexpr uint16_t MfiMsgAuthFailed  = 0xAA04;  // device -> accessory: failure
+    constexpr uint16_t MfiMsgAuthSuccess = 0xAA05;  // device -> accessory: success
+
+    // Build a single-param iAP2 group body: [BE16 group_len][BE16 param_id][value].
+    [[nodiscard]] Common::ByteBuffer BuildMfiGroup(uint16_t paramId, Common::ByteSpan value) {
+        const uint16_t groupLen = static_cast<uint16_t>(4 + value.size());
+        Common::ByteBuffer out;
+        out.reserve(4 + value.size());
+        out.push_back(static_cast<uint8_t>((groupLen >> 8) & 0xFF));
+        out.push_back(static_cast<uint8_t>(groupLen & 0xFF));
+        out.push_back(static_cast<uint8_t>((paramId >> 8) & 0xFF));
+        out.push_back(static_cast<uint8_t>(paramId & 0xFF));
+        for (uint8_t b : value) out.push_back(b);
+        return out;
+    }
+}
+
+class CoreIap2PacketHandler final : public Protocol::IIap2PacketHandler {
+public:
+    using SendControlMessage = std::function<Common::Status(uint16_t messageId, Common::ByteSpan body)>;
+
+    CoreIap2PacketHandler(std::shared_ptr<Session::ICarPlaySession> session,
+                          std::shared_ptr<Hardware::IMfiSigner> signer,
+                          std::shared_ptr<Transport::IWifiSoftApManager> wifi_mgr,
+                          SendControlMessage send_fn,
+                          std::string device_name = "CarPlayStation",
+                          Common::MacAddress bt_mac = {},
+                          std::string fallback_ssid = "CarPlayStation",
+                          std::string fallback_passphrase = "CarPlayStationSecret123")
+        : session_(std::move(session)),
+          mfi_signer_(std::move(signer)),
+          wifi_mgr_(std::move(wifi_mgr)),
+          send_fn_(std::move(send_fn)),
+          device_name_(std::move(device_name)),
+          bt_mac_(bt_mac),
+          fallback_ssid_(std::move(fallback_ssid)),
+          fallback_passphrase_(std::move(fallback_passphrase)) {}
+
+    // Swap the signer at runtime (e.g. after the user picks a backend).
+    void SetSigner(std::shared_ptr<Hardware::IMfiSigner> signer) {
+        mfi_signer_ = std::move(signer);
+    }
+
+    void SetWifiManager(std::shared_ptr<Transport::IWifiSoftApManager> wifi_mgr) {
+        wifi_mgr_ = std::move(wifi_mgr);
+    }
+
+    void SetDeviceIdentity(std::string device_name, Common::MacAddress bt_mac) {
+        device_name_ = std::move(device_name);
+        bt_mac_ = bt_mac;
+    }
+
+    void OnIap2Message(uint8_t sessionId, Common::ByteSpan payload) override {
+        // Only the control session carries MFi authentication & identification.
+        if (sessionId != static_cast<uint8_t>(Protocol::Iap2SessionId::Control)) {
+            return;
+        }
+        // Control-session payload: [40 40][total BE16][msg_id BE16][groups].
+        if (payload.size() < 6 || payload[0] != 0x40 || payload[1] != 0x40) {
+            return;
+        }
+        const uint16_t msgId = static_cast<uint16_t>((payload[4] << 8) | payload[5]);
+        const Common::ByteSpan groups(payload.data() + 6, payload.size() - 6);
+
+        char hexBuf[16];
+        std::snprintf(hexBuf, sizeof(hexBuf), "0x%04X", msgId);
+        CPS_LOG_INFO("CoreService", "iAP2 control message received: ", hexBuf);
+
+        try {
+            switch (msgId) {
+                case MfiMsgReqAuthCert:
+                    HandleRequestCertificate();
+                    break;
+                case MfiMsgChallenge:
+                    HandleChallenge(groups);
+                    break;
+                case MfiMsgAuthSuccess:
+                    CompleteAuthentication(true);
+                    break;
+                case MfiMsgAuthFailed:
+                    CompleteAuthentication(false);
+                    break;
+                case Protocol::Iap2MsgId::StartIdentification: // 0x1D00
+                    CPS_LOG_INFO("CoreService", "iAP2 StartIdentification (0x1D00) received from iPhone — sending IdentifyInformation");
+                    SendIdentifyInformation();
+                    break;
+                case Protocol::Iap2MsgId::IdentifyAccepted: // 0x1D02
+                    CPS_LOG_INFO("CoreService", "iAP2 IdentifyAccepted (0x1D02) received! Wireless CarPlay confirmed by iPhone");
+                    HandleRequestAccessoryWiFi();
+                    break;
+                case Protocol::Iap2MsgId::RequestAccessoryWiFi: // 0x5702
+                    CPS_LOG_INFO("CoreService", "iAP2 RequestAccessoryWiFi (0x5702) received from iPhone — sending WiFi configuration");
+                    HandleRequestAccessoryWiFi();
+                    break;
+                case Protocol::Iap2MsgId::IdentifyRejected: { // 0x1D03
+                    auto rejected = Protocol::Iap2MessageCatalog::ParseRejectedParamIds(groups);
+                    std::string rejStr;
+                    for (uint16_t pid : rejected) {
+                        if (!rejStr.empty()) rejStr += ", ";
+                        rejStr += std::to_string(pid);
+                    }
+                    CPS_LOG_WARN("CoreService", "iAP2 IdentifyRejected (0x1D03) received from iPhone; rejected params: [", rejStr, "]");
+                    break;
+                }
+                default:
+                    break;
+            }
+        } catch (const std::exception& ex) {
+            CPS_LOG_ERROR("CoreService", "Exception processing iAP2 message ", hexBuf, ": ", ex.what());
+        } catch (...) {
+            CPS_LOG_ERROR("CoreService", "Unknown exception processing iAP2 message ", hexBuf);
+        }
+    }
+
+    void OnLinkEvent(std::string_view /*eventDescription*/) override {
+        // Link-level events (SYN-ACK, etc.) do not complete MFi auth on their own.
+    }
+
+private:
+    void HandleRequestCertificate() {
+        if (!mfi_signer_) {
+            CPS_LOG_ERROR("CoreService", "MFi ReqAuthCert received but no signer is configured — cannot authenticate");
+            return;
+        }
+        CPS_LOG_INFO("CoreService", "MFi ReqAuthCert (0xAA00) received; fetching certificate...");
+        auto cert_res = mfi_signer_->FetchCertificate();
+        if (cert_res.IsError()) {
+            CPS_LOG_WARN("CoreService", "MFi certificate fetch failed: ", cert_res.Error().Message());
+            return;
+        }
+        auto group = BuildMfiGroup(0x0000, Common::ByteSpan(cert_res.Value().data(), cert_res.Value().size()));
+        if (send_fn_) {
+            auto send_st = send_fn_(MfiMsgAuthCert, Common::ByteSpan(group.data(), group.size()));
+            if (send_st.IsError()) {
+                CPS_LOG_ERROR("CoreService", "Failed to send MFi AuthCertificate packet: ", send_st.Message());
+                return;
+            }
+        }
+        CPS_LOG_INFO("CoreService", "MFi certificate sent (", std::to_string(cert_res.Value().size()), " bytes)");
+    }
+
+    void HandleChallenge(Common::ByteSpan groups) {
+        if (!mfi_signer_) {
+            CPS_LOG_ERROR("CoreService", "MFi Challenge received but no signer is configured");
+            return;
+        }
+        if (groups.size() < 4) {
+            CPS_LOG_WARN("CoreService", "MFi Challenge received with truncated group header (< 4 bytes)");
+            return;
+        }
+        const uint16_t groupLen = static_cast<uint16_t>((groups[0] << 8) | groups[1]);
+        if (groupLen < 4 || groupLen > groups.size()) {
+            CPS_LOG_WARN("CoreService", "MFi Challenge groupLen invalid: ", std::to_string(groupLen), " / ", std::to_string(groups.size()));
+            return;
+        }
+        const Common::ByteSpan challenge(groups.data() + 4, groupLen - 4);
+        CPS_LOG_INFO("CoreService", "MFi Challenge (0xAA02) received; nonce size = ",
+                     std::to_string(challenge.size()), " bytes. Signing challenge...");
+
+        auto sig_res = mfi_signer_->SignChallenge(challenge);
+        if (sig_res.IsError()) {
+            CPS_LOG_WARN("CoreService", "MFi challenge signing failed: ", sig_res.Error().Message());
+            return;
+        }
+        auto group = BuildMfiGroup(0x0000, Common::ByteSpan(sig_res.Value().data(), sig_res.Value().size()));
+        if (send_fn_) {
+            auto send_st = send_fn_(MfiMsgSignature, Common::ByteSpan(group.data(), group.size()));
+            if (send_st.IsError()) {
+                CPS_LOG_ERROR("CoreService", "Failed to send MFi AuthResponse signature packet: ", send_st.Message());
+                return;
+            }
+        }
+        CPS_LOG_INFO("CoreService", "MFi challenge signature sent (", std::to_string(sig_res.Value().size()), " bytes)");
+    }
+
+    void CompleteAuthentication(bool success) {
+        if (auto session_sm = std::dynamic_pointer_cast<Session::CarPlaySessionStateMachine>(session_)) {
+            if (session_sm->GetState() == Session::SessionState::BtDiscovered) {
+                CPS_LOG_INFO("CoreService", success ? "MFi authentication succeeded; transitioning to authenticated"
+                                                    : "MFi authentication failed");
+                (void)session_sm->OnIap2Authenticated(success, "iPhone");
+            }
+        }
+        if (success) {
+            CPS_LOG_INFO("CoreService", "MFi authentication succeeded — waiting for iPhone StartIdentification (0x1D00)...");
+        }
+    }
+
+    void SendIdentifyInformation() {
+        if (!send_fn_) return;
+        Common::ByteBuffer identBody = Protocol::Iap2MessageCatalog::BuildIdentifyInfo(
+            device_name_, bt_mac_, /*declareWired=*/false);
+        auto status = send_fn_(Protocol::Iap2MsgId::IdentifyInformation,
+                               Common::ByteSpan(identBody.data(), identBody.size()));
+        if (status.IsOk()) {
+            CPS_LOG_INFO("CoreService", "iAP2 IdentifyInformation (0x1D01) sent to iPhone (",
+                         std::to_string(identBody.size()), " bytes)");
+        } else {
+            CPS_LOG_WARN("CoreService", "Failed to send iAP2 IdentifyInformation: ", status.Message());
+        }
+    }
+
+    void HandleRequestAccessoryWiFi() {
+        std::string ssid = fallback_ssid_;
+        std::string pass = fallback_passphrase_;
+        uint8_t channel = 36;
+
+        if (wifi_mgr_) {
+            auto creds = wifi_mgr_->GetCredentials();
+            if (!creds.ssid.empty()) {
+                ssid = creds.ssid;
+            }
+            if (!creds.passphrase.empty()) {
+                pass = creds.passphrase;
+            }
+            if (creds.channel != 0) {
+                channel = static_cast<uint8_t>(creds.channel);
+            }
+        }
+
+        CPS_LOG_INFO("CoreService", "Sending iAP2 AccessoryWiFiConfig (0x5703) to iPhone: SSID='", ssid, "', channel=", std::to_string(channel));
+        auto body = Protocol::Iap2MessageCatalog::BuildAccessoryWiFiConfig(ssid, pass, 2, channel);
+        if (send_fn_) {
+            auto status = send_fn_(Protocol::Iap2MsgId::AccessoryWiFiConfig,
+                                   Common::ByteSpan(body.data(), body.size()));
+            if (status.IsOk()) {
+                CPS_LOG_INFO("CoreService", "iAP2 AccessoryWiFiConfig (0x5703) sent successfully (",
+                             std::to_string(body.size()), " bytes)");
+            } else {
+                CPS_LOG_WARN("CoreService", "Failed to send iAP2 AccessoryWiFiConfig: ", status.Message());
+            }
+        }
+    }
+
+    std::shared_ptr<Session::ICarPlaySession> session_;
+    std::shared_ptr<Hardware::IMfiSigner> mfi_signer_;
+    std::shared_ptr<Transport::IWifiSoftApManager> wifi_mgr_;
+    SendControlMessage send_fn_;
+    std::string device_name_{"CarPlayStation"};
+    Common::MacAddress bt_mac_{0x00, 0x1A, 0x7D, 0xDA, 0x71, 0x13};
+    std::string fallback_ssid_{"CarPlayStation"};
+    std::string fallback_passphrase_{"CarPlayStationSecret123"};
+};
+
+} // anonymous namespace
+
+// ============================================================================
+// CarPlayCoreService
+// ============================================================================
+
+CarPlayCoreService::CarPlayCoreService(CarPlayCoreDependencies deps)
+    : deps_(std::move(deps)) {
+}
+
+CarPlayCoreService::~CarPlayCoreService() {
+    Stop();
+}
+
+Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfig& env) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+
+    if (initialized_) {
+        return Common::MakeError(Common::StatusCode::InvalidState, "Already initialized");
+    }
+
+    env_config_ = env;
+
+    // Construct subsystems: use provided dependencies or create defaults.
+    // The facade takes ownership via shared_ptr.
+
+    // Layer 1: Hardware (MFi Signer)
+    if (deps_.mfi_signer) {
+        mfi_signer_ = deps_.mfi_signer;
+    } else {
+        // Default: FileMfiSigner (offline software signer, DEC-006)
+        mfi_signer_ = std::make_shared<Hardware::FileMfiSigner>();
+    }
+
+    // Layer 2: Transport
+    if (deps_.transport) {
+        transport_ = deps_.transport;
+    } else {
+        transport_ = std::make_shared<Transport::BtRfcommTransport>();
+    }
+
+    // Layer 3: Protocol (iAP2 Link)
+    if (deps_.iap2_link) {
+        iap2_link_ = deps_.iap2_link;
+    } else {
+        iap2_link_ = std::make_shared<Protocol::Iap2LinkEngine>();
+    }
+
+    // Query physical Bluetooth adapter MAC to establish matching CarKit identity for iAP2 and mDNS
+    Hardware::RadioAdapterHelper radio_helper;
+    auto bt_caps = radio_helper.DetectBluetoothCapabilities();
+    Common::MacAddress local_bt_mac{};
+    std::string local_bt_mac_str = bt_caps.address_string;
+    if (bt_caps.has_bt_adapter && !local_bt_mac_str.empty()) {
+        uint64_t bth_addr = Transport::BtSdpHelper::ParseBluetoothAddress(local_bt_mac_str);
+        for (size_t i = 0; i < 6; ++i) {
+            local_bt_mac.bytes[5 - i] = static_cast<uint8_t>((bth_addr >> (8 * i)) & 0xFF);
+        }
+        Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+            "Local Bluetooth Radio: MAC=", local_bt_mac_str, ", Name='", bt_caps.adapter_name, "'");
+    } else {
+        local_bt_mac = Common::MacAddress{0x00, 0x1A, 0x7D, 0xDA, 0x71, 0x05};
+        local_bt_mac_str = "00:1A:7D:DA:71:05";
+        Common::Logger::Instance().Log(Common::LogLevel::Warn, "CoreService",
+            "Using fallback Bluetooth MAC: ", local_bt_mac_str);
+    }
+
+    // Layer 4: Session
+    if (deps_.session) {
+        session_ = deps_.session;
+    } else {
+        Session::SessionConfig session_config{};
+        session_config.device_id = local_bt_mac_str;
+        session_config.ap_ssid = env.network.wifi_softap_ssid.empty() ? (env.identity.device_name.empty() ? "CarPlayStation" : env.identity.device_name) : env.network.wifi_softap_ssid;
+        session_config.ap_passphrase = env.network.wifi_softap_password.empty() ? "CarPlayStationSecret123" : env.network.wifi_softap_password;
+        session_config.rtsp_port = env.network.rtsp_port != 0 ? env.network.rtsp_port : 5000;
+
+        wifi_manager_ = std::make_shared<Transport::WifiSoftApManager>();
+
+        Session::AirPlayRtspServer::Options rtsp_opts{};
+        rtsp_opts.port = session_config.rtsp_port;
+        rtsp_server_ = std::make_shared<Session::AirPlayRtspServer>(rtsp_opts);
+
+        Session::SessionDependencies session_deps{};
+        session_deps.pairing_store = std::make_shared<Session::PairingStore>("carplay_pairings.json");
+        session_deps.rtsp_server = rtsp_server_;
+        session_deps.wifi_manager = wifi_manager_;
+        session_deps.mdns_advertiser = std::make_shared<Transport::MdnsAdvertiser>();
+
+        session_ = std::make_shared<Session::CarPlaySessionStateMachine>(session_config, session_deps);
+
+        if (wifi_manager_) {
+            wifi_manager_->SetStationConnectedCallback([this](const Transport::StationInfo& station) {
+                CPS_LOG_INFO("CoreService", "WiFi Station joined: MAC=", station.macAddress, " IP=", station.ipAddress);
+                if (auto session_sm = std::dynamic_pointer_cast<Session::CarPlaySessionStateMachine>(session_)) {
+                    uint64_t bth_addr = Transport::BtSdpHelper::ParseBluetoothAddress(station.macAddress);
+                    Common::MacAddress mac{};
+                    for (size_t i = 0; i < 6; ++i) {
+                        mac.bytes[5 - i] = static_cast<uint8_t>((bth_addr >> (8 * i)) & 0xFF);
+                    }
+                    session_sm->OnWifiConnected(mac, station.ipAddress);
+                }
+            });
+        }
+    }
+
+    // Layer 5: Media
+    if (deps_.video_decoder) {
+        video_decoder_ = deps_.video_decoder;
+    } else {
+        video_decoder_ = std::make_shared<Media::MfVideoDecoder>();
+    }
+    video_receiver_ = std::make_shared<Media::AirPlayVideoReceiver>(video_decoder_, 7100);
+
+    if (deps_.audio_pipeline) {
+        audio_pipeline_ = deps_.audio_pipeline;
+    } else {
+        audio_pipeline_ = std::make_shared<Media::WasapiAudioPipeline>();
+    }
+
+    if (deps_.microphone_uplink) {
+        microphone_uplink_ = deps_.microphone_uplink;
+    } else {
+        microphone_uplink_ = std::make_shared<Media::WasapiMicrophoneUplink>();
+    }
+
+    // Layer 6: Input
+    if (deps_.input_sink) {
+        input_sink_ = deps_.input_sink;
+    } else {
+        input_sink_ = std::make_shared<NoOpInputSink>();
+    }
+
+    // Wire Transport <-> iAP2 link
+    if (transport_ && iap2_link_) {
+        transport_->SetDataCallback([this](Common::ByteSpan data) {
+            if (iap2_link_) {
+                iap2_link_->FeedData(data);
+            }
+        });
+
+        if (auto iap2_engine = std::dynamic_pointer_cast<Protocol::Iap2LinkEngine>(iap2_link_)) {
+            iap2_engine->SetSendFunction([this](Common::ByteSpan d) {
+                if (transport_) {
+                    return transport_->Send(d);
+                }
+                return Common::MakeError(Common::StatusCode::Unavailable, "Transport unavailable");
+            });
+        }
+    }
+
+    // Wire iAP2 handler to Session. The handler needs the MFi signer (to answer the
+    // certificate/challenge exchange) and a way to emit control-session messages.
+    auto send_control_message = [this](uint16_t messageId, Common::ByteSpan body) -> Common::Status {
+        if (auto engine = std::dynamic_pointer_cast<Protocol::Iap2LinkEngine>(iap2_link_)) {
+            auto pkt = engine->BuildMessage(static_cast<uint8_t>(Protocol::Iap2SessionId::Control),
+                                            messageId, body);
+            if (transport_) {
+                return transport_->Send(Common::ByteSpan(pkt.data(), pkt.size()));
+            }
+        }
+        return Common::MakeError(Common::StatusCode::Unavailable, "iAP2 link unavailable");
+    };
+    iap2_handler_ = std::make_shared<CoreIap2PacketHandler>(
+        session_, mfi_signer_, wifi_manager_, send_control_message,
+        env_config_.identity.device_name,
+        local_bt_mac,
+        env_config_.network.wifi_softap_ssid,
+        env_config_.network.wifi_softap_password);
+    if (iap2_link_) {
+        iap2_link_->SetPacketHandler(iap2_handler_.get());
+    }
+
+    // Wire Transport connection state to Session
+    if (transport_) {
+        transport_->SetStateCallback([this](Transport::TransportState state, Common::Status /*status*/) {
+            auto session_sm = std::dynamic_pointer_cast<Session::CarPlaySessionStateMachine>(session_);
+            if (!session_sm) return;
+
+            if (state == Transport::TransportState::Connected) {
+                std::string endpoint = transport_->GetRemoteEndpoint();
+                std::string mac_str = endpoint.size() >= 17 ? endpoint.substr(0, 17) : endpoint;
+                uint64_t bth_addr = Transport::BtSdpHelper::ParseBluetoothAddress(mac_str);
+                Common::MacAddress mac{};
+                for (size_t i = 0; i < 6; ++i) {
+                    mac.bytes[5 - i] = static_cast<uint8_t>((bth_addr >> (8 * i)) & 0xFF);
+                }
+                Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+                    "Bluetooth device connected: ", endpoint);
+                session_sm->OnBluetoothDeviceDiscovered("iPhone", mac, env_config_.identity.device_name);
+
+                // Initiate the iAP2 link: send the DETECT prelude + SYN so the iPhone
+                // can complete the link handshake and begin the MFi auth exchange.
+                if (auto engine = std::dynamic_pointer_cast<Protocol::Iap2LinkEngine>(iap2_link_)) {
+                    engine->Reset();
+                    engine->InitiateLink();
+                }
+            } else if (state == Transport::TransportState::Disconnected) {
+                Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+                    "Bluetooth device disconnected");
+                if (iap2_link_) {
+                    iap2_link_->Reset();
+                }
+                session_sm->OnDisconnect("Bluetooth transport disconnected");
+            }
+        });
+    }
+
+    // Wire the session state observer to the event bus.
+    WireSessionStateObserver();
+
+    initialized_ = true;
+    Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+        "Initialized with env: ", env.identity.device_name);
+    return Common::Status::Ok();
+}
+
+Common::Status CarPlayCoreService::UpdateEnvironment(const Common::CoreEnvironmentConfig& env) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+
+    if (!initialized_) {
+        return Common::MakeError(Common::StatusCode::InvalidState, "Not initialized");
+    }
+
+    env_config_ = env;
+
+    // Hot-update the MFi signer endpoint if it's a NetworkMfiClient.
+    // (The Application layer is responsible for constructing the correct
+    //  signer type; the facade just stores the config.)
+
+    Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+        "Environment updated: ", env.identity.device_name);
+    return Common::Status::Ok();
+}
+
+Common::Status CarPlayCoreService::Start() {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+
+    if (!initialized_) {
+        return Common::MakeError(Common::StatusCode::InvalidState, "Not initialized");
+    }
+    if (started_) {
+        return Common::MakeError(Common::StatusCode::InvalidState, "Already started");
+    }
+
+    // Start Bluetooth RFCOMM server listener and register Wireless iAP2 SDP service
+    if (auto rfcomm = std::dynamic_pointer_cast<Transport::BtRfcommTransport>(transport_)) {
+        auto tr_st = rfcomm->StartServer(1);
+        if (tr_st.IsError()) {
+            Common::Logger::Instance().Log(Common::LogLevel::Warn, "CoreService",
+                "Bluetooth RFCOMM listener could not be started: ", tr_st.Message());
+        } else {
+            Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+                "Bluetooth RFCOMM server started on channel 1 with Wireless iAP2 SDP record registered");
+        }
+    }
+
+    // Start the session (which triggers discovery / advertising).
+    auto status = session_->Start();
+    if (status.IsError()) {
+        Common::Logger::Instance().Log(Common::LogLevel::Error, "CoreService",
+            "Session start failed: ", status.Message());
+        return status;
+    }
+
+    // Start AirPlay Video Receiver on TCP/UDP 7100
+    if (video_receiver_) {
+        auto vr_st = video_receiver_->Start();
+        if (vr_st.IsOk()) {
+            Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+                "AirPlay Video Receiver listening on port 7100");
+        } else {
+            Common::Logger::Instance().Log(Common::LogLevel::Warn, "CoreService",
+                "Failed to start AirPlay Video Receiver: ", vr_st.Message());
+        }
+    }
+
+    started_ = true;
+    Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService", "Started");
+    return Common::Status::Ok();
+}
+
+void CarPlayCoreService::Stop() {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+
+    if (!started_ && !initialized_) {
+        return;
+    }
+
+    TearDownSubsystems();
+    started_ = false;
+    Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService", "Stopped");
+}
+
+std::shared_ptr<Session::ICarPlaySession> CarPlayCoreService::GetSession() {
+    return session_;
+}
+
+std::shared_ptr<Media::IVideoDecoder> CarPlayCoreService::GetVideoDecoder() {
+    return video_decoder_;
+}
+
+std::shared_ptr<Media::IAudioPipeline> CarPlayCoreService::GetAudioPipeline() {
+    return audio_pipeline_;
+}
+
+std::shared_ptr<Input::IInputEventSink> CarPlayCoreService::GetInputSink() {
+    return input_sink_;
+}
+
+uint64_t CarPlayCoreService::SubscribeToEvents(CoreEventCallback callback) {
+    return event_bus_.Subscribe(std::move(callback));
+}
+
+void CarPlayCoreService::UnsubscribeFromEvents(uint64_t token) {
+    event_bus_.Unsubscribe(token);
+}
+
+std::shared_ptr<Hardware::IMfiSigner> CarPlayCoreService::GetMfiSigner() const {
+    return mfi_signer_;
+}
+
+Common::Status CarPlayCoreService::SetMfiSigner(std::shared_ptr<Hardware::IMfiSigner> signer) {
+    if (!signer) {
+        return Common::Status::Error(Common::StatusCode::InvalidArgument, "MFi signer is null");
+    }
+    mfi_signer_ = std::move(signer);
+
+    if (auto handler = std::dynamic_pointer_cast<CoreIap2PacketHandler>(iap2_handler_)) {
+        handler->SetSigner(mfi_signer_);
+    }
+    return Common::Status::Ok();
+}
+
+std::shared_ptr<Transport::ITransportChannel> CarPlayCoreService::GetTransport() const {
+    return transport_;
+}
+
+std::shared_ptr<Protocol::IIap2Link> CarPlayCoreService::GetIap2Link() const {
+    return iap2_link_;
+}
+
+std::shared_ptr<Media::IMicrophoneUplink> CarPlayCoreService::GetMicrophoneUplink() const {
+    return microphone_uplink_;
+}
+
+void CarPlayCoreService::WireSessionStateObserver() {
+    if (!session_) {
+        return;
+    }
+
+    // Bridge session state transitions to the Core Event Bus.
+    session_->RegisterStateObserver(
+        [this](Session::SessionState old_state,
+               Session::SessionState new_state,
+               Common::Status status) {
+            event_bus_.PublishConnectionStateChanged(old_state, new_state, status);
+        });
+}
+
+void CarPlayCoreService::TearDownSubsystems() {
+    // Stop in reverse dependency order: Input → Media → Session → Protocol → Transport → Hardware.
+
+    // Layer 6: Input
+    input_sink_.reset();
+
+    // Layer 5: Media
+    if (video_receiver_) {
+        video_receiver_->Stop();
+    }
+    video_receiver_.reset();
+
+    if (microphone_uplink_) {
+        microphone_uplink_->Shutdown();
+    }
+    microphone_uplink_.reset();
+
+    if (audio_pipeline_) {
+        audio_pipeline_->Shutdown();
+    }
+    audio_pipeline_.reset();
+
+    if (video_decoder_) {
+        video_decoder_->Shutdown();
+    }
+    video_decoder_.reset();
+
+    // Layer 4: Session
+    if (session_) {
+        session_->Stop();
+    }
+    session_.reset();
+    wifi_manager_.reset();
+    rtsp_server_.reset();
+
+    // Layer 3: Protocol
+    if (iap2_link_) {
+        iap2_link_->SetPacketHandler(nullptr);
+        iap2_link_->Reset();
+    }
+    iap2_link_.reset();
+    iap2_handler_.reset();
+
+    // Layer 2: Transport
+    if (transport_) {
+        if (auto rfcomm = std::dynamic_pointer_cast<Transport::BtRfcommTransport>(transport_)) {
+            rfcomm->StopServer();
+        }
+        transport_->Disconnect();
+    }
+    transport_.reset();
+
+    // Layer 1: Hardware
+    if (mfi_signer_) {
+        mfi_signer_->Shutdown();
+    }
+    mfi_signer_.reset();
+
+    initialized_ = false;
+}
+
+} // namespace CarPlayStation::Core::Service

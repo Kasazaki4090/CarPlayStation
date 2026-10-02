@@ -45,6 +45,10 @@ public:
         return Common::Status::Ok();
     }
 
+    [[nodiscard]] Common::Status AnnounceTo(const std::string& /*targetIp*/) override {
+        return BroadcastAnnouncement();
+    }
+
     [[nodiscard]] size_t GetBroadcastCount() const {
         std::lock_guard<std::mutex> lock(m_mutex);
         return m_broadcastCount;

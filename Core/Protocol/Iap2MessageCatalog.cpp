@@ -85,77 +85,89 @@ Common::ByteBuffer Iap2MessageCatalog::BuildIdentifyInfo(
     bool declareWired)
 {
     namespace ip = Iap2IdentParam;
-    Common::ByteBuffer out;
-
-    // Helper: build a TLV group and append to out.
-    auto pushGroup = [&](uint16_t pid, const std::function<void(TlvBuilder&)>& buildFn) {
-        TlvBuilder inner;
-        buildFn(inner);
-        TlvBuilder outer;
-        outer.Bytes(pid, inner.Span());
-        out.insert(out.end(), outer.Data().begin(), outer.Data().end());
-    };
+    TlvBuilder b;
 
     // Param 0: Name (utf8)
-    pushGroup(ip::Name, [&](TlvBuilder& t) { t.Str(ip::Name, name); });
+    b.Str(ip::Name, name);
 
     // Param 1: ModelIdentifier
-    pushGroup(ip::ModelIdentifier, [&](TlvBuilder& t) { t.Str(ip::ModelIdentifier, "CarPlayStation-1.0"); });
+    b.Str(ip::ModelIdentifier, "Magic-Car-Link-1.00");
 
     // Param 2: Manufacturer
-    pushGroup(ip::Manufacturer, [&](TlvBuilder& t) { t.Str(ip::Manufacturer, "CarPlayStation"); });
+    b.Str(ip::Manufacturer, "Magic Tec.");
 
     // Param 3: SerialNumber
-    pushGroup(ip::SerialNumber, [&](TlvBuilder& t) { t.Str(ip::SerialNumber, "CPS-0001"); });
+    b.Str(ip::SerialNumber, "2025.02.25.1521626a");
 
     // Param 4: FirmwareVersion
-    pushGroup(ip::FirmwareVersion, [&](TlvBuilder& t) { t.Str(ip::FirmwareVersion, "1.0.0"); });
+    b.Str(ip::FirmwareVersion, "1.0.0");
 
     // Param 5: HardwareVersion
-    pushGroup(ip::HardwareVersion, [&](TlvBuilder& t) { t.Str(ip::HardwareVersion, "1.0.0"); });
+    b.Str(ip::HardwareVersion, "1.0.0");
 
     // Param 6: MessagesSentByAccessory (list of uint16 message IDs)
     {
         std::vector<uint16_t> sentIds = {
-            Iap2MsgId::StartNowPlaying,      // 0x5000
-            Iap2MsgId::StopNowPlaying,       // 0x5002
-            Iap2MsgId::StartRouteGuidance,   // 0x5200
-            Iap2MsgId::StopRouteGuidance,    // 0x5203
+            0x4154,  // StartCallStateUpdates
+            0x5000,  // StartNowPlayingUpdates
+            0x5002,  // StopNowPlayingUpdates
+            0x5200,  // StartRouteGuidanceUpdates
+            0x5203,  // StopRouteGuidanceUpdates
+            0x415A,  // InitiateCall
+            0x415B,  // AcceptCall
+            0x415C,  // EndCall
+            0x415D,  // SwapCalls
+            0x415E,  // MergeCalls
+            0x415F,  // HoldStatusUpdate
+            0x4160,  // MuteStatusUpdate
+            0x4161,  // SendDTMF
+            0x5703   // AccessoryWiFiConfigurationInformation
         };
+        if (declareWired) {
+            sentIds.push_back(0x4301); // CarPlayStartSession
+        }
         Common::ByteBuffer idBytes;
         for (auto id : sentIds) {
             idBytes.push_back(static_cast<uint8_t>((id >> 8) & 0xFF));
             idBytes.push_back(static_cast<uint8_t>(id & 0xFF));
         }
-        pushGroup(ip::MessagesSentByAccessory, [&](TlvBuilder& t) { t.Bytes(ip::MessagesSentByAccessory, idBytes); });
+        b.Bytes(ip::MessagesSentByAccessory, idBytes);
     }
 
     // Param 7: MessagesReceivedFromDevice
     {
         std::vector<uint16_t> rcvIds = {
-            Iap2MsgId::NowPlayingUpdate,     // 0x5001
-            Iap2MsgId::RouteGuidanceUpdate,  // 0x5201
-            Iap2MsgId::RouteManeuverInfo,    // 0x5202
+            0x4E0A,  // DeviceLanguageUpdate
+            0x4E0B,  // DeviceTimeUpdate
+            0x4E0E,  // DeviceTransportIdentifierNotification
+            0x4155,  // CallStateUpdate
+            0x5001,  // NowPlayingUpdate
+            0x5201,  // RouteGuidanceUpdate
+            0x5202,  // RouteGuidanceManeuverInformation
+            0x5702   // RequestAccessoryWiFiConfigurationInformation
         };
+        if (declareWired) {
+            rcvIds.push_back(0x4300); // CarPlayAvailability
+        }
         Common::ByteBuffer idBytes;
         for (auto id : rcvIds) {
             idBytes.push_back(static_cast<uint8_t>((id >> 8) & 0xFF));
             idBytes.push_back(static_cast<uint8_t>(id & 0xFF));
         }
-        pushGroup(ip::MessagesReceivedFromDevice, [&](TlvBuilder& t) { t.Bytes(ip::MessagesReceivedFromDevice, idBytes); });
+        b.Bytes(ip::MessagesReceivedFromDevice, idBytes);
     }
 
     // Param 8: PowerProvidingCapability = 2 (Advanced)
-    pushGroup(ip::PowerProvidingCapability, [&](TlvBuilder& t) { t.U8(ip::PowerProvidingCapability, 2); });
+    b.U8(ip::PowerProvidingCapability, 2);
 
     // Param 9: MaximumCurrentDrawnFromDevice = 0
-    pushGroup(ip::MaxCurrentDrawn, [&](TlvBuilder& t) { t.U16(ip::MaxCurrentDrawn, 0); });
+    b.U16(ip::MaxCurrentDrawn, 0);
 
     // Param 12: CurrentLanguage
-    pushGroup(ip::CurrentLanguage, [&](TlvBuilder& t) { t.Str(ip::CurrentLanguage, "en"); });
+    b.Str(ip::CurrentLanguage, "en");
 
     // Param 13: SupportedLanguage
-    pushGroup(ip::SupportedLanguage, [&](TlvBuilder& t) { t.Str(ip::SupportedLanguage, "en"); });
+    b.Str(ip::SupportedLanguage, "en");
 
     // Param 17: BluetoothTransportComponent (required companion for param 24 in wireless mode)
     {
@@ -166,9 +178,7 @@ Common::ByteBuffer Iap2MessageCatalog::BuildIdentifyInfo(
         Common::ByteBuffer macBytes(btMac.bytes.begin(), btMac.bytes.end());
         inner.Bytes(3, macBytes); // BluetoothTransportMACAddress
 
-        TlvBuilder outer;
-        outer.Bytes(ip::BluetoothTransport, inner.Span());
-        out.insert(out.end(), outer.Data().begin(), outer.Data().end());
+        b.Bytes(ip::BluetoothTransport, inner.Span());
     }
 
     // Param 20: VehicleInformationComponent
@@ -176,12 +186,10 @@ Common::ByteBuffer Iap2MessageCatalog::BuildIdentifyInfo(
         TlvBuilder inner;
         inner.U16(0, 2);  // Identifier
         inner.Str(1, name);
-        inner.U8(2, 0);   // EngineType = Gasoline
+        inner.U8(2, 0);   // EngineType = Gasoline (0)
         inner.Str(6, name); // DisplayName
 
-        TlvBuilder outer;
-        outer.Bytes(ip::VehicleInformation, inner.Span());
-        out.insert(out.end(), outer.Data().begin(), outer.Data().end());
+        b.Bytes(ip::VehicleInformation, inner.Span());
     }
 
     // Param 24: WirelessCarPlayTransportComponent
@@ -192,9 +200,7 @@ Common::ByteBuffer Iap2MessageCatalog::BuildIdentifyInfo(
         inner.None(2);    // TransportSupportsiAP2Connection
         inner.None(4);    // TransportSupportsCarPlay
 
-        TlvBuilder outer;
-        outer.Bytes(ip::WirelessCarPlayTransport, inner.Span());
-        out.insert(out.end(), outer.Data().begin(), outer.Data().end());
+        b.Bytes(ip::WirelessCarPlayTransport, inner.Span());
     }
 
     // Param 30: RouteGuidanceDisplayComponent
@@ -203,14 +209,33 @@ Common::ByteBuffer Iap2MessageCatalog::BuildIdentifyInfo(
         inner.U16(0, 42); // Identifier
         inner.Str(1, "RouteGuidance");
 
-        TlvBuilder outer;
-        outer.Bytes(ip::RouteGuidanceDisplay, inner.Span());
-        out.insert(out.end(), outer.Data().begin(), outer.Data().end());
+        b.Bytes(ip::RouteGuidanceDisplay, inner.Span());
     }
 
-    (void)declareWired; // Reserved for future wired-mode declaration
+    (void)declareWired;
+    return b.Data();
+}
 
-    return out;
+Common::ByteBuffer Iap2MessageCatalog::BuildAccessoryWiFiConfig(
+    std::string_view ssid,
+    std::string_view passphrase,
+    uint8_t securityType,
+    uint8_t channel)
+{
+    TlvBuilder b;
+    // Param 1: WiFiSSID (utf8, required)
+    b.Str(1, ssid);
+    // Param 2: Passphrase (utf8, required if securityType != 0)
+    if (!passphrase.empty()) {
+        b.Str(2, passphrase);
+    }
+    // Param 3: SecurityType (uint8 enum: 0=None, 1=WEP, 2=WPA2/WPA3 Personal)
+    b.U8(3, securityType);
+    // Param 4: Channel (uint8, e.g. 36 or 6)
+    if (channel != 0) {
+        b.U8(4, channel);
+    }
+    return b.Data();
 }
 
 std::vector<uint16_t> Iap2MessageCatalog::ParseRejectedParamIds(Common::ByteSpan body) {

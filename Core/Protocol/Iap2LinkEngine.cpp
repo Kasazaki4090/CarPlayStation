@@ -1,4 +1,5 @@
 #include "Core/Protocol/Iap2LinkEngine.h"
+#include "Core/Common/Logging.h"
 #include <cstring>
 
 namespace CarPlayStation::Core::Protocol {
@@ -8,13 +9,48 @@ Iap2LinkEngine::Iap2LinkEngine() = default;
 Common::Status Iap2LinkEngine::FeedData(Common::ByteSpan rawBytes) {
     std::lock_guard lock(mutex_);
 
+    if (!rawBytes.empty()) {
+        rx_buffer_.insert(rx_buffer_.end(), rawBytes.begin(), rawBytes.end());
+    }
+
     size_t offset = 0;
-    while (offset < rawBytes.size()) {
+    while (offset < rx_buffer_.size()) {
+        Common::ByteSpan current_span(rx_buffer_.data() + offset, rx_buffer_.size() - offset);
+
+        // Check for SOP1 SOP2 synchronization
+        if (current_span.size() >= 2 &&
+            (current_span[0] != Iap2Constants::SOP1 || current_span[1] != Iap2Constants::SOP2)) {
+            // Scan for next SOP1
+            size_t next_sop = 1;
+            while (next_sop < current_span.size() && current_span[next_sop] != Iap2Constants::SOP1) {
+                ++next_sop;
+            }
+            offset += next_sop;
+            continue;
+        }
+
+        // If not enough bytes for header, wait for more data
+        if (current_span.size() < 9) {
+            break;
+        }
+
+        uint16_t declaredLen = static_cast<uint16_t>((current_span[2] << 8) | current_span[3]);
+        if (declaredLen < 9) {
+            // Invalid length, resync
+            offset += 1;
+            continue;
+        }
+
+        // If we haven't received the full declared packet yet, wait for more data
+        if (current_span.size() < declaredLen) {
+            break;
+        }
+
         Iap2RxPacket rx;
-        size_t consumed = TryParsePacket(rawBytes.subspan(offset), rx);
+        size_t consumed = TryParsePacket(current_span, rx);
         if (consumed == 0) {
-            // Not a valid frame at this position — skip one byte and resync.
-            ++offset;
+            // Header checksum or payload checksum failed, skip one byte to resync
+            offset += 1;
             continue;
         }
 
@@ -23,10 +59,17 @@ Common::Status Iap2LinkEngine::FeedData(Common::ByteSpan rawBytes) {
 
         // Dispatch to handler: strip the trailing payload checksum byte for the caller.
         if (handler_) {
+            if ((rx.control & Iap2Constants::CTL_SYN) != 0 || rx.IsSynAck()) {
+                CPS_LOG_INFO("Iap2Link", "Received SYN/SYN-ACK from peer; link established");
+                handler_->OnLinkEvent("SYN received");
+            }
             Common::ByteSpan body{};
             if (!rx.payload.empty()) {
-                // The last byte is the payload checksum; exclude it from the delivered span.
                 body = Common::ByteSpan(rx.payload.data(), rx.payload.size() - 1);
+            }
+            if (!body.empty()) {
+                CPS_LOG_DEBUG("Iap2Link", "Dispatching iAP2 message, session=",
+                              std::to_string(rx.session_id), " len=", std::to_string(body.size()));
             }
             handler_->OnIap2Message(rx.session_id, body);
         }
@@ -36,6 +79,10 @@ Common::Status Iap2LinkEngine::FeedData(Common::ByteSpan rawBytes) {
             auto ack = BuildBareAck();
             send_fn_(Common::ByteSpan(ack.data(), ack.size()));
         }
+    }
+
+    if (offset > 0) {
+        rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + offset);
     }
 
     return Common::Status::Ok();
@@ -87,6 +134,7 @@ void Iap2LinkEngine::Reset() {
     std::lock_guard lock(mutex_);
     my_seq_ = 0;
     peer_seq_ = 0;
+    rx_buffer_.clear();
 }
 
 Common::ByteBuffer Iap2LinkEngine::BuildSyn() {
@@ -113,6 +161,21 @@ Common::ByteBuffer Iap2LinkEngine::BuildSyn() {
     pkt.push_back(Iap2Checksum(Common::ByteSpan(params.data(), params.size())));
 
     return pkt;
+}
+
+void Iap2LinkEngine::InitiateLink() {
+    if (!send_fn_) {
+        return;
+    }
+
+    // 1. DETECT prelude (FF 55 02 00 EE 10) — not a link packet, sent before SYN.
+    const auto& detect = Iap2Constants::DETECT;
+    (void)send_fn_(Common::ByteSpan(detect.data(), detect.size()));
+
+    // 2. SYN carrying the 16-byte link parameters (BuildSyn locks the mutex itself).
+    auto syn = BuildSyn();
+    (void)send_fn_(Common::ByteSpan(syn.data(), syn.size()));
+    CPS_LOG_INFO("Iap2Link", "Initiating iAP2 link: sent DETECT prelude + SYN");
 }
 
 Common::ByteBuffer Iap2LinkEngine::BuildBareAck() const {

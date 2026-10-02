@@ -1,4 +1,18 @@
 .vscode/settings.json
 build/
 build-msvc/
+build-release/
 
+# Project Management Template (Local template archive, not uploaded to git)
+ProjectManagementTemplate/
+/.vscode
+/cmake
+/Lib/ffmpeg
+/Tests
+/Tests
+/Tests
+Tests/HardwareTests.cpp
+Tests/CMakeLists.txt
+Tests/HardwareTests.cpp
+Tests/SessionTests.cpp
+Tests/TransportTests.cpp

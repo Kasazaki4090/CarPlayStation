@@ -139,6 +139,11 @@ public:
         custom_handler_ = std::move(handler);
     }
 
+    void SetStreamingStartedCallback(StreamingStartedCallback callback) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        streaming_cb_ = std::move(callback);
+    }
+
     [[nodiscard]] NegotiatedMediaParams GetNegotiatedParams() const noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
         return params_;
@@ -249,35 +254,77 @@ private:
             }
 
             case RtspMethod::Announce: {
+                if (params_.session_id.empty()) params_.session_id = "1";
                 auto resp = AirPlayRtspCodec::MakeOkResponse(cseq, params_.session_id);
                 return resp;
             }
 
             case RtspMethod::Setup: {
+                if (params_.session_id.empty()) params_.session_id = "1";
                 auto resp = AirPlayRtspCodec::MakeOkResponse(cseq, params_.session_id);
-                params_.video_data_port = 5000;
-                params_.video_control_port = 5001;
                 std::string transport_hdr = std::string(req.GetHeader("Transport"));
+                bool is_voice_or_audio = (req.uri.find("type=100") != std::string::npos ||
+                                          req.uri.find("streamType=100") != std::string::npos ||
+                                          req.uri.find("audio") != std::string::npos);
+
+                uint16_t data_port = is_voice_or_audio ? 5002 : 7100;
+                uint16_t ctrl_port = is_voice_or_audio ? 5003 : 7101;
+
+                if (is_voice_or_audio) {
+                    params_.mic_audio_data_port = data_port;
+                    params_.mic_audio_control_port = ctrl_port;
+                } else {
+                    params_.video_data_port = data_port;
+                    params_.video_control_port = ctrl_port;
+                }
+
+                // Parse client port if present
+                size_t cp_pos = transport_hdr.find("client_port=");
+                if (cp_pos != std::string::npos) {
+                    size_t num_start = cp_pos + 12;
+                    size_t num_end = transport_hdr.find_first_of("; \r\n", num_start);
+                    if (num_end == std::string::npos) num_end = transport_hdr.size();
+                    try {
+                        uint16_t client_port = static_cast<uint16_t>(std::stoul(transport_hdr.substr(num_start, num_end - num_start)));
+                        if (client_port > 0) {
+                            if (is_voice_or_audio) {
+                                params_.alt_audio_data_port = client_port;
+                            } else {
+                                params_.screen_data_port = client_port;
+                            }
+                        }
+                    } catch (...) {
+                    }
+                }
+
                 if (transport_hdr.find("timing_port") != std::string::npos ||
                     transport_hdr.find("client_port") != std::string::npos) {
-                    resp.SetHeader("Transport", transport_hdr + ";server_port=5000;control_port=5001");
+                    resp.SetHeader("Transport", transport_hdr + ";server_port=" + std::to_string(data_port) +
+                                                ";control_port=" + std::to_string(ctrl_port));
                 } else {
-                    resp.SetHeader("Transport", "RTP/AVP/UDP;unicast;server_port=5000;control_port=5001");
+                    resp.SetHeader("Transport", "RTP/AVP/UDP;unicast;server_port=" + std::to_string(data_port) +
+                                                ";control_port=" + std::to_string(ctrl_port));
                 }
                 return resp;
             }
 
             case RtspMethod::Record: {
+                if (params_.session_id.empty()) params_.session_id = "1";
                 auto resp = AirPlayRtspCodec::MakeOkResponse(cseq, params_.session_id);
                 resp.SetHeader("Audio-Latency", "11025");
+                if (streaming_cb_) {
+                    streaming_cb_(params_);
+                }
                 return resp;
             }
 
             case RtspMethod::SetParameter: {
+                if (params_.session_id.empty()) params_.session_id = "1";
                 return AirPlayRtspCodec::MakeOkResponse(cseq, params_.session_id);
             }
 
             case RtspMethod::Teardown: {
+                if (params_.session_id.empty()) params_.session_id = "1";
                 return AirPlayRtspCodec::MakeOkResponse(cseq, params_.session_id);
             }
 
@@ -297,6 +344,7 @@ private:
     std::thread server_thread_;
     std::vector<std::thread> worker_threads_;
     RtspRequestHandler custom_handler_;
+    StreamingStartedCallback streaming_cb_;
 };
 
 AirPlayRtspServer::AirPlayRtspServer(Options options)
@@ -326,6 +374,10 @@ size_t AirPlayRtspServer::GetActiveClientCount() const noexcept {
 
 void AirPlayRtspServer::SetRequestHandler(RtspRequestHandler handler) {
     impl_->SetRequestHandler(std::move(handler));
+}
+
+void AirPlayRtspServer::SetStreamingStartedCallback(StreamingStartedCallback callback) {
+    impl_->SetStreamingStartedCallback(std::move(callback));
 }
 
 NegotiatedMediaParams AirPlayRtspServer::GetNegotiatedParams() const noexcept {

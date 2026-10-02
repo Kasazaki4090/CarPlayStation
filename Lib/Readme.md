@@ -56,10 +56,13 @@ Important build, runtime, compatibility, or licensing information.
 Fallback media decoding and processing.
 
 **Version:**
-To be determined when integrated.
+9.0.2.
+
+- x64: GyanD/codexffmpeg release build, `full_build-shared` (zip; includes headers + import libs).
+- arm64: tordona/ffmpeg-win-arm64 release build, `full-shared` (7z; runtime-only, `bin/` DLLs, no headers or import libs).
 
 **Source:**
-Official FFmpeg project.
+Official FFmpeg project (prebuilt release binaries).
 
 **License:**
 To be documented according to the exact build and enabled components.
@@ -79,7 +82,10 @@ Preferred video decoding order:
 3. FFmpeg software decoding when necessary.
 
 **Notes:**
-The exact FFmpeg build, enabled components, hardware acceleration backends, redistribution requirements, and package size will be documented when integrated.
+- The x64 and arm64 builds come from different upstream sources but target the same FFmpeg version (9.0.2), so the runtime library versions match (e.g. `avcodec-63.dll`, `avutil-61.dll`).
+- The arm64 (tordona) build is runtime-only: it ships `bin/` DLLs but no `include/` headers or `.lib` import libraries. This is sufficient because `Core/Media/FFmpegVideoDecoder.cpp` binds to FFmpeg at runtime via `LoadLibrary`/`GetProcAddress` and never includes FFmpeg headers or links import libraries.
+- The CMake configure step (`cmake/FindOrDownloadFFmpeg.cmake`) and the manual script (`scripts/Update-FFmpeg.ps1`) both auto-select the correct source and archive format per architecture.
+- The exact enabled components, hardware acceleration backends, redistribution requirements, and package size will be documented when integrated.
 
 ## Dependency Policy
 

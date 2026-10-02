@@ -4,6 +4,11 @@
 #include <functional>
 #include <mutex>
 
+// Win32 SendMessage macro conflicts with our iAP2 method name.
+#ifdef SendMessage
+#undef SendMessage
+#endif
+
 namespace CarPlayStation::Core::Protocol {
 
 // iAP2 link-layer constants (faithful port of reference implementation)
@@ -68,6 +73,10 @@ public:
     // Build a SYN packet carrying the 16-byte link parameters (consumes a seq).
     [[nodiscard]] Common::ByteBuffer BuildSyn();
 
+    // Send the 6-byte DETECT prelude followed by a SYN to initiate the iAP2 link
+    // with the peer. Call this once when the transport connection is established.
+    void InitiateLink();
+
     // Build a bare ACK — header only, does NOT consume a seq.
     [[nodiscard]] Common::ByteBuffer BuildBareAck() const;
 
@@ -93,7 +102,8 @@ private:
     uint8_t peer_seq_{0};
     IIap2PacketHandler* handler_{nullptr};
     SendFunction send_fn_;
-    mutable std::mutex mutex_;
+    Common::ByteBuffer rx_buffer_;
+    mutable std::recursive_mutex mutex_;
 };
 
 } // namespace CarPlayStation::Core::Protocol

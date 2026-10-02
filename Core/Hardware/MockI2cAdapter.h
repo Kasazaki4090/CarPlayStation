@@ -13,7 +13,7 @@ namespace CarPlayStation::Core::Hardware {
 // Enables 100% deterministic unit testing without physical USB hardware or drivers.
 class MockI2cAdapter : public II2cAdapter {
 public:
-    explicit MockI2cAdapter(uint8_t coprocessor_address = 0x10)
+    explicit MockI2cAdapter(uint8_t coprocessor_address = 0x11)
         : coprocessor_address_(coprocessor_address) {
         ResetRegisters();
     }
@@ -183,20 +183,15 @@ private:
                 buf[0] = static_cast<uint8_t>((cert_len >> 8) & 0xFF);
                 buf[1] = static_cast<uint8_t>(cert_len & 0xFF);
             }
-        } else if (reg >= 0x31) { // CERTIFICATE_DATA window
-            size_t window_idx = reg - 0x31;
-            size_t offset = window_idx * 128;
-            if (offset < certificate_.size()) {
-                size_t avail = certificate_.size() - offset;
-                size_t copy_len = std::min(length, avail);
-                std::memcpy(buf.data(), certificate_.data() + offset, copy_len);
-            }
+        } else if (reg == 0x31) { // CERTIFICATE_DATA stream
+            size_t copy_len = std::min(length, certificate_.size());
+            std::memcpy(buf.data(), certificate_.data(), copy_len);
         }
 
         return buf;
     }
 
-    uint8_t coprocessor_address_{0x10};
+    uint8_t coprocessor_address_{0x11};
     bool is_open_{true};
     bool inject_nack_{false};
     I2cClockSpeed speed_{I2cClockSpeed::Khz100};

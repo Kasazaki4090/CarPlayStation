@@ -4,6 +4,11 @@
 #include "Core/Common/Result.h"
 #include <functional>
 
+// Win32 SendMessage macro conflicts with our iAP2 method name.
+#ifdef SendMessage
+#undef SendMessage
+#endif
+
 namespace CarPlayStation::Core::Protocol {
 
 // iAP2 Session IDs
