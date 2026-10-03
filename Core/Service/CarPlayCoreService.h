@@ -15,9 +15,11 @@
 
 namespace CarPlayStation::Core::Transport {
     class IWifiSoftApManager;
+    class IMdnsAdvertiser;
 }
 namespace CarPlayStation::Core::Session {
     class AirPlayRtspServer;
+    class IPairingStore;
 }
 namespace CarPlayStation::Core::Media {
     class AirPlayVideoReceiver;
@@ -93,6 +95,9 @@ public:
 private:
     void WireSessionStateObserver();
     void TearDownSubsystems();
+    // Bring up the Wi-Fi SoftAP + mDNS advertiser so the device is always
+    // discoverable (continuous broadcasting), independent of an active session.
+    void StartPersistentBroadcasting();
 
     CarPlayCoreDependencies deps_;
     CoreEventBus event_bus_;
@@ -109,10 +114,23 @@ private:
     std::shared_ptr<Input::IInputEventSink> input_sink_;
 
     std::shared_ptr<Transport::IWifiSoftApManager> wifi_manager_;
+    std::shared_ptr<Transport::IMdnsAdvertiser> mdns_advertiser_;
     std::shared_ptr<Session::AirPlayRtspServer> rtsp_server_;
     std::shared_ptr<Media::AirPlayVideoReceiver> video_receiver_;
+    // Shared pairing store (also owned by the session) so the service can
+    // look up known devices by MAC and proactively dial a re-joining iPhone's
+    // _carplay-ctrl port (fast reconnect without re-doing the BT/iAP2 flow).
+    std::shared_ptr<Session::IPairingStore> pairing_store_;
 
     Common::CoreEnvironmentConfig env_config_;
+    // Real device identity (Bluetooth MAC string) used for the mDNS
+    // AirPlay-Receiver-Device-ID so the iPhone accepts the connection.
+    std::string device_id_;
+    // Last observed iPhone WiFi (station) MAC, captured when the station
+    // joins the SoftAP. Used to publish the device-connected event once the
+    // real Bluetooth MAC becomes known (the BT connection establishes after
+    // the WiFi join, so the event must be emitted from the BT path).
+    std::string last_wifi_mac_;
     bool initialized_{false};
     bool started_{false};
     mutable std::mutex lifecycle_mutex_;

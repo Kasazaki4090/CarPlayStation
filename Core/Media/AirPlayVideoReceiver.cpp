@@ -1,5 +1,6 @@
 #include "Core/Media/AirPlayVideoReceiver.h"
 #include "Core/Common/Logging.h"
+#include "Core/Session/Pairing/Crypto.h"
 #include <chrono>
 
 #ifdef _WIN32
@@ -166,6 +167,17 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
     SOCKET sock = static_cast<SOCKET>(clientSockRaw);
     uint8_t hdr[128];
     std::vector<uint8_t> body;
+    frame_counter_ = 0;
+
+    if (decoder_ && !decoder_initialized_.exchange(true)) {
+        Common::VideoStreamSpec spec;
+        spec.width = 1280;
+        spec.height = 720;
+        spec.fps = 60;
+        spec.codec = Common::VideoCodec::H264;
+        auto initSt = decoder_->Init(spec);
+        CPS_LOG_INFO("VideoReceiver", "Decoder initialized with 1280x720@60 H.264: ", initSt.IsOk() ? "OK" : initSt.Message());
+    }
 
     while (running_.load()) {
         size_t hdrRead = 0;
@@ -203,9 +215,87 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
         uint64_t ptsUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
 
-        auto status = demuxer_.FeedPayload(Common::ByteSpan(body.data(), body.size()), ptsUs);
-        if (status.IsOk()) {
-            received_frames_.fetch_add(1, std::memory_order_relaxed);
+        if (opcode == 0) { // VideoFrame
+            std::vector<uint8_t> plain;
+            if (decrypt_key_set_.load()) {
+                uint8_t nonce[12] = {0};
+                uint64_t cnt = frame_counter_++;
+                memcpy(nonce + 4, &cnt, 8);
+
+                if (!pairing::ChaCha20Poly1305OpenWithAad(
+                        decrypt_key_.data(), nonce, hdr, sizeof(hdr),
+                        body.data(), body.size(), plain)) {
+                    CPS_LOG_WARN("VideoReceiver", "Video frame ChaCha20 decrypt failed at frame ", std::to_string(cnt));
+                    continue;
+                }
+            } else {
+                plain = std::move(body);
+            }
+
+            // Convert AVCC length-prefixed NALUs to Annex-B (00 00 00 01 prefix)
+            std::vector<uint8_t> annexb;
+            annexb.reserve(plain.size() + 16);
+            size_t off = 0;
+            while (off + 4 <= plain.size()) {
+                uint32_t naluLen = Common::Endian::ReadBe32(plain.data() + off);
+                off += 4;
+                if (naluLen == 0 || off + naluLen > plain.size()) {
+                    break;
+                }
+                annexb.push_back(0);
+                annexb.push_back(0);
+                annexb.push_back(0);
+                annexb.push_back(1);
+                annexb.insert(annexb.end(), plain.data() + off, plain.data() + off + naluLen);
+                off += naluLen;
+            }
+
+            if (!annexb.empty() && decoder_) {
+                auto decSt = decoder_->DecodeAccessUnit(Common::ByteSpan(annexb.data(), annexb.size()), ptsUs);
+                if (decSt.IsOk()) {
+                    uint64_t total = received_frames_.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (!first_frame_logged_.exchange(true)) {
+                        CPS_LOG_INFO("VideoReceiver", "First video frame received & decoded (TCP) — total frames: ", std::to_string(total));
+                    }
+                } else {
+                    CPS_LOG_WARN("VideoReceiver", "DecodeAccessUnit error: ", decSt.Message());
+                }
+            }
+        } else if (opcode == 1) { // VideoConfig (avcC)
+            if (body.size() >= 6) {
+                uint8_t num_sps = body[5] & 0x1F;
+                size_t off = 6;
+                std::vector<uint8_t> annexb;
+                for (uint8_t i = 0; i < num_sps && off + 2 <= body.size(); ++i) {
+                    uint16_t sps_len = (static_cast<uint16_t>(body[off]) << 8) | body[off + 1];
+                    off += 2;
+                    if (off + sps_len > body.size()) break;
+                    annexb.push_back(0);
+                    annexb.push_back(0);
+                    annexb.push_back(0);
+                    annexb.push_back(1);
+                    annexb.insert(annexb.end(), body.data() + off, body.data() + off + sps_len);
+                    off += sps_len;
+                }
+                if (off < body.size()) {
+                    uint8_t num_pps = body[off++];
+                    for (uint8_t i = 0; i < num_pps && off + 2 <= body.size(); ++i) {
+                        uint16_t pps_len = (static_cast<uint16_t>(body[off]) << 8) | body[off + 1];
+                        off += 2;
+                        if (off + pps_len > body.size()) break;
+                        annexb.push_back(0);
+                        annexb.push_back(0);
+                        annexb.push_back(0);
+                        annexb.push_back(1);
+                        annexb.insert(annexb.end(), body.data() + off, body.data() + off + pps_len);
+                        off += pps_len;
+                    }
+                }
+                if (!annexb.empty() && decoder_) {
+                    decoder_->DecodeAccessUnit(Common::ByteSpan(annexb.data(), annexb.size()), ptsUs);
+                    CPS_LOG_INFO("VideoReceiver", "Processed avcC VideoConfig (", std::to_string(num_sps), " SPS extracted, ", std::to_string(annexb.size()), " B Annex-B)");
+                }
+            }
         }
     }
 
@@ -235,7 +325,10 @@ void AirPlayVideoReceiver::UdpListenLoop() {
             uint64_t ptsUs = static_cast<uint64_t>(rtpTs) * 1000000ULL / 90000ULL;
             auto status = demuxer_.FeedPayload(Common::ByteSpan(buf.data() + 12, static_cast<size_t>(n - 12)), ptsUs);
             if (status.IsOk()) {
-                received_frames_.fetch_add(1, std::memory_order_relaxed);
+                uint64_t total = received_frames_.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (!first_frame_logged_.exchange(true)) {
+                    CPS_LOG_INFO("VideoReceiver", "First video frame received (UDP) — total frames: ", std::to_string(total));
+                }
             }
         }
     }

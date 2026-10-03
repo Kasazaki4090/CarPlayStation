@@ -45,13 +45,22 @@ struct AudioRouteChangedEvent {
     std::string route_description;  // e.g. "WASAPI Shared Mode / 48kHz Stereo"
 };
 
+// Emitted when a phone (iPhone) joins the Wi-Fi SoftAP, carrying the recorded
+// device addresses so the Application layer can persist them (e.g. to the INI).
+struct DeviceConnectedEvent {
+    std::string bluetooth_mac;  // iPhone Bluetooth MAC (from the pairing record)
+    std::string wifi_mac;       // iPhone Wi-Fi MAC (station that joined the SoftAP)
+    std::string device_name;    // Human-readable device name, if known
+};
+
 // Variant type for all Core events.
 using CoreEvent = std::variant<
     ConnectionStateChangedEvent,
     NowPlayingEvent,
     AlbumArtworkEvent,
     VehicleNightModeEvent,
-    AudioRouteChangedEvent
+    AudioRouteChangedEvent,
+    DeviceConnectedEvent
 >;
 
 using CoreEventCallback = std::function<void(const CoreEvent&)>;
@@ -107,6 +116,10 @@ public:
 
     // Convenience: publish audio route change.
     void PublishAudioRouteChanged(std::string route_description);
+
+    // Convenience: publish a device-connected event (recorded phone addresses).
+    void PublishDeviceConnected(std::string bluetooth_mac, std::string wifi_mac,
+                                std::string device_name = {});
 
     // Number of currently registered listeners.
     [[nodiscard]] size_t ListenerCount() const noexcept;

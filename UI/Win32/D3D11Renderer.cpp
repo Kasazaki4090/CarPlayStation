@@ -1,4 +1,5 @@
 #include "D3D11Renderer.h"
+#include "Core/Common/Logging.h"
 #include <d3dcompiler.h>
 #include <algorithm>
 #include <string>
@@ -302,7 +303,11 @@ void D3D11Renderer::ConsumeFrame(uintptr_t textureHandle, uint32_t width, uint32
         if (textureHandle != last_texture_handle_) {
             UpdateSharedTexture(textureHandle, width, height);
         }
-        active_frame_available_ = true;
+        if (!active_frame_available_) {
+            active_frame_available_ = true;
+            Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Info, "D3D11Renderer",
+                "First frame consumed by renderer, size=", std::to_string(width), "x", std::to_string(height));
+        }
     }
 }
 
@@ -326,13 +331,9 @@ void D3D11Renderer::UpdateSharedTexture(uintptr_t handle, uint32_t width, uint32
         reinterpret_cast<void**>(sharedTex.GetAddressOf())
     );
 
-    // 2. If failed, handle may be a direct ID3D11Texture2D* from same device
     if (FAILED(hr)) {
-        auto* rawTex = reinterpret_cast<ID3D11Texture2D*>(handle);
-        sharedTex = rawTex;
-    }
-
-    if (!sharedTex) {
+        Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Error, "D3D11Renderer",
+            "OpenSharedResource failed: hr=0x", std::to_string(static_cast<unsigned long>(hr)));
         return;
     }
 

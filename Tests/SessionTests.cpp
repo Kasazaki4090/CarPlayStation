@@ -1,7 +1,10 @@
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+#include <cassert>
 #include "Core/Session/IPairingStore.h"
 #include "Core/Session/MockPairingStore.h"
 #include "Core/Session/PairingStore.h"
-#include <cassert>
 #include <iostream>
 #include <filesystem>
 #include <chrono>
@@ -346,8 +349,8 @@ void TestRtspServerLifecycleAndSimulation() {
         sim_setup.headers["Transport"] = "RTP/AVP/UDP;unicast;control_port=5001";
         auto setup_resp = server.ProcessSimulatedRequest(sim_setup);
         assert(setup_resp.status_code == 200);
-        assert(server.GetNegotiatedParams().video_data_port == 5000);
-        assert(server.GetNegotiatedParams().video_control_port == 5001);
+        assert(server.GetNegotiatedParams().video_data_port == 7100);
+        assert(server.GetNegotiatedParams().video_control_port == 7101);
     }
 
     // 2. Real live loopback socket interaction with dynamic ephemeral port
@@ -401,7 +404,7 @@ void TestRtspServerLifecycleAndSimulation() {
         std::string setup_resp_str(resp_buf, r);
         assert(setup_resp_str.find("RTSP/1.0 200 OK") != std::string::npos);
         assert(setup_resp_str.find("CSeq: 11") != std::string::npos);
-        assert(setup_resp_str.find("server_port=5000") != std::string::npos);
+        assert(setup_resp_str.find("server_port=7100") != std::string::npos);
 
         closesocket(client);
 
@@ -448,7 +451,7 @@ void TestCarPlayStateMachineLifecycleAndHandoff() {
     assert(sm.GetState() == SessionState::Idle);
 
     std::vector<std::pair<SessionState, SessionState>> transitions;
-    sm.RegisterStateObserver([&](SessionState old_s, SessionState new_s, Status st) {
+    sm.RegisterStateObserver([&](SessionState old_s, SessionState new_s, Status /*st*/) {
         transitions.emplace_back(old_s, new_s);
     });
 
@@ -613,6 +616,8 @@ int main() {
 #ifdef _WIN32
     _set_error_mode(_OUT_TO_STDERR);
     _set_abort_behavior(0, _WRITE_ABORT_MSG);
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
 
     std::cout << "==========================================\n";
@@ -635,6 +640,9 @@ int main() {
     std::cout << "==========================================\n";
     std::cout << "All Session (Part 4) Steps 1-4 Tests Passed!\n";
     std::cout << "==========================================\n";
+#ifdef _WIN32
+    WSACleanup();
+#endif
     return 0;
 }
 

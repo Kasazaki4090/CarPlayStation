@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <charconv>
 #include <algorithm>
+#include <array>
 
 namespace CarPlayStation::Core::Session {
 
@@ -19,6 +20,8 @@ enum class RtspMethod {
     SetParameter,
     Teardown,
     GetParameter,
+    Post,
+    Get,
     Unknown
 };
 
@@ -31,6 +34,8 @@ enum class RtspMethod {
         case RtspMethod::SetParameter:  return "SET_PARAMETER";
         case RtspMethod::Teardown:      return "TEARDOWN";
         case RtspMethod::GetParameter:  return "GET_PARAMETER";
+        case RtspMethod::Post:          return "POST";
+        case RtspMethod::Get:           return "GET";
         case RtspMethod::Unknown:       return "UNKNOWN";
     }
     return "UNKNOWN";
@@ -44,6 +49,8 @@ enum class RtspMethod {
     if (sv == "SET_PARAMETER") return RtspMethod::SetParameter;
     if (sv == "TEARDOWN")      return RtspMethod::Teardown;
     if (sv == "GET_PARAMETER") return RtspMethod::GetParameter;
+    if (sv == "POST")          return RtspMethod::Post;
+    if (sv == "GET")           return RtspMethod::Get;
     return RtspMethod::Unknown;
 }
 
@@ -167,6 +174,8 @@ struct NegotiatedMediaParams {
     uint16_t mic_audio_control_port{0};
 
     std::string session_id;
+    std::array<uint8_t, 32> video_decrypt_key{0};
+    bool video_encrypted{false};
 };
 
 } // namespace CarPlayStation::Core::Session

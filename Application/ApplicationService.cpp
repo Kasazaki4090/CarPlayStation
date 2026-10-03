@@ -57,6 +57,15 @@ Core::Common::Status ApplicationService::StartCarPlay(const AppSettings& setting
         return status;
     }
 
+    // Wire the frame consumer to the video decoder if already registered.
+    if (frame_consumer_) {
+        if (auto decoder = core_api_->GetVideoDecoder()) {
+            decoder->SetFrameCallback(frame_consumer_);
+            Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Info, "AppService",
+                "Wired video frame consumer to video decoder");
+        }
+    }
+
     // Subscribe to Core events.
     core_event_token_ = core_api_->SubscribeToEvents(
         [this](const Core::Service::CoreEvent& event) {
@@ -284,6 +293,15 @@ void ApplicationService::OnCoreEvent(const Core::Service::CoreEvent& event) {
         else if (std::holds_alternative<Core::Service::AudioRouteChangedEvent>(event)) {
             auto& route = std::get<Core::Service::AudioRouteChangedEvent>(event);
             ui_state_.status_message = "Audio: " + route.route_description;
+        }
+        else if (std::holds_alternative<Core::Service::DeviceConnectedEvent>(event)) {
+            auto& dev = std::get<Core::Service::DeviceConnectedEvent>(event);
+            ui_state_.connected_device_bt_mac = dev.bluetooth_mac;
+            ui_state_.connected_device_wifi_mac = dev.wifi_mac;
+            if (!dev.device_name.empty()) {
+                ui_state_.connected_device_name = dev.device_name;
+            }
+            ui_state_.status_message = "Device connected";
         }
 
         state_snapshot = ui_state_;

@@ -18,6 +18,9 @@ struct AppUiState {
     uint32_t current_video_width{1280};   // Runtime fact: actual negotiated resolution
     uint32_t current_video_height{720};  // Runtime fact: actual negotiated resolution
     std::string status_message;
+    // Recorded phone addresses (runtime facts) so the UI can persist them.
+    std::string connected_device_bt_mac;   // iPhone Bluetooth MAC
+    std::string connected_device_wifi_mac; // iPhone Wi-Fi MAC (SoftAP station)
     AppSettings active_settings;          // Snapshot of last-applied user settings
 };
 

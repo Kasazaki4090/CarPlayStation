@@ -45,6 +45,14 @@ struct MacAddress {
         return oss.str();
     }
 
+    // True when all six octets are zero (i.e. the address is unset/unknown).
+    [[nodiscard]] bool IsZero() const noexcept {
+        for (uint8_t b : bytes) {
+            if (b != 0) return false;
+        }
+        return true;
+    }
+
     auto operator<=>(const MacAddress&) const = default;
 };
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(CarPlayStation LANGUAGES CXX)
+project(CarPlayStation LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

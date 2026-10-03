@@ -35,6 +35,7 @@ public:
     [[nodiscard]] MdnsServiceConfig GetConfig() const override;
     [[nodiscard]] Common::Status BroadcastAnnouncement() override;
     [[nodiscard]] Common::Status AnnounceTo(const std::string& targetIp) override;
+    void ClearDialedTargets() override;
 
     // --- Test & Simulation Controls ---
     void EnableSimulatedMode(bool enable);

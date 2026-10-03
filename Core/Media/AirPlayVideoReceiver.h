@@ -8,6 +8,8 @@
 #include <atomic>
 #include <thread>
 #include <vector>
+#include <array>
+#include <mutex>
 
 namespace CarPlayStation::Core::Media {
 
@@ -33,6 +35,13 @@ public:
         decoder_ = std::move(decoder);
     }
 
+    void SetDecryptionKey(const std::array<uint8_t, 32>& key) {
+        std::lock_guard<std::mutex> lock(client_mutex_);
+        decrypt_key_ = key;
+        decrypt_key_set_ = true;
+        frame_counter_ = 0;
+    }
+
 private:
     void TcpListenLoop();
     void TcpClientWorker(uintptr_t clientSock);
@@ -43,6 +52,12 @@ private:
     uint16_t port_{7100};
     std::atomic<bool> running_{false};
     std::atomic<uint64_t> received_frames_{0};
+    std::atomic<bool> first_frame_logged_{false};
+    std::atomic<bool> decoder_initialized_{false};
+
+    std::array<uint8_t, 32> decrypt_key_{0};
+    std::atomic<bool> decrypt_key_set_{false};
+    std::atomic<uint64_t> frame_counter_{0};
 
     uintptr_t tcp_listen_sock_{~0ULL};
     uintptr_t udp_sock_{~0ULL};
@@ -54,4 +69,3 @@ private:
 };
 
 } // namespace CarPlayStation::Core::Media
-

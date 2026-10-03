@@ -2,11 +2,18 @@
 
 #include "Core/Session/AirPlayRtspTypes.h"
 #include "Core/Session/AirPlayRtspCodec.h"
+#include "Core/Session/Pairing/PairSetup.h"
+#include "Core/Session/Pairing/PairVerify.h"
 #include "Core/Common/Result.h"
 #include <functional>
 #include <memory>
 #include <string>
 #include <mutex>
+#include <map>
+
+namespace CarPlayStation::Core::Hardware {
+class IMfiSigner;
+}
 
 namespace CarPlayStation::Core::Session {
 
@@ -69,6 +76,23 @@ public:
      * @brief Register a callback invoked when RTSP streaming starts (RECORD request).
      */
     void SetStreamingStartedCallback(StreamingStartedCallback callback);
+
+    /**
+     * @brief Enable the RTSP pair-setup handshake (POST /pair-setup) with the given
+     *        accessory identity and a callback that records each newly-paired controller.
+     */
+    void SetPairSetupIdentity(Pairing::AccessoryIdentity identity, Pairing::PeerSaver saver);
+
+    /**
+     * @brief Enable the RTSP pair-verify handshake (POST /pair-verify) with the given
+     *        accessory identity and a callback that looks up paired controllers.
+     */
+    void SetPairVerify(Pairing::AccessoryIdentity identity, Pairing::PeerFinder finder);
+
+    /**
+     * @brief Configure the MFi authentication signer for /auth-setup (MFi-SAP handshake).
+     */
+    void SetMfiSigner(std::shared_ptr<Hardware::IMfiSigner> signer);
 
     /**
      * @brief Query currently negotiated streaming parameters.

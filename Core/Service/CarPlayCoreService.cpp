@@ -10,6 +10,7 @@
 #include "Core/Session/CarPlaySessionStateMachine.h"
 #include "Core/Session/PairingStore.h"
 #include "Core/Session/AirPlayRtspServer.h"
+#include "Core/Session/Pairing/Ed25519.h"
 #include "Core/Media/MfVideoDecoder.h"
 #include "Core/Media/WasapiAudioPipeline.h"
 #include "Core/Media/WasapiMicrophoneUplink.h"
@@ -17,6 +18,7 @@
 #include "Core/Common/Logging.h"
 
 #include <algorithm>
+#include <ctime>
 #include <cstdio>
 
 namespace CarPlayStation::Core::Service {
@@ -251,7 +253,10 @@ private:
     void HandleRequestAccessoryWiFi() {
         std::string ssid = fallback_ssid_;
         std::string pass = fallback_passphrase_;
-        uint8_t channel = 36;
+        // Default to 0 (omit channel) so the iPhone scans for the SSID on its
+        // real channel. Only override with a concrete channel if we actually
+        // know one (creds.channel != 0).
+        uint8_t channel = 0;
 
         if (wifi_mgr_) {
             auto creds = wifi_mgr_->GetCredentials();
@@ -357,6 +362,10 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
             "Using fallback Bluetooth MAC: ", local_bt_mac_str);
     }
 
+    // Remember the real device identity so the persistent mDNS advertiser can
+    // advertise the correct AirPlay-Receiver-Device-ID (not the default).
+    device_id_ = local_bt_mac_str;
+
     // Layer 4: Session
     if (deps_.session) {
         session_ = deps_.session;
@@ -373,13 +382,73 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
         rtsp_opts.port = session_config.rtsp_port;
         rtsp_server_ = std::make_shared<Session::AirPlayRtspServer>(rtsp_opts);
 
+        // Persistent mDNS advertiser: owned by the service so it can keep
+        // broadcasting for the whole service lifetime (continuous discovery),
+        // not just during an active session.
+        mdns_advertiser_ = std::make_shared<Transport::MdnsAdvertiser>();
+
         Session::SessionDependencies session_deps{};
-        session_deps.pairing_store = std::make_shared<Session::PairingStore>("carplay_pairings.json");
+        pairing_store_ = std::make_shared<Session::PairingStore>("carplay_pairings.json");
+        session_deps.pairing_store = pairing_store_;
+
+        // Enable the RTSP pair-setup handshake (POST /pair-setup). The accessory's
+        // Ed25519 long-term keypair is generated on the fly; each newly-paired
+        // controller is recorded in the pairing store.
+        {
+            auto kp = Session::Pairing::ed25519::GenerateKeyPair();
+            Session::Pairing::AccessoryIdentity identity;
+            identity.id = std::vector<uint8_t>(local_bt_mac_str.begin(), local_bt_mac_str.end());
+            identity.ltpk = kp.pubKey;
+            identity.ltpk_secret = kp.secret;
+            rtsp_server_->SetPairSetupIdentity(identity,
+                [store = pairing_store_](const uint8_t* id, size_t idLen, const uint8_t* ltpk) {
+                    Session::PairedDevice dev;
+                    dev.device_id = std::string(reinterpret_cast<const char*>(id), idLen);
+                    dev.public_key.assign(ltpk, ltpk + 32);
+                    dev.last_connected_timestamp = static_cast<uint64_t>(::time(nullptr));
+                    (void)store->SaveDevice(dev);
+                    CPS_LOG_INFO("CoreService", "Saved paired device to store: ", dev.device_id);
+                });
+            rtsp_server_->SetPairVerify(std::move(identity),
+                [store = pairing_store_](const uint8_t* id, size_t idLen) -> std::optional<std::array<uint8_t, 32>> {
+                    std::string dev_id(reinterpret_cast<const char*>(id), idLen);
+                    auto dev = store->GetDevice(dev_id);
+                    if (dev.IsError() || dev.Value().public_key.size() != 32) {
+                        CPS_LOG_WARN("CoreService", "Device not found in pairing store: ", dev_id);
+                        return std::nullopt;
+                    }
+                    std::array<uint8_t, 32> ltpk;
+                    memcpy(ltpk.data(), dev.Value().public_key.data(), 32);
+                    CPS_LOG_INFO("CoreService", "Found paired device in store: ", dev_id);
+                    return ltpk;
+                });
+            rtsp_server_->SetMfiSigner(mfi_signer_);
+        }
         session_deps.rtsp_server = rtsp_server_;
         session_deps.wifi_manager = wifi_manager_;
-        session_deps.mdns_advertiser = std::make_shared<Transport::MdnsAdvertiser>();
+        session_deps.mdns_advertiser = mdns_advertiser_;
 
         session_ = std::make_shared<Session::CarPlaySessionStateMachine>(session_config, session_deps);
+
+        // Forward streaming started callback from RTSP server to configure video decryption
+        rtsp_server_->SetStreamingStartedCallback([this](const Session::NegotiatedMediaParams& params) {
+            CPS_LOG_INFO("CoreService", "AirPlay streaming started, configuring video decoder & receiver");
+            if (video_decoder_) {
+                Common::VideoStreamSpec spec;
+                spec.width = 1280;
+                spec.height = 720;
+                spec.fps = 60;
+                spec.codec = Common::VideoCodec::H264;
+                auto st = video_decoder_->Init(spec);
+                CPS_LOG_INFO("CoreService", "Video decoder initialized: ", st.IsOk() ? "OK" : st.Message());
+            }
+            if (video_receiver_ && params.video_encrypted) {
+                video_receiver_->SetDecryptionKey(params.video_decrypt_key);
+            }
+            if (auto session_sm = std::dynamic_pointer_cast<Session::CarPlaySessionStateMachine>(session_)) {
+                (void)session_sm->OnAirPlayStreamingStarted(params);
+            }
+        });
 
         if (wifi_manager_) {
             wifi_manager_->SetStationConnectedCallback([this](const Transport::StationInfo& station) {
@@ -391,6 +460,80 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
                         mac.bytes[5 - i] = static_cast<uint8_t>((bth_addr >> (8 * i)) & 0xFF);
                     }
                     session_sm->OnWifiConnected(mac, station.ipAddress);
+
+                    // Remember the station (WiFi) MAC. The real Bluetooth MAC
+                    // is only known once the BT transport connects (which
+                    // happens AFTER the WiFi join), so the device-connected
+                    // event is published from the BT-connection path below.
+                    last_wifi_mac_ = station.macAddress;
+
+                    // If the BT MAC is already known (reconnect where BT
+                    // connected first), publish now; otherwise wait for the
+                    // transport Connected callback.
+                    auto info = session_sm->GetActiveSessionInfo();
+                    if (!info.bluetooth_mac.IsZero()) {
+                        event_bus_.PublishDeviceConnected(
+                            info.bluetooth_mac.ToString(),
+                            station.macAddress,
+                            info.device_name);
+                    }
+
+                    // --- Known-device fast reconnect ---
+                    // On a second connection the iPhone often re-joins the
+                    // SoftAP on its own WITHOUT re-establishing the Bluetooth
+                    // link (no BtRfcomm accept, no iAP2 flow). In that case the
+                    // session never reaches WifiHandoff, OnWifiConnected is
+                    // rejected, and no targeted _carplay-ctrl mDNS query is
+                    // ever sent — so the /ctrl-int/1/connect dial (HTTP 200)
+                    // never happens and the session stalls.
+                    //
+                    // Fix: if this station's MAC matches a known/paired device
+                    // (the persisted address), proactively send a targeted
+                    // _carplay-ctrl mDNS query to its IP. The advertiser's
+                    // worker loop picks up the response and dials the
+                    // (ephemeral) control port, restoring the HTTP 200
+                    // handshake and enabling automatic reconnection.
+                    if (!station.ipAddress.empty() && mdns_advertiser_) {
+                        bool is_known = false;
+                        if (pairing_store_ && !station.macAddress.empty()) {
+                            uint64_t wifi_bth = Transport::BtSdpHelper::ParseBluetoothAddress(station.macAddress);
+                            Common::MacAddress wifi_mac{};
+                            for (size_t i = 0; i < 6; ++i) {
+                                wifi_mac.bytes[5 - i] = static_cast<uint8_t>((wifi_bth >> (8 * i)) & 0xFF);
+                            }
+                            auto known = pairing_store_->FindByMac(wifi_mac);
+                            if (known.IsOk() && !known.Value().public_key.empty()) {
+                                is_known = true;
+                                CPS_LOG_INFO("CoreService",
+                                    "Known paired device re-joined WiFi (", station.macAddress,
+                                    "); proactively announcing and querying _carplay-ctrl at ", station.ipAddress);
+                            }
+                        }
+                        if (!is_known) {
+                            CPS_LOG_INFO("CoreService", "Station joined WiFi (", station.macAddress,
+                                         "); announcing AirPlay service to ", station.ipAddress);
+                        }
+
+                        if (!mdns_advertiser_->IsRunning()) {
+                            Transport::MdnsServiceConfig mdns_cfg{};
+                            mdns_cfg.instanceName = env_config_.identity.device_name.empty()
+                                ? "CarPlayStation" : env_config_.identity.device_name;
+                            mdns_cfg.port = env_config_.network.rtsp_port != 0
+                                ? env_config_.network.rtsp_port : 5000;
+                            mdns_cfg.ipv4Address = "192.168.137.1";
+                            if (wifi_manager_) {
+                                auto creds = wifi_manager_->GetCredentials();
+                                if (!creds.gatewayIp.empty()) {
+                                    mdns_cfg.ipv4Address = creds.gatewayIp;
+                                }
+                            }
+                            if (!device_id_.empty()) {
+                                mdns_cfg.deviceId = device_id_;
+                            }
+                            (void)mdns_advertiser_->Start(mdns_cfg);
+                        }
+                        (void)mdns_advertiser_->AnnounceTo(station.ipAddress);
+                    }
                 }
             });
         }
@@ -402,7 +545,7 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
     } else {
         video_decoder_ = std::make_shared<Media::MfVideoDecoder>();
     }
-    video_receiver_ = std::make_shared<Media::AirPlayVideoReceiver>(video_decoder_, 7100);
+    video_receiver_ = std::make_shared<Media::AirPlayVideoReceiver>(video_decoder_, static_cast<uint16_t>(7100));
 
     if (deps_.audio_pipeline) {
         audio_pipeline_ = deps_.audio_pipeline;
@@ -481,6 +624,25 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
                     "Bluetooth device connected: ", endpoint);
                 session_sm->OnBluetoothDeviceDiscovered("iPhone", mac, env_config_.identity.device_name);
 
+                // The real Bluetooth MAC is now known. Publish the
+                // device-connected event so the Application layer can persist
+                // the correct BT + WiFi MACs (the WiFi join happens before the
+                // BT connection, so this is the only point where both are
+                // available).
+                auto info = session_sm->GetActiveSessionInfo();
+                event_bus_.PublishDeviceConnected(
+                    mac.ToString(),
+                    last_wifi_mac_,
+                    info.device_name);
+
+                // A new session is starting: the iPhone's _carplay-ctrl port is
+                // ephemeral, so clear the mDNS dial cache to allow re-dialing
+                // /ctrl-int/1/connect (restores the HTTP 200 handshake and
+                // enables automatic reconnection).
+                if (mdns_advertiser_) {
+                    mdns_advertiser_->ClearDialedTargets();
+                }
+
                 // Initiate the iAP2 link: send the DETECT prelude + SYN so the iPhone
                 // can complete the link handshake and begin the MFi auth exchange.
                 if (auto engine = std::dynamic_pointer_cast<Protocol::Iap2LinkEngine>(iap2_link_)) {
@@ -555,6 +717,10 @@ Common::Status CarPlayCoreService::Start() {
         return status;
     }
 
+    // Bring up the Wi-Fi SoftAP + mDNS advertiser so the device is always
+    // discoverable (continuous broadcasting), independent of an active session.
+    StartPersistentBroadcasting();
+
     // Start AirPlay Video Receiver on TCP/UDP 7100
     if (video_receiver_) {
         auto vr_st = video_receiver_->Start();
@@ -621,6 +787,9 @@ Common::Status CarPlayCoreService::SetMfiSigner(std::shared_ptr<Hardware::IMfiSi
     if (auto handler = std::dynamic_pointer_cast<CoreIap2PacketHandler>(iap2_handler_)) {
         handler->SetSigner(mfi_signer_);
     }
+    if (rtsp_server_) {
+        rtsp_server_->SetMfiSigner(mfi_signer_);
+    }
     return Common::Status::Ok();
 }
 
@@ -648,6 +817,65 @@ void CarPlayCoreService::WireSessionStateObserver() {
                Common::Status status) {
             event_bus_.PublishConnectionStateChanged(old_state, new_state, status);
         });
+}
+
+void CarPlayCoreService::StartPersistentBroadcasting() {
+    // Bring up the Wi-Fi SoftAP (Mobile Hotspot) so the iPhone can always
+    // find and join the network, and start the mDNS advertiser so the device
+    // is continuously discoverable. This runs for the whole service lifetime,
+    // so the user does not have to delete and re-add the device on every
+    // reconnect.
+    if (wifi_manager_ && !wifi_manager_->IsRunning()) {
+        Transport::WifiApCredentials creds{};
+        creds.ssid = env_config_.network.wifi_softap_ssid.empty()
+            ? (env_config_.identity.device_name.empty() ? "CarPlayStation" : env_config_.identity.device_name)
+            : env_config_.network.wifi_softap_ssid;
+        creds.passphrase = env_config_.network.wifi_softap_password.empty()
+            ? "CarPlayStationSecret123"
+            : env_config_.network.wifi_softap_password;
+        creds.channel = 0; // 0 = omit channel in iAP2 config; let the iPhone scan for the real channel
+        creds.band = Transport::WifiBand::Band5GHz;
+        auto ap_st = wifi_manager_->StartAccessPoint(creds);
+        if (ap_st.IsError()) {
+            Common::Logger::Instance().Log(Common::LogLevel::Warn, "CoreService",
+                "Persistent SoftAP start failed: ", ap_st.Message());
+        }
+    }
+
+    // Build the mDNS config with the real device identity so the iPhone
+    // accepts the AirPlay-Receiver-Device-ID (the default AABBCCDDEE01 is
+    // rejected, which is why the video stream never started).
+    Transport::MdnsServiceConfig mdns_cfg{};
+    mdns_cfg.instanceName = env_config_.identity.device_name.empty() ? "CarPlayStation" : env_config_.identity.device_name;
+    mdns_cfg.port = env_config_.network.rtsp_port != 0 ? env_config_.network.rtsp_port : 5000;
+    mdns_cfg.ipv4Address = "192.168.137.1";
+    if (wifi_manager_) {
+        auto creds = wifi_manager_->GetCredentials();
+        if (!creds.gatewayIp.empty()) {
+            mdns_cfg.ipv4Address = creds.gatewayIp;
+        }
+    }
+    if (!device_id_.empty()) {
+        mdns_cfg.deviceId = device_id_;
+    }
+
+    if (mdns_advertiser_ && !mdns_advertiser_->IsRunning()) {
+        auto mdns_st = mdns_advertiser_->Start(mdns_cfg);
+        if (mdns_st.IsError()) {
+            Common::Logger::Instance().Log(Common::LogLevel::Warn, "CoreService",
+                "Persistent mDNS advertising start failed: ", mdns_st.Message());
+        } else {
+            Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+                "Persistent broadcasting active (SoftAP + mDNS), deviceId=", mdns_cfg.deviceId);
+        }
+    } else if (mdns_advertiser_ && mdns_advertiser_->IsRunning()) {
+        // Already running (e.g. started by the session). Refresh the config so
+        // the real deviceId is used, then re-announce so the iPhone re-discovers.
+        mdns_advertiser_->Start(mdns_cfg);
+        (void)mdns_advertiser_->BroadcastAnnouncement();
+        Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+            "Persistent mDNS config refreshed, deviceId=", mdns_cfg.deviceId);
+    }
 }
 
 void CarPlayCoreService::TearDownSubsystems() {
@@ -682,6 +910,15 @@ void CarPlayCoreService::TearDownSubsystems() {
         session_->Stop();
     }
     session_.reset();
+
+    // Stop persistent broadcasting (SoftAP + mDNS advertiser) owned by the service.
+    if (mdns_advertiser_ && mdns_advertiser_->IsRunning()) {
+        mdns_advertiser_->Stop();
+    }
+    mdns_advertiser_.reset();
+    if (wifi_manager_ && wifi_manager_->IsRunning()) {
+        wifi_manager_->StopAccessPoint();
+    }
     wifi_manager_.reset();
     rtsp_server_.reset();
 

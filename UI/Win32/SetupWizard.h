@@ -43,6 +43,22 @@ public:
     void SaveMFiSettings(const Application::AppSettings& settings) const;
 
     /**
+     * @brief Load the last recorded phone (iPhone) addresses from disk.
+     *
+     * Reads the [Device] section (BluetoothMac / WifiMac) of the INI. Empty
+     * strings are returned when no device has been recorded yet.
+     */
+    void LoadDeviceAddresses(std::string& bluetooth_mac, std::string& wifi_mac) const;
+
+    /**
+     * @brief Persist the recorded phone (iPhone) addresses to disk.
+     *
+     * Writes the [Device] section (BluetoothMac / WifiMac) of the INI so the
+     * device does not need to be re-paired on the next launch.
+     */
+    void SaveDeviceAddresses(const std::string& bluetooth_mac, const std::string& wifi_mac) const;
+
+    /**
      * @brief Check whether the safety disclaimer modal should be displayed.
      */
     [[nodiscard]] bool ShouldShowDisclaimer() const noexcept {

@@ -16,3 +16,4 @@ Tests/CMakeLists.txt
 Tests/HardwareTests.cpp
 Tests/SessionTests.cpp
 Tests/TransportTests.cpp
+build.bat

@@ -11,6 +11,7 @@
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 #include <cstring>
+#include <algorithm>
 
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mf.lib")
@@ -85,16 +86,36 @@ Common::Status MfVideoDecoder::Init(const Common::VideoStreamSpec& spec) {
 }
 
 Common::Status MfVideoDecoder::CreateMft(const Common::VideoStreamSpec& spec) {
-    const GUID* clsid = (spec.codec == Common::VideoCodec::HEVC) ? &kClsidHevcDecoderMFT : &kClsidH264DecoderMFT;
+    MFT_REGISTER_TYPE_INFO inInfo = {
+        MFMediaType_Video,
+        (spec.codec == Common::VideoCodec::HEVC) ? MFVideoFormat_H265 : MFVideoFormat_H264
+    };
+    IMFActivate** ppActivate = nullptr;
+    UINT32 count = 0;
+    HRESULT hr = MFTEnumEx(
+        MFT_CATEGORY_VIDEO_DECODER,
+        MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+        &inInfo, nullptr, &ppActivate, &count
+    );
+    if (FAILED(hr) || count == 0) {
+        hr = MFTEnumEx(
+            MFT_CATEGORY_VIDEO_DECODER,
+            MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+            &inInfo, nullptr, &ppActivate, &count
+        );
+    }
+    if (FAILED(hr) || count == 0) {
+        return Common::MakeError(Common::StatusCode::NotSupported, "No video decoder MFT found on system");
+    }
 
     ComPtr<IMFTransform> mft;
-    HRESULT hr = CoCreateInstance(*clsid, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&mft));
+    hr = ppActivate[0]->ActivateObject(IID_PPV_ARGS(&mft));
+    for (UINT32 i = 0; i < count; ++i) {
+        ppActivate[i]->Release();
+    }
+    CoTaskMemFree(ppActivate);
     if (FAILED(hr)) {
-        // Hardware MFT not available (no GPU / no HEVC extension). Fall back
-        // to software decode path (FFmpeg) is handled by the caller; here we
-        // report the failure so the pipeline can fall back.
-        return Common::MakeError(Common::StatusCode::NotSupported,
-                                 "Hardware MFT not available: 0x" + std::to_string(static_cast<unsigned long>(hr)));
+        return HResultToCommonStatus(hr);
     }
 
     // Enable low-latency mode (CODECAPI_AVLowLatencyMode = TRUE).
@@ -102,6 +123,7 @@ Common::Status MfVideoDecoder::CreateMft(const Common::VideoStreamSpec& spec) {
     hr = mft->GetAttributes(&attrs);
     if (SUCCEEDED(hr)) {
         attrs->SetUINT32(MF_LOW_LATENCY, TRUE);
+        attrs->SetUINT32(kCodecapAvLowLatencyMode, TRUE);
     }
 
     // Configure input media type (H.264 / HEVC).
@@ -111,8 +133,7 @@ Common::Status MfVideoDecoder::CreateMft(const Common::VideoStreamSpec& spec) {
         return HResultToCommonStatus(hr);
     }
     inputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    inputType->SetGUID(MF_MT_SUBTYPE,
-                       (spec.codec == Common::VideoCodec::HEVC) ? MFVideoFormat_H265 : MFVideoFormat_H264);
+    inputType->SetGUID(MF_MT_SUBTYPE, inInfo.guidSubtype);
     MFSetAttributeSize(inputType.Get(), MF_MT_FRAME_SIZE, spec.width, spec.height);
     MFSetAttributeRatio(inputType.Get(), MF_MT_FRAME_RATE, spec.fps, 1);
 
@@ -121,7 +142,7 @@ Common::Status MfVideoDecoder::CreateMft(const Common::VideoStreamSpec& spec) {
         return HResultToCommonStatus(hr);
     }
 
-    // Query the output type (NV12 / D3D11 texture).
+    // Query the output type (NV12).
     ComPtr<IMFMediaType> outputType;
     hr = mft->GetOutputAvailableType(0, 0, &outputType);
     if (FAILED(hr)) {
@@ -131,6 +152,16 @@ Common::Status MfVideoDecoder::CreateMft(const Common::VideoStreamSpec& spec) {
     if (FAILED(hr)) {
         return HResultToCommonStatus(hr);
     }
+
+    MFT_OUTPUT_STREAM_INFO osi{};
+    hr = mft->GetOutputStreamInfo(0, &osi);
+    if (SUCCEEDED(hr) && osi.cbSize > 0) {
+        output_buffer_size_ = osi.cbSize;
+    } else {
+        output_buffer_size_ = spec.width * spec.height * 2;
+    }
+
+    bgra_buffer_.resize(spec.width * spec.height * 4);
 
     mft_ = mft.Detach();
     hardware_accelerated_ = true;
@@ -156,16 +187,16 @@ Common::Status MfVideoDecoder::ConfigureD3D11SharedSurfaces() {
         return HResultToCommonStatus(hr);
     }
 
-    // Create a shared D3D11 texture (NV12) for decoded frame presentation.
+    // Create a shared D3D11 texture (B8G8R8A8) for decoded frame presentation.
     D3D11_TEXTURE2D_DESC texDesc{};
     texDesc.Width = current_spec_.width;
     texDesc.Height = current_spec_.height;
     texDesc.MipLevels = 1;
     texDesc.ArraySize = 1;
-    texDesc.Format = DXGI_FORMAT_NV12;
+    texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     texDesc.SampleDesc.Count = 1;
     texDesc.Usage = D3D11_USAGE_DEFAULT;
-    texDesc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
     texDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
 
     hr = d3d_device_->CreateTexture2D(&texDesc, nullptr, &shared_texture_);
@@ -184,7 +215,7 @@ Common::Status MfVideoDecoder::ConfigureD3D11SharedSurfaces() {
         shared_handle_ = reinterpret_cast<uintptr_t>(handle);
     }
 
-    CPS_LOG_INFO("MfVideoDecoder", "D3D11 shared surface configured, handle=0x",
+    CPS_LOG_INFO("MfVideoDecoder", "D3D11 BGRA shared surface configured, handle=0x",
                  std::to_string(shared_handle_));
     return Common::Status::Ok();
 }
@@ -295,12 +326,18 @@ Common::Status MfVideoDecoder::DrainOutput() {
         return Common::Status::Ok();
     }
 
-    // Build an output data buffer (sample + status) for the MFT to fill.
     ComPtr<IMFSample> outputSample;
     HRESULT hr = MFCreateSample(outputSample.GetAddressOf());
     if (FAILED(hr)) {
         return HResultToCommonStatus(hr);
     }
+
+    ComPtr<IMFMediaBuffer> outMediaBuffer;
+    hr = MFCreateMemoryBuffer(output_buffer_size_, &outMediaBuffer);
+    if (FAILED(hr)) {
+        return HResultToCommonStatus(hr);
+    }
+    outputSample->AddBuffer(outMediaBuffer.Get());
 
     MFT_OUTPUT_DATA_BUFFER outputBuffer{};
     outputBuffer.dwStreamID = 0;
@@ -309,7 +346,8 @@ Common::Status MfVideoDecoder::DrainOutput() {
     outputBuffer.pEvents = nullptr;
 
     while (true) {
-        hr = mft_->ProcessOutput(0, 1, &outputBuffer, nullptr);
+        DWORD status = 0;
+        hr = mft_->ProcessOutput(0, 1, &outputBuffer, &status);
         if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
             break;
         }
@@ -319,10 +357,63 @@ Common::Status MfVideoDecoder::DrainOutput() {
         if (outputBuffer.dwStatus & MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE) {
             break;
         }
-        decoded_frame_count_++;
-        if (frame_callback_) {
-            frame_callback_(shared_handle_, current_spec_.width, current_spec_.height, 0);
+
+        BYTE* pData = nullptr;
+        DWORD curLen = 0;
+        hr = outMediaBuffer->Lock(&pData, nullptr, &curLen);
+        const uint32_t w = current_spec_.width;
+        const uint32_t h = current_spec_.height;
+        if (SUCCEEDED(hr) && pData != nullptr && curLen >= w * h && bgra_buffer_.size() >= w * h * 4) {
+            const uint8_t* yPlane = pData;
+            const uint8_t* uvPlane = pData + w * h;
+
+            // Fast scalar NV12 to BGRA conversion
+            for (uint32_t y = 0; y < h; ++y) {
+                const uint8_t* yRow = yPlane + y * w;
+                const uint8_t* uvRow = uvPlane + (y / 2) * w;
+                uint8_t* dstRow = bgra_buffer_.data() + y * (w * 4);
+
+                for (uint32_t x = 0; x < w; x += 2) {
+                    int u = uvRow[x] - 128;
+                    int v = uvRow[x + 1] - 128;
+                    int r_term = 409 * v + 128;
+                    int g_term = -100 * u - 208 * v + 128;
+                    int b_term = 516 * u + 128;
+
+                    // Pixel 0
+                    int y0 = 298 * (yRow[x] - 16);
+                    dstRow[x * 4 + 0] = static_cast<uint8_t>(std::clamp((y0 + b_term) >> 8, 0, 255));
+                    dstRow[x * 4 + 1] = static_cast<uint8_t>(std::clamp((y0 + g_term) >> 8, 0, 255));
+                    dstRow[x * 4 + 2] = static_cast<uint8_t>(std::clamp((y0 + r_term) >> 8, 0, 255));
+                    dstRow[x * 4 + 3] = 255;
+
+                    // Pixel 1
+                    int y1 = 298 * (yRow[x + 1] - 16);
+                    dstRow[(x + 1) * 4 + 0] = static_cast<uint8_t>(std::clamp((y1 + b_term) >> 8, 0, 255));
+                    dstRow[(x + 1) * 4 + 1] = static_cast<uint8_t>(std::clamp((y1 + g_term) >> 8, 0, 255));
+                    dstRow[(x + 1) * 4 + 2] = static_cast<uint8_t>(std::clamp((y1 + r_term) >> 8, 0, 255));
+                    dstRow[(x + 1) * 4 + 3] = 255;
+                }
+            }
+            outMediaBuffer->Unlock();
+
+            if (d3d_context_ && shared_texture_) {
+                d3d_context_->UpdateSubresource(shared_texture_, 0, nullptr, bgra_buffer_.data(), w * 4, 0);
+            }
+
+            uint64_t total = decoded_frame_count_.fetch_add(1) + 1;
+            if (total == 1) {
+                CPS_LOG_INFO("MfVideoDecoder", "First frame decoded and uploaded to D3D11 shared texture (", w, "x", h, ")");
+            }
+
+            if (frame_callback_) {
+                frame_callback_(shared_handle_, w, h, 0);
+            }
+        } else {
+            outMediaBuffer->Unlock();
         }
+
+        outMediaBuffer->SetCurrentLength(0);
     }
     return Common::Status::Ok();
 }

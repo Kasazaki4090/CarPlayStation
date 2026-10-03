@@ -220,6 +220,22 @@ void SetupWizard::SaveMFiSettings(const Application::AppSettings& settings) cons
         std::to_wstring(static_cast<unsigned>(mfi.hardware_i2c.reset_gpio_pin)).c_str(), ini.c_str());
 }
 
+// --- Recorded device (iPhone) address persistence ---------------------------
+// The last phone that joined the SoftAP is recorded under a dedicated "Device"
+// section so the device does not need to be re-paired on the next launch.
+
+void SetupWizard::LoadDeviceAddresses(std::string& bluetooth_mac, std::string& wifi_mac) const {
+    const auto& ini = preferences_.config_file_path;
+    bluetooth_mac = ReadIniUtf8(ini, L"Device", L"BluetoothMac");
+    wifi_mac = ReadIniUtf8(ini, L"Device", L"WifiMac");
+}
+
+void SetupWizard::SaveDeviceAddresses(const std::string& bluetooth_mac, const std::string& wifi_mac) const {
+    const auto& ini = preferences_.config_file_path;
+    WriteIniUtf8(ini, L"Device", L"BluetoothMac", bluetooth_mac);
+    WriteIniUtf8(ini, L"Device", L"WifiMac", wifi_mac);
+}
+
 bool SetupWizard::ShouldShowMFiWizard(const Application::AppSettings& settings) const noexcept {
     if (!preferences_.first_run_completed) {
         return true;

@@ -67,6 +67,11 @@ void CoreEventBus::PublishAudioRouteChanged(std::string route_description) {
     Publish(AudioRouteChangedEvent{std::move(route_description)});
 }
 
+void CoreEventBus::PublishDeviceConnected(std::string bluetooth_mac, std::string wifi_mac,
+                                          std::string device_name) {
+    Publish(DeviceConnectedEvent{std::move(bluetooth_mac), std::move(wifi_mac), std::move(device_name)});
+}
+
 size_t CoreEventBus::ListenerCount() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return listeners_.size();

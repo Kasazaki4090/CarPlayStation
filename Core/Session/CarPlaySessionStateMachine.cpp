@@ -1,4 +1,5 @@
 #include "Core/Session/CarPlaySessionStateMachine.h"
+#include "Core/Common/Logging.h"
 #include <iostream>
 
 namespace CarPlayStation::Core::Session {
@@ -189,8 +190,13 @@ Common::Status CarPlaySessionStateMachine::OnIap2Authenticated(
         // Persist to PairingStore
         if (deps_.pairing_store && !active_session_.device_id.empty()) {
             PairedDevice dev{};
-            dev.device_id = active_session_.device_id;
-            dev.device_name = active_session_.device_name;
+            auto dev_res = deps_.pairing_store->GetDevice(active_session_.device_id);
+            if (dev_res.IsOk()) {
+                dev = dev_res.Value();
+            } else {
+                dev.device_id = active_session_.device_id;
+            }
+            if (!active_session_.device_name.empty()) dev.device_name = active_session_.device_name;
             dev.bluetooth_mac = active_session_.bluetooth_mac;
             dev.wifi_mac = active_session_.wifi_mac;
             dev.last_connected_timestamp = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
@@ -204,8 +210,11 @@ Common::Status CarPlaySessionStateMachine::OnIap2Authenticated(
 
     DispatchObservers(observers_to_notify, old_state, SessionState::iAP2Authenticated, Common::Status::Ok());
 
-    // 2. Automatically trigger Wi-Fi SoftAP and mDNS bring-up and move to WifiHandoff
-    if (deps_.wifi_manager) {
+    // 2. Ensure Wi-Fi SoftAP and mDNS are up (idempotent — the service may have
+    //    already started them for continuous broadcasting). Only start if not
+    //    already running, and use channel=0 so the iPhone scans for the real
+    //    channel instead of being told a possibly-wrong one.
+    if (deps_.wifi_manager && !deps_.wifi_manager->IsRunning()) {
         Transport::WifiApCredentials creds{};
         creds.ssid = config_.ap_ssid;
         creds.passphrase = config_.ap_passphrase;
@@ -214,7 +223,7 @@ Common::Status CarPlaySessionStateMachine::OnIap2Authenticated(
         deps_.wifi_manager->StartAccessPoint(creds);
     }
 
-    if (deps_.mdns_advertiser) {
+    if (deps_.mdns_advertiser && !deps_.mdns_advertiser->IsRunning()) {
         Transport::MdnsServiceConfig mdns_cfg{};
         if (deps_.wifi_manager) {
             auto creds = deps_.wifi_manager->GetCredentials();
@@ -222,7 +231,7 @@ Common::Status CarPlaySessionStateMachine::OnIap2Authenticated(
                 mdns_cfg.ipv4Address = creds.gatewayIp;
             }
         }
-        mdns_cfg.instanceName = active_session_.device_name.empty() ? (config_.ap_ssid.empty() ? "CarPlayStation" : config_.ap_ssid) : active_session_.device_name;
+        mdns_cfg.instanceName = config_.ap_ssid.empty() ? (active_session_.device_name.empty() ? "CarPlayStation" : active_session_.device_name) : config_.ap_ssid;
         mdns_cfg.port = config_.rtsp_port;
         if (!config_.device_id.empty()) {
             mdns_cfg.deviceId = config_.device_id;
@@ -245,6 +254,8 @@ Common::Status CarPlaySessionStateMachine::OnIap2Authenticated(
 Common::Status CarPlaySessionStateMachine::OnWifiConnected(const Common::MacAddress& client_mac, std::string_view client_ip) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_ != SessionState::WifiHandoff) {
+        CPS_LOG_WARN("SessionSM", "OnWifiConnected rejected: state is not WifiHandoff (state=",
+                     static_cast<int>(state_), ") — station re-joined outside the iAP2 handoff path");
         return Common::MakeError(Common::StatusCode::InvalidState, "Station connected outside WifiHandoff state");
     }
 
@@ -276,6 +287,8 @@ Common::Status CarPlaySessionStateMachine::OnAirPlayStreamingStarted(const Negot
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (state_ != SessionState::WifiHandoff && state_ != SessionState::Paused && state_ != SessionState::Reconnecting) {
+            CPS_LOG_WARN("SessionSM", "OnAirPlayStreamingStarted rejected: current state is not WifiHandoff/Paused/Reconnecting (state=",
+                         static_cast<int>(state_), ")");
             return Common::MakeError(Common::StatusCode::InvalidState, "Cannot start streaming from current state");
         }
 
@@ -287,6 +300,8 @@ Common::Status CarPlaySessionStateMachine::OnAirPlayStreamingStarted(const Negot
         observers_to_notify = observers_;
     }
 
+    CPS_LOG_INFO("SessionSM", "AirPlay streaming started (video data port ", std::to_string(params.video_data_port),
+                 ", control port ", std::to_string(params.video_control_port), ")");
     DispatchObservers(observers_to_notify, old_state, SessionState::AirPlayStreaming, Common::Status::Ok());
     return Common::Status::Ok();
 }

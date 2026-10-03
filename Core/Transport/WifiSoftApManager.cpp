@@ -114,10 +114,14 @@ Common::Status WifiSoftApManager::StartAccessPoint(const WifiApCredentials& cred
                         m_credentials.ssid = activeSsid;
                         m_credentials.passphrase = activePass;
                         m_credentials.band = WifiBand::Band5GHz;
-                        m_credentials.channel = 36;
+                        // The WinRT API does not expose the real channel of the
+                        // Mobile Hotspot, so we cannot know it. Keep channel=0
+                        // (omit) so the iPhone scans for the SSID on its actual
+                        // channel instead of being told a possibly-wrong one.
+                        m_credentials.channel = 0;
                         m_credentials.security = WifiSecurityType::Wpa2Personal;
                         m_credentials.gatewayIp = "192.168.137.1";
-                        CPS_LOG_INFO("WifiSoftAp", "Discovered Active Hotspot: SSID='", activeSsid, "', Passphrase='", activePass, "'");
+                        CPS_LOG_INFO("WifiSoftAp", "Discovered Active Hotspot: SSID='", activeSsid, "', Passphrase='", activePass, "' (channel omitted; iPhone will scan)");
                     }
                 }
             }

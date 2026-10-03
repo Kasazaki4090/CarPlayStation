@@ -19,6 +19,14 @@ add_library(CarPlayCore STATIC
     Session/AirPlayRtspCodec.cpp
     Session/AirPlayRtspServer.cpp
     Session/CarPlaySessionStateMachine.cpp
+    Session/Pairing/ed25519/fe.c
+    Session/Pairing/ed25519/ge.c
+    Session/Pairing/ed25519/sc.c
+    Session/Pairing/ed25519/keypair.c
+    Session/Pairing/ed25519/seed.c
+    Session/Pairing/ed25519/sign.c
+    Session/Pairing/ed25519/verify.c
+    Session/Pairing/ed25519/sha512.c
     Media/AirPlayVideoDemuxer.cpp
     Media/AirPlayVideoReceiver.cpp
     Media/MfVideoDecoder.cpp

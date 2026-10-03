@@ -108,6 +108,8 @@ private:
     IDXGIResource* shared_resource_{nullptr};
     ID3D11Texture2D* shared_texture_{nullptr};
     uintptr_t shared_handle_{0};
+    uint32_t output_buffer_size_{0};
+    std::vector<uint8_t> bgra_buffer_;
 };
 
 } // namespace CarPlayStation::Core::Media

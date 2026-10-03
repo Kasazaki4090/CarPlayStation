@@ -68,6 +68,10 @@ private:
     std::shared_ptr<Application::IApplicationApi> app_api_;
     Application::AppSettings settings_;
 
+    // Last recorded phone addresses persisted to the INI (to avoid redundant writes).
+    std::string persisted_bt_mac_;
+    std::string persisted_wifi_mac_;
+
     bool is_initialized_{false};
     bool is_running_{false};
     bool headless_{false};

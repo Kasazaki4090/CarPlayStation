@@ -4,6 +4,125 @@
 #include <algorithm>
 #include <string_view>
 
+namespace {
+
+// Decode a DNS name (with RFC 1035 compression) starting at offset `start` in `buf`.
+// On success, sets `outName` (dotted, e.g. "foo._carplay-ctrl._tcp.local.") and
+// `outEnd` (offset just past the name, i.e. where the next field begins) and returns true.
+// Handles compression pointers (0xC0xx) and guards against pointer loops / out-of-bounds.
+bool DecodeDnsName(const uint8_t* buf, size_t len, size_t start, std::string& outName, size_t& outEnd) {
+    std::string name;
+    size_t cursor = start;
+    size_t endPos = 0; // set to the resume position (after the 2-byte pointer) when we jump
+    int labels = 0;
+
+    while (cursor < len) {
+        uint8_t first = buf[cursor];
+        if (first == 0) {
+            cursor++;
+            break;
+        }
+        if (first & 0xC0) {
+            // Compression pointer
+            if (cursor + 2 > len) return false;
+            uint16_t pointer = (static_cast<uint16_t>(first & 0x3F) << 8) | buf[cursor + 1];
+            if (endPos == 0) {
+                endPos = cursor + 2; // resume here after the pointer in the original stream
+            }
+            cursor = pointer;
+            if (cursor >= len) return false;
+            if (++labels > 64) return false; // guard against pointer loops
+            continue;
+        }
+        // Regular label
+        size_t labelLen = first;
+        if (cursor + 1 + labelLen > len) return false;
+        name.append(reinterpret_cast<const char*>(buf + cursor + 1), labelLen);
+        name.push_back('.');
+        cursor += 1 + labelLen;
+        if (++labels > 64) return false;
+    }
+
+    outName = name;
+    outEnd = (endPos != 0) ? endPos : cursor;
+    return true;
+}
+
+// Parse an mDNS/DNS response and extract the _carplay-ctrl SRV port.
+// Properly walks the DNS packet: header -> questions -> answers (with name compression).
+// Returns the port, or 0 if no matching SRV record is found.
+uint16_t ParseCarPlayCtrlPort(const uint8_t* buf, size_t len) {
+    if (len < 12) return 0;
+
+    // 12-byte header: ID(2) FLAGS(2) QDCOUNT(2) ANCOUNT(2) NSCOUNT(2) ARCOUNT(2)
+    uint16_t qdCount = (static_cast<uint16_t>(buf[4]) << 8) | buf[5];
+    uint16_t anCount = (static_cast<uint16_t>(buf[6]) << 8) | buf[7];
+
+    size_t cursor = 12;
+
+    // Skip QDCOUNT questions: each is NAME + QTYPE(2) + QCLASS(2)
+    for (uint16_t i = 0; i < qdCount; ++i) {
+        std::string qname;
+        size_t qend = 0;
+        if (!DecodeDnsName(buf, len, cursor, qname, qend)) return 0;
+        cursor = qend;
+        if (cursor + 4 > len) return 0; // QTYPE(2) + QCLASS(2)
+        cursor += 4;
+    }
+
+    // Walk ANCOUNT answers: each is NAME + TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) + RDATA
+    for (uint16_t i = 0; i < anCount; ++i) {
+        std::string aname;
+        size_t aend = 0;
+        if (!DecodeDnsName(buf, len, cursor, aname, aend)) return 0;
+        cursor = aend;
+        if (cursor + 10 > len) return 0; // TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2)
+        uint16_t type = (static_cast<uint16_t>(buf[cursor]) << 8) | buf[cursor + 1];
+        uint16_t rdLength = (static_cast<uint16_t>(buf[cursor + 8]) << 8) | buf[cursor + 9];
+        cursor += 10;
+        if (cursor + rdLength > len) return 0;
+
+        if (type == CarPlayStation::Core::Transport::MdnsPacketBuilder::kDnsTypeSrv && rdLength >= 6) {
+            // SRV RDATA: PRIORITY(2) + WEIGHT(2) + PORT(2) + TARGET(name)
+            uint16_t port = (static_cast<uint16_t>(buf[cursor + 4]) << 8) | buf[cursor + 5];
+            if (aname.find("_carplay-ctrl") != std::string::npos && port > 0) {
+                return port;
+            }
+        }
+        cursor += rdLength;
+    }
+
+    return 0;
+}
+
+// Detect whether an incoming mDNS/DNS packet is a query for our AirPlay
+// service (_airplay._tcp.local.). The iPhone issues such a query to discover
+// the receiver's AirPlay service (SRV -> RTSP port 5000). We must answer it
+// with our PTR/SRV/TXT/A records, otherwise the iPhone never learns the RTSP
+// endpoint and will not connect back.
+bool IsAirPlayQuery(const uint8_t* buf, size_t len) {
+    if (len < 12) return false;
+
+    uint16_t qdCount = (static_cast<uint16_t>(buf[4]) << 8) | buf[5];
+    if (qdCount == 0) return false;
+
+    size_t cursor = 12;
+    for (uint16_t i = 0; i < qdCount; ++i) {
+        std::string qname;
+        size_t qend = 0;
+        if (!DecodeDnsName(buf, len, cursor, qname, qend)) return false;
+        cursor = qend;
+        if (cursor + 4 > len) return false; // QTYPE(2) + QCLASS(2)
+        cursor += 4;
+        if (qname.find("_airplay._tcp") != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
 namespace CarPlayStation::Core::Transport {
 
 MdnsAdvertiser::MdnsAdvertiser() = default;
@@ -13,7 +132,15 @@ MdnsAdvertiser::~MdnsAdvertiser() {
 }
 
 Common::Status MdnsAdvertiser::Start(const MdnsServiceConfig& config) {
+    // If already running, refresh the stored config (e.g. to apply the real
+    // device identity) and re-announce so peers re-discover with the new
+    // identity. Do not tear down the socket / worker thread.
     if (m_running.load()) {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_config = config;
+        }
+        (void)BroadcastAnnouncement();
         return Common::Status::Ok();
     }
 
@@ -53,10 +180,19 @@ Common::Status MdnsAdvertiser::Start(const MdnsServiceConfig& config) {
     bindAddr.sin_port = htons(5353);
     bindAddr.sin_addr.s_addr = INADDR_ANY;
     if (bind(m_socket, reinterpret_cast<const sockaddr*>(&bindAddr), sizeof(bindAddr)) == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        CPS_LOG_WARN("MdnsAdvertiser", "bind() to 0.0.0.0:5353 failed (code ", std::to_string(err), "), trying interface IP ", config.ipv4Address);
         if (!config.ipv4Address.empty() && config.ipv4Address != "0.0.0.0") {
             inet_pton(AF_INET, config.ipv4Address.c_str(), &bindAddr.sin_addr);
-            bind(m_socket, reinterpret_cast<const sockaddr*>(&bindAddr), sizeof(bindAddr));
+            if (bind(m_socket, reinterpret_cast<const sockaddr*>(&bindAddr), sizeof(bindAddr)) == SOCKET_ERROR) {
+                int err2 = WSAGetLastError();
+                CPS_LOG_ERROR("MdnsAdvertiser", "bind() to ", config.ipv4Address, ":5353 failed (code ", std::to_string(err2), ")");
+            } else {
+                CPS_LOG_INFO("MdnsAdvertiser", "bind() OK on ", config.ipv4Address, ":5353");
+            }
         }
+    } else {
+        CPS_LOG_INFO("MdnsAdvertiser", "bind() OK on 0.0.0.0:5353");
     }
 
     // Join multicast group 224.0.0.251
@@ -67,7 +203,12 @@ Common::Status MdnsAdvertiser::Start(const MdnsServiceConfig& config) {
     } else {
         mreq.imr_interface.s_addr = INADDR_ANY;
     }
-    setsockopt(m_socket, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq));
+    int mjoin = setsockopt(m_socket, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq));
+    if (mjoin == SOCKET_ERROR) {
+        CPS_LOG_WARN("MdnsAdvertiser", "IP_ADD_MEMBERSHIP failed (code ", std::to_string(WSAGetLastError()), ")");
+    } else {
+        CPS_LOG_INFO("MdnsAdvertiser", "Joined mDNS multicast group 224.0.0.251 on ", config.ipv4Address);
+    }
 
     // Multicast TTL = 255 per RFC 6762
     unsigned char ttl = 255;
@@ -145,13 +286,15 @@ Common::Status MdnsAdvertiser::AnnounceTo(const std::string& targetIp) {
         targetAddr.sin_family = AF_INET;
         targetAddr.sin_port = htons(5353);
         if (inet_pton(AF_INET, targetIp.c_str(), &targetAddr.sin_addr) == 1) {
-            sendto(m_socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
-                   reinterpret_cast<const sockaddr*>(&targetAddr), sizeof(targetAddr));
+            int n1 = sendto(m_socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
+                            reinterpret_cast<const sockaddr*>(&targetAddr), sizeof(targetAddr));
 
             // Also query targeted _carplay-ctrl._tcp.local.
             auto query = MdnsPacketBuilder::BuildCarPlayControlQuery();
-            sendto(m_socket, reinterpret_cast<const char*>(query.data()), static_cast<int>(query.size()), 0,
-                   reinterpret_cast<const sockaddr*>(&targetAddr), sizeof(targetAddr));
+            int n2 = sendto(m_socket, reinterpret_cast<const char*>(query.data()), static_cast<int>(query.size()), 0,
+                            reinterpret_cast<const sockaddr*>(&targetAddr), sizeof(targetAddr));
+            CPS_LOG_INFO("MdnsAdvertiser", "AnnounceTo: sent AirPlay announcement (", std::to_string(n1),
+                         " bytes) and _carplay-ctrl query (", std::to_string(n2), " bytes) to ", targetIp, ":5353");
         }
     }
 #endif
@@ -169,6 +312,14 @@ Common::Status MdnsAdvertiser::SendRawMulticast(Common::ByteSpan packet) {
     mcastAddr.sin_port = htons(5353);
     inet_pton(AF_INET, "224.0.0.251", &mcastAddr.sin_addr);
 
+    // Target the Hotspot / local interface (e.g. 192.168.137.1)
+    if (!m_config.ipv4Address.empty() && m_config.ipv4Address != "0.0.0.0") {
+        in_addr ifAddr{};
+        if (inet_pton(AF_INET, m_config.ipv4Address.c_str(), &ifAddr) == 1) {
+            setsockopt(m_socket, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&ifAddr), sizeof(ifAddr));
+        }
+    }
+
     int sent = sendto(m_socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
                       reinterpret_cast<const sockaddr*>(&mcastAddr), sizeof(mcastAddr));
     if (sent == SOCKET_ERROR) {
@@ -176,16 +327,8 @@ Common::Status MdnsAdvertiser::SendRawMulticast(Common::ByteSpan packet) {
         return Common::Status::Error(Common::StatusCode::IoError, "Multicast sendto failed: code " + std::to_string(err));
     }
 
-    // Also explicitly target the Hotspot / local interface (e.g. 192.168.137.1)
+    // Subnet broadcast to 192.168.137.255:5353
     if (!m_config.ipv4Address.empty() && m_config.ipv4Address != "0.0.0.0") {
-        in_addr ifAddr{};
-        if (inet_pton(AF_INET, m_config.ipv4Address.c_str(), &ifAddr) == 1) {
-            setsockopt(m_socket, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&ifAddr), sizeof(ifAddr));
-            sendto(m_socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
-                   reinterpret_cast<const sockaddr*>(&mcastAddr), sizeof(mcastAddr));
-        }
-
-        // Subnet broadcast to 192.168.137.255:5353
         std::string bcastIp = m_config.ipv4Address;
         auto lastDot = bcastIp.rfind('.');
         if (lastDot != std::string::npos) {
@@ -206,6 +349,11 @@ Common::Status MdnsAdvertiser::SendRawMulticast(Common::ByteSpan packet) {
 #endif
 }
 
+void MdnsAdvertiser::ClearDialedTargets() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_dialedTargets.clear();
+}
+
 void MdnsAdvertiser::DialCarPlayControl(const std::string& host, uint16_t port) {
 #ifdef _WIN32
     if (host.empty() || port == 0) return;
@@ -224,9 +372,25 @@ void MdnsAdvertiser::DialCarPlayControl(const std::string& host, uint16_t port) 
         std::lock_guard<std::mutex> lock(m_mutex);
         devId = m_config.deviceId;
     }
+    // The AirPlay-Receiver-Device-ID header must be a DECIMAL u64, not a hex
+    // string. The reference (carplayd rx_connect.rs) converts the MAC via
+    // mac_to_dec(): fold each octet as (v << 8) | octet.
     devId.erase(std::remove(devId.begin(), devId.end(), ':'), devId.end());
+    unsigned long long devDec = 0;
+    for (size_t i = 0; i < devId.size(); i += 2) {
+        std::string oct = devId.substr(i, 2);
+        unsigned long long v = 0;
+        for (char c : oct) {
+            v <<= 4;
+            if (c >= '0' && c <= '9') v |= static_cast<unsigned long long>(c - '0');
+            else if (c >= 'a' && c <= 'f') v |= static_cast<unsigned long long>(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') v |= static_cast<unsigned long long>(c - 'A' + 10);
+        }
+        devDec = (devDec << 8) | v;
+    }
+    std::string devDecStr = std::to_string(devDec);
 
-    std::thread([host, port, devId]() {
+    std::thread([host, port, devDecStr]() {
         SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (s == INVALID_SOCKET) return;
 
@@ -246,11 +410,11 @@ void MdnsAdvertiser::DialCarPlayControl(const std::string& host, uint16_t port) 
             std::string req = "GET /ctrl-int/1/connect HTTP/1.1\r\n"
                               "Host: " + host + ":" + std::to_string(port) + "\r\n"
                               "User-Agent: AirPlay/320.17\r\n"
-                              "AirPlay-Receiver-Device-ID: " + devId + "\r\n"
-                              "Connection: close\r\n\r\n";
+                              "AirPlay-Receiver-Device-ID: " + devDecStr + "\r\n"
+                              "Connection: keep-alive\r\n\r\n";
 
             send(s, req.data(), static_cast<int>(req.size()), 0);
-            CPS_LOG_INFO("MdnsAdvertiser", "Sent /ctrl-int/1/connect to iPhone at ", host, ":", std::to_string(port), " (devId=", devId, ")");
+            CPS_LOG_INFO("MdnsAdvertiser", "Sent /ctrl-int/1/connect to iPhone at ", host, ":", std::to_string(port), " (devId=", devDecStr, ")");
 
             char buf[256];
             int n = recv(s, buf, sizeof(buf) - 1, 0);
@@ -289,29 +453,60 @@ void MdnsAdvertiser::BroadcastWorkerLoop() {
 
             int res = select(0, &readfds, nullptr, nullptr, &tv);
             if (res > 0 && FD_ISSET(m_socket, &readfds)) {
-                sockaddr_in fromAddr{};
-                int fromLen = sizeof(fromAddr);
-                uint8_t rxBuf[2048];
-                int bytesRead = recvfrom(m_socket, reinterpret_cast<char*>(rxBuf), sizeof(rxBuf), 0,
-                                         reinterpret_cast<sockaddr*>(&fromAddr), &fromLen);
-                if (bytesRead > 12) {
+                // Drain all packets available in this window (the targeted query from
+                // AnnounceTo may have produced a response on the same socket).
+                for (int drain = 0; drain < 8; ++drain) {
+                    sockaddr_in fromAddr{};
+                    int fromLen = sizeof(fromAddr);
+                    uint8_t rxBuf[2048];
+                    int bytesRead = recvfrom(m_socket, reinterpret_cast<char*>(rxBuf), sizeof(rxBuf), 0,
+                                             reinterpret_cast<sockaddr*>(&fromAddr), &fromLen);
+                    if (bytesRead <= 12) {
+                        break;
+                    }
                     char ipStr[INET_ADDRSTRLEN] = {0};
                     inet_ntop(AF_INET, &fromAddr.sin_addr, ipStr, sizeof(ipStr));
 
-                    // Inspect if packet contains _carplay-ctrl
-                    std::string_view rxView(reinterpret_cast<const char*>(rxBuf), bytesRead);
-                    size_t ctrlPos = rxView.find("_carplay-ctrl");
-                    if (ctrlPos != std::string_view::npos) {
-                        for (size_t i = ctrlPos; i + 16 < rxView.size(); ++i) {
-                            uint16_t type = (static_cast<uint8_t>(rxBuf[i]) << 8) | static_cast<uint8_t>(rxBuf[i + 1]);
-                            if (type == MdnsPacketBuilder::kDnsTypeSrv) {
-                                uint16_t port = (static_cast<uint8_t>(rxBuf[i + 14]) << 8) | static_cast<uint8_t>(rxBuf[i + 15]);
-                                if (port > 0) {
-                                    CPS_LOG_INFO("MdnsAdvertiser", "Discovered iPhone _carplay-ctrl service at ", ipStr, ":", std::to_string(port));
-                                    DialCarPlayControl(ipStr, port);
-                                    break;
-                                }
-                            }
+                    uint16_t port = ParseCarPlayCtrlPort(rxBuf, static_cast<size_t>(bytesRead));
+                    if (port > 0) {
+                        bool already_dialed = false;
+                        {
+                            std::lock_guard<std::mutex> lock(m_mutex);
+                            std::string key = std::string(ipStr) + ":" + std::to_string(port);
+                            already_dialed = (std::find(m_dialedTargets.begin(), m_dialedTargets.end(), key) != m_dialedTargets.end());
+                        }
+                        if (!already_dialed) {
+                            CPS_LOG_INFO("MdnsAdvertiser", "Discovered iPhone _carplay-ctrl service at ", ipStr, ":", std::to_string(port));
+                            DialCarPlayControl(ipStr, port);
+                        }
+                    }
+
+                    // Respond to AirPlay service queries from the iPhone.
+                    // The iPhone queries _airplay._tcp.local. to discover our
+                    // RTSP endpoint (SRV -> port 5000). Without a response the
+                    // iPhone never learns where to connect for video.
+                    if (IsAirPlayQuery(rxBuf, static_cast<size_t>(bytesRead))) {
+                        CPS_LOG_INFO("MdnsAdvertiser", "Received _airplay._tcp query from ", ipStr, " — responding with SRV/TXT/A records");
+                        MdnsServiceConfig cfg;
+                        {
+                            std::lock_guard<std::mutex> lock(m_mutex);
+                            cfg = m_config;
+                        }
+                        auto response = MdnsPacketBuilder::BuildAirPlayAnnouncement(cfg);
+                        // RFC 6762 §6.2: mDNS responses MUST be sent to the
+                        // multicast group 224.0.0.251:5353, NOT unicast to the
+                        // querier. The iPhone's mDNSResponder only listens on the
+                        // multicast group, so a unicast reply is never seen and
+                        // the iPhone keeps re-querying forever.
+                        sockaddr_in respAddr{};
+                        respAddr.sin_family = AF_INET;
+                        respAddr.sin_port = htons(5353);
+                        inet_pton(AF_INET, "224.0.0.251", &respAddr.sin_addr);
+                        int sent = sendto(m_socket, reinterpret_cast<const char*>(response.data()),
+                                          static_cast<int>(response.size()), 0,
+                                          reinterpret_cast<const sockaddr*>(&respAddr), sizeof(respAddr));
+                        if (sent == SOCKET_ERROR) {
+                            CPS_LOG_WARN("MdnsAdvertiser", "Failed to send AirPlay mDNS response to multicast (WSA error ", std::to_string(WSAGetLastError()), ")");
                         }
                     }
                 }

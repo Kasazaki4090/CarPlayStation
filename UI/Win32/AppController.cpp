@@ -41,6 +41,10 @@ Core::Common::Status AppController::Initialize(
     // first-run wizard must be shown again (e.g. missing cert/key files).
     wizard_.LoadMFiSettings(settings_);
 
+    // Restore the last recorded phone (iPhone) addresses so the device is
+    // recognized on the next launch (continuous broadcasting / no re-pairing).
+    wizard_.LoadDeviceAddresses(persisted_bt_mac_, persisted_wifi_mac_);
+
     if (wizard_.ShouldShowMFiWizard(settings_)) {
         wizard_.ShowMFiWizard(window_.GetHwnd(), settings_, headless_);
         // Persist the (possibly newly chosen) MFi backend so it survives restart.
@@ -164,6 +168,18 @@ void AppController::Shutdown() {
 
 void AppController::OnUiStateChanged(const Application::AppUiState& state) {
     overlay_.UpdateUiState(state);
+
+    // Persist the recorded phone (iPhone) addresses to the INI so the device
+    // does not need to be re-paired on the next launch. Only write when the
+    // recorded addresses actually change (avoids redundant INI writes).
+    if (!state.connected_device_bt_mac.empty() || !state.connected_device_wifi_mac.empty()) {
+        if (state.connected_device_bt_mac != persisted_bt_mac_ ||
+            state.connected_device_wifi_mac != persisted_wifi_mac_) {
+            wizard_.SaveDeviceAddresses(state.connected_device_bt_mac, state.connected_device_wifi_mac);
+            persisted_bt_mac_ = state.connected_device_bt_mac;
+            persisted_wifi_mac_ = state.connected_device_wifi_mac;
+        }
+    }
 }
 
 void AppController::OnSettingsChanged(const Application::AppSettings& newSettings) {

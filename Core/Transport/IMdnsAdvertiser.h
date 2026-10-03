@@ -49,6 +49,11 @@ public:
 
     // Send targeted announcement to specific IP (e.g. unicast to connected iPhone)
     [[nodiscard]] virtual Common::Status AnnounceTo(const std::string& targetIp) = 0;
+
+    // Clear the cache of already-dialed _carplay-ctrl targets so the next
+    // session re-dials the (ephemeral) control port. Called at the start of
+    // each new session to allow automatic reconnection.
+    virtual void ClearDialedTargets() {}
 };
 
 } // namespace CarPlayStation::Core::Transport

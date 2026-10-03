@@ -263,7 +263,7 @@ RtspResponse AirPlayRtspCodec::MakeOkResponse(uint32_t cseq, std::string_view se
     resp.status_code = 200;
     resp.status_phrase = "OK";
     resp.cseq = cseq;
-    resp.SetHeader("Server", "AirPlay/320.17");
+    resp.SetHeader("Server", "AirTunes/320.17");
     if (!session_id.empty()) {
         resp.SetHeader("Session", std::string(session_id));
     }
