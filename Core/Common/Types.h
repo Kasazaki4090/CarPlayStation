@@ -104,6 +104,17 @@ namespace Endian {
            static_cast<uint32_t>(ptr[0]);
 }
 
+[[nodiscard]] inline uint64_t ReadLe64(const uint8_t* ptr) noexcept {
+    return (static_cast<uint64_t>(ptr[7]) << 56) |
+           (static_cast<uint64_t>(ptr[6]) << 48) |
+           (static_cast<uint64_t>(ptr[5]) << 40) |
+           (static_cast<uint64_t>(ptr[4]) << 32) |
+           (static_cast<uint64_t>(ptr[3]) << 24) |
+           (static_cast<uint64_t>(ptr[2]) << 16) |
+           (static_cast<uint64_t>(ptr[1]) << 8)  |
+           static_cast<uint64_t>(ptr[0]);
+}
+
 inline void WriteBe16(uint8_t* ptr, uint16_t val) noexcept {
     ptr[0] = static_cast<uint8_t>((val >> 8) & 0xFF);
     ptr[1] = static_cast<uint8_t>(val & 0xFF);

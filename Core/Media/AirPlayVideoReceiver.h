@@ -65,6 +65,7 @@ private:
     std::thread tcp_thread_;
     std::thread udp_thread_;
     std::vector<std::thread> client_threads_;
+    std::vector<uintptr_t> client_sockets_;
     std::mutex client_mutex_;
 };
 

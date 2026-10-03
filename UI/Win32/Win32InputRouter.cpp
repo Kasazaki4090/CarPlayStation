@@ -1,6 +1,7 @@
 #include "Win32InputRouter.h"
 #include "D3D11Renderer.h"
 #include "OverlayRenderer.h"
+#include "Core/Common/Logging.h"
 #include <windowsx.h>
 
 namespace CarPlayStation::UI {
@@ -39,10 +40,14 @@ bool Win32InputRouter::OnWindowMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 }
 
 void Win32InputRouter::Reset() {
+    is_overlay_capturing_ = false;
     if (is_mouse_down_ && app_api_) {
         is_mouse_down_ = false;
         Core::Input::TouchPoint tp{ 0, last_norm_x_, last_norm_y_ };
-        (void)app_api_->ForwardTouchEvent(Core::Input::TouchAction::Cancel, tp);
+        auto status = app_api_->ForwardTouchEvent(Core::Input::TouchAction::Cancel, tp);
+        if (status.IsError()) {
+            CPS_LOG_WARN("InputRouter", "Failed to cancel forwarded touch: ", status.Message());
+        }
     }
 }
 
@@ -53,13 +58,31 @@ bool Win32InputRouter::HandleMouse(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     // 1. Give Overlay HUD first chance to consume mouse events
     if (overlay_) {
         if (msg == WM_LBUTTONDOWN && overlay_->OnMouseDown(clientX, clientY)) {
+            is_overlay_capturing_ = true;
+            SetCapture(hwnd);
             return true;
         }
-        if (msg == WM_MOUSEMOVE && overlay_->OnMouseMove(clientX, clientY)) {
-            return true;
+        if (msg == WM_MOUSEMOVE) {
+            if (is_overlay_capturing_) {
+                (void)overlay_->OnMouseMove(clientX, clientY);
+                return true;
+            }
+            if (overlay_->OnMouseMove(clientX, clientY)) {
+                return true;
+            }
         }
-        if (msg == WM_LBUTTONUP && overlay_->OnMouseUp(clientX, clientY)) {
-            return true;
+        if (msg == WM_LBUTTONUP) {
+            if (GetCapture() == hwnd) {
+                ReleaseCapture();
+            }
+            if (is_overlay_capturing_) {
+                is_overlay_capturing_ = false;
+                (void)overlay_->OnMouseUp(clientX, clientY);
+                return true;
+            }
+            if (overlay_->OnMouseUp(clientX, clientY)) {
+                return true;
+            }
         }
     }
 
@@ -78,7 +101,10 @@ bool Win32InputRouter::HandleMouse(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 is_mouse_down_ = true;
                 SetCapture(hwnd);
                 Core::Input::TouchPoint tp{ 0, normPt.x, normPt.y };
-                (void)app_api_->ForwardTouchEvent(Core::Input::TouchAction::Down, tp);
+                auto status = app_api_->ForwardTouchEvent(Core::Input::TouchAction::Down, tp);
+                if (status.IsError()) {
+                    CPS_LOG_WARN("InputRouter", "Failed to forward touch down: ", status.Message());
+                }
                 return true;
             }
             break;
@@ -98,7 +124,10 @@ bool Win32InputRouter::HandleMouse(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 is_mouse_down_ = false;
                 ReleaseCapture();
                 Core::Input::TouchPoint tp{ 0, normPt.x, normPt.y };
-                (void)app_api_->ForwardTouchEvent(Core::Input::TouchAction::Up, tp);
+                auto status = app_api_->ForwardTouchEvent(Core::Input::TouchAction::Up, tp);
+                if (status.IsError()) {
+                    CPS_LOG_WARN("InputRouter", "Failed to forward touch up: ", status.Message());
+                }
                 return true;
             }
             break;
@@ -146,10 +175,22 @@ bool Win32InputRouter::HandleKeyboard(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         return true;
     }
 
-    // ESC closes settings drawer if open
-    if (wParam == VK_ESCAPE && isPressed && overlay_ && overlay_->IsSettingsDrawerOpen()) {
-        overlay_->ToggleSettingsDrawer();
+    // F4 toggles the standalone log panel
+    if (wParam == VK_F4 && isPressed && overlay_) {
+        overlay_->ToggleLogPanel();
         return true;
+    }
+
+    // ESC closes settings drawer or welcome guide if visible
+    if (wParam == VK_ESCAPE && isPressed && overlay_) {
+        if (overlay_->IsSettingsDrawerOpen()) {
+            overlay_->ToggleSettingsDrawer();
+            return true;
+        }
+        if (overlay_->IsWelcomeGuideVisible()) {
+            overlay_->DismissWelcomeGuide();
+            return true;
+        }
     }
 
     // Only emit knob/button on key-press to avoid double triggers

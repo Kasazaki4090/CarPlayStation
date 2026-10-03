@@ -18,6 +18,7 @@ struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct IDXGIDevice;
 struct IDXGIResource;
+struct IDXGIKeyedMutex;
 struct ID3D11Texture2D;
 
 namespace CarPlayStation::Core::Media {
@@ -86,12 +87,23 @@ private:
     [[nodiscard]] Common::Status CreateMft(const Common::VideoStreamSpec& spec);
     [[nodiscard]] Common::Status ConfigureD3D11SharedSurfaces();
     [[nodiscard]] Common::Status ProcessInput(Common::ByteSpan nalData, uint64_t ptsUs);
-    [[nodiscard]] Common::Status DrainOutput();
+    // Drains the MFT output and uploads the latest frame to the shared D3D11
+    // texture. Returns the number of frames produced (0 when the MFT needs
+    // more input). The frame callback is intentionally NOT fired here; the
+    // caller (DecodeAccessUnit) fires it outside the decoder lock so the
+    // presentation handoff (ConsumeFrame -> OpenSharedResource + CreateSRV)
+    // does not serialize with the next decode.
+    [[nodiscard]] uint32_t DrainOutput();
     void ReleaseComPointers();
 
     mutable std::mutex mutex_;
     bool initialized_{false};
     bool hardware_accelerated_{false};
+    // True when the MFT is configured to emit BGRA (B8G8R8A8) directly, so
+    // DrainOutput can upload the MFT output buffer straight to the shared
+    // texture without a CPU NV12->BGRA conversion. False when the MFT only
+    // offers NV12 and the scalar conversion path is used.
+    bool output_is_bgra_{false};
     Common::VideoStreamSpec current_spec_{};
     VideoFrameCallback frame_callback_{};
     std::atomic<uint64_t> decoded_frame_count_{0};
@@ -107,6 +119,7 @@ private:
     IDXGIDevice* dxgi_device_{nullptr};
     IDXGIResource* shared_resource_{nullptr};
     ID3D11Texture2D* shared_texture_{nullptr};
+    IDXGIKeyedMutex* shared_keyed_mutex_{nullptr};
     uintptr_t shared_handle_{0};
     uint32_t output_buffer_size_{0};
     std::vector<uint8_t> bgra_buffer_;

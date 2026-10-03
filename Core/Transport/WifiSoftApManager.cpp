@@ -11,6 +11,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <objbase.h>
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -269,12 +270,20 @@ void WifiSoftApManager::SimulateStateChange(ApState state, Common::Status status
 }
 
 void WifiSoftApManager::WatchdogLoop() {
+#ifdef _WIN32
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
     while (m_watchdogRunning.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (!m_simulatedMode.load()) {
             QueryNativeHostedNetworkStatus();
         }
     }
+#ifdef _WIN32
+    if (SUCCEEDED(hr)) {
+        CoUninitialize();
+    }
+#endif
 }
 
 void WifiSoftApManager::QueryNativeHostedNetworkStatus() {

@@ -1,5 +1,7 @@
 #include "AppController.h"
 #include "VideoAdaptationHelper.h"
+#include "Core/Common/Logging.h"
+#include <cstdio>
 
 namespace CarPlayStation::UI {
 
@@ -60,7 +62,7 @@ Core::Common::Status AppController::Initialize(
     window_.AttachRenderer(&renderer_);
 
     // 4. Initialize Direct2D Overlay Renderer
-    (void)overlay_.Init(renderer_.GetSwapChain());
+    (void)overlay_.Init(renderer_.GetSwapChain(), renderer_.GetBackBufferIndex());
     overlay_.UpdateSettings(settings_);
     overlay_.SetSettingsCallback([this](const Application::AppSettings& s) {
         OnSettingsChanged(s);
@@ -85,7 +87,7 @@ Core::Common::Status AppController::Initialize(
     // (status pill, welcome guide, settings drawer) and its hit-test geometry
     // keep working at the new size.
     window_.SetResizeCallback([this](uint32_t /*w*/, uint32_t /*h*/) {
-        (void)overlay_.Resize(renderer_.GetSwapChain());
+        (void)overlay_.Resize(renderer_.GetSwapChain(), renderer_.GetBackBufferIndex());
     });
 
     // 6. Connect Application Callbacks
@@ -97,12 +99,18 @@ Core::Common::Status AppController::Initialize(
         renderer_.ConsumeFrame(handle, w, h, pts);
     });
 
-    // 7. Start CarPlay
-    (void)app_api_->StartCarPlay(settings_);
-
-    // 8. Show Window
+    // 7. Show Window immediately so user gets instant visual feedback
     if (!headless_) {
         window_.Show();
+    }
+
+    // 8. Start CarPlay
+    auto startSt = app_api_->StartCarPlay(settings_);
+    if (startSt.IsError()) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "[AppController] StartCarPlay failed: %s\n",
+                 startSt.Message().c_str());
+        OutputDebugStringA(buf);
     }
 
     is_initialized_ = true;
@@ -112,15 +120,22 @@ Core::Common::Status AppController::Initialize(
 
 int AppController::Run() {
     if (!is_initialized_) {
+        CPS_LOG_ERROR("AppController", "Run called but controller is not initialized");
         return -1;
     }
 
+    CPS_LOG_INFO("AppController", "Entering Run message loop...");
+    uint64_t step_count = 0;
     while (is_running_ && window_.IsOpen()) {
         if (!Step()) {
+            CPS_LOG_INFO("AppController", "Step returned false at step ", step_count);
             break;
         }
+        ++step_count;
     }
 
+    CPS_LOG_INFO("AppController", "Run loop finished. is_running=", is_running_ ? "true" : "false",
+                 " window.IsOpen=", window_.IsOpen() ? "true" : "false", " total_steps=", step_count);
     Shutdown();
     return 0;
 }
@@ -144,6 +159,9 @@ bool AppController::Step() {
 
     // 3. Present the combined frame to the screen
     (void)renderer_.Present();
+
+    // 4. Yield to the OS to keep input responsive and avoid 100% CPU spin
+    ::Sleep(1);
 
     return true;
 }
@@ -183,12 +201,17 @@ void AppController::OnUiStateChanged(const Application::AppUiState& state) {
 }
 
 void AppController::OnSettingsChanged(const Application::AppSettings& newSettings) {
+    bool mfi_changed = (newSettings.mfi.backend_type != settings_.mfi.backend_type ||
+                        newSettings.mfi.certificate_path != settings_.mfi.certificate_path ||
+                        newSettings.mfi.private_key_path != settings_.mfi.private_key_path);
     settings_ = newSettings;
     if (app_api_) {
         (void)app_api_->ApplySettings(settings_);
     }
-    // Keep the persisted MFi backend in sync with runtime changes.
-    wizard_.SaveMFiSettings(settings_);
+    // Avoid synchronous disk writes during slider drags — only persist if MFi config changed
+    if (mfi_changed) {
+        wizard_.SaveMFiSettings(settings_);
+    }
 }
 
 } // namespace CarPlayStation::UI

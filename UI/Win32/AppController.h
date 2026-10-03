@@ -8,6 +8,7 @@
 #include "SetupWizard.h"
 #include "Win32InputRouter.h"
 #include <memory>
+#include <thread>
 
 namespace CarPlayStation::UI {
 
@@ -58,7 +59,6 @@ public:
 private:
     void OnUiStateChanged(const Application::AppUiState& state);
     void OnSettingsChanged(const Application::AppSettings& newSettings);
-
     MainWindow window_;
     D3D11Renderer renderer_;
     OverlayRenderer overlay_;

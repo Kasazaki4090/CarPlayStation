@@ -31,6 +31,7 @@ add_library(CarPlayCore STATIC
     Media/AirPlayVideoReceiver.cpp
     Media/MfVideoDecoder.cpp
     Media/FFmpegVideoDecoder.cpp
+    Media/MpvVideoPlayer.cpp
     Media/AudioDuckingManager.cpp
     Media/WasapiAudioPipeline.cpp
     Media/WasapiMicrophoneUplink.cpp
@@ -45,6 +46,21 @@ add_library(CarPlayCore STATIC
 target_include_directories(CarPlayCore PUBLIC
     ${CMAKE_SOURCE_DIR}
 )
+
+# libmpv (mpv's embeddable C library) — loaded dynamically via LoadLibrary at
+# runtime; only the headers are needed at compile time.
+if(WIN32)
+    target_include_directories(CarPlayCore PUBLIC
+        ${CMAKE_SOURCE_DIR}/Lib/mpv/include
+    )
+    # Copy the libmpv DLL next to the executable so LoadLibrary can find it.
+    add_custom_command(TARGET CarPlayCore POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/Lib/mpv/libmpv-2.dll
+            $<TARGET_FILE_DIR:CarPlayStation>
+        COMMENT "Copying libmpv-2.dll to output directory"
+    )
+endif()
 
 target_compile_features(CarPlayCore PUBLIC cxx_std_20)
 

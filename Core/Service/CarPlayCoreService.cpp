@@ -11,35 +11,97 @@
 #include "Core/Session/PairingStore.h"
 #include "Core/Session/AirPlayRtspServer.h"
 #include "Core/Session/Pairing/Ed25519.h"
-#include "Core/Media/MfVideoDecoder.h"
+#include "Core/Input/IInputEventSink.h"
+#include "Core/Media/MpvVideoPlayer.h"
 #include "Core/Media/WasapiAudioPipeline.h"
 #include "Core/Media/WasapiMicrophoneUplink.h"
 #include "Core/Media/AirPlayVideoReceiver.h"
 #include "Core/Common/Logging.h"
 
 #include <algorithm>
+#include <array>
 #include <ctime>
 #include <cstdio>
 
 namespace CarPlayStation::Core::Service {
 
 // ============================================================================
-// No-op input sink (used when no real input sink is provided via dependencies).
-// Accepts and discards all input events.
+// AirPlay input sink — sends HID reports over the encrypted event channel.
 // ============================================================================
 namespace {
 
-class NoOpInputSink final : public Input::IInputEventSink {
+class AirPlayInputSink final : public Input::IInputEventSink {
 public:
-    [[nodiscard]] Common::Status SendTouchEvent(Input::TouchAction, const Input::TouchPoint&) override {
-        return Common::Status::Ok();
+    explicit AirPlayInputSink(std::weak_ptr<Session::AirPlayRtspServer> rtsp_server)
+        : rtsp_server_(std::move(rtsp_server)) {}
+
+    [[nodiscard]] Common::Status SendTouchEvent(
+        Input::TouchAction action,
+        const Input::TouchPoint& point) override {
+        auto server = rtsp_server_.lock();
+        if (!server) {
+            return Common::MakeError(Common::StatusCode::Unavailable,
+                "AirPlay RTSP server is unavailable");
+        }
+
+        const auto params = server->GetNegotiatedParams();
+        const uint16_t width = static_cast<uint16_t>(
+            std::clamp(params.video_width, 1u, static_cast<uint32_t>(UINT16_MAX)));
+        const uint16_t height = static_cast<uint16_t>(
+            std::clamp(params.video_height, 1u, static_cast<uint32_t>(UINT16_MAX)));
+        const bool contact = action == Input::TouchAction::Down ||
+                             action == Input::TouchAction::Move;
+        const uint16_t x = static_cast<uint16_t>(
+            std::clamp(point.x_normalized, 0.0f, 1.0f) * width);
+        const uint16_t y = static_cast<uint16_t>(
+            std::clamp(point.y_normalized, 0.0f, 1.0f) * height);
+        const std::array<uint8_t, 5> report{
+            static_cast<uint8_t>(contact ? 1 : 0),
+            static_cast<uint8_t>(x & 0xFF),
+            static_cast<uint8_t>((x >> 8) & 0xFF),
+            static_cast<uint8_t>(y & 0xFF),
+            static_cast<uint8_t>((y >> 8) & 0xFF)
+        };
+        auto status = server->SendHidReport(1, report);
+        if (status.IsOk() && action != Input::TouchAction::Move) {
+            CPS_LOG_INFO("InputSink", "Sent HID touch ",
+                action == Input::TouchAction::Down ? "down" :
+                action == Input::TouchAction::Up ? "up" : "cancel",
+                " at ", x, ",", y);
+        }
+        return status;
     }
+
     [[nodiscard]] Common::Status SendKnobEvent(Input::KnobAction, uint32_t) override {
-        return Common::Status::Ok();
+        return Common::MakeError(Common::StatusCode::NotSupported,
+            "This receiver does not advertise a CarPlay knob HID device");
     }
-    [[nodiscard]] Common::Status SendButtonEvent(Input::ButtonType, bool) override {
-        return Common::Status::Ok();
+
+    [[nodiscard]] Common::Status SendButtonEvent(
+        Input::ButtonType button,
+        bool isPressed) override {
+        uint8_t usage = 0;
+        if (isPressed) {
+            switch (button) {
+                case Input::ButtonType::PlayPause: usage = 3; break;
+                case Input::ButtonType::NextTrack: usage = 4; break;
+                case Input::ButtonType::PrevTrack: usage = 5; break;
+                default:
+                    return Common::MakeError(Common::StatusCode::NotSupported,
+                        "This receiver does not advertise the requested HID button");
+            }
+        }
+
+        auto server = rtsp_server_.lock();
+        if (!server) {
+            return Common::MakeError(Common::StatusCode::Unavailable,
+                "AirPlay RTSP server is unavailable");
+        }
+        return server->SendHidReport(2, Common::ByteSpan(&usage, 1));
     }
+
+private:
+    std::weak_ptr<Session::AirPlayRtspServer> rtsp_server_;
 };
 
 // MFi authentication message IDs (iAP2 control session, session 1).
@@ -543,7 +605,7 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
     if (deps_.video_decoder) {
         video_decoder_ = deps_.video_decoder;
     } else {
-        video_decoder_ = std::make_shared<Media::MfVideoDecoder>();
+        video_decoder_ = std::make_shared<Media::MpvVideoPlayer>();
     }
     video_receiver_ = std::make_shared<Media::AirPlayVideoReceiver>(video_decoder_, static_cast<uint16_t>(7100));
 
@@ -563,7 +625,7 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
     if (deps_.input_sink) {
         input_sink_ = deps_.input_sink;
     } else {
-        input_sink_ = std::make_shared<NoOpInputSink>();
+        input_sink_ = std::make_shared<AirPlayInputSink>(rtsp_server_);
     }
 
     // Wire Transport <-> iAP2 link
@@ -730,6 +792,23 @@ Common::Status CarPlayCoreService::Start() {
         } else {
             Common::Logger::Instance().Log(Common::LogLevel::Warn, "CoreService",
                 "Failed to start AirPlay Video Receiver: ", vr_st.Message());
+        }
+    }
+
+    // Start Audio Pipeline
+    if (audio_pipeline_) {
+        Common::AudioOutputFormat default_audio_format{};
+        default_audio_format.sample_rate = 48000;
+        default_audio_format.channels = 2;
+        default_audio_format.bit_depth = 16;
+        default_audio_format.sample_type = Common::AudioSampleType::PcmInt16;
+        auto ap_st = audio_pipeline_->Start(default_audio_format);
+        if (ap_st.IsOk()) {
+            Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+                "Audio Pipeline started at 48000Hz stereo");
+        } else {
+            Common::Logger::Instance().Log(Common::LogLevel::Warn, "CoreService",
+                "Failed to start Audio Pipeline: ", ap_st.Message());
         }
     }
 

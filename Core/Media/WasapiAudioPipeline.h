@@ -93,7 +93,7 @@ private:
     // whether clamping occurred.
     [[nodiscard]] float ApplySoftLimiter(float x, bool& clamped) const;
 
-    mutable std::mutex mutex_;
+    mutable std::recursive_mutex mutex_;
     bool running_{false};
     Common::AudioOutputFormat format_{};
     AudioCapabilities capabilities_{};
@@ -115,6 +115,9 @@ private:
     void* wasapiClient_{nullptr};   // IAudioClient* (opaque; COM under _WIN32)
     void* wasapiRender_{nullptr};   // IAudioRenderClient*
     void* wasapiEvent_{nullptr};    // HANDLE (event)
+    uint16_t mixChannels_{2};
+    uint16_t mixBitsPerSample_{32};
+    bool mixIsFloat_{false};
 };
 
 } // namespace CarPlayStation::Core::Media

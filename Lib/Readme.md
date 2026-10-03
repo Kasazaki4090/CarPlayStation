@@ -87,6 +87,50 @@ Preferred video decoding order:
 - The CMake configure step (`cmake/FindOrDownloadFFmpeg.cmake`) and the manual script (`scripts/Update-FFmpeg.ps1`) both auto-select the correct source and archive format per architecture.
 - The exact enabled components, hardware acceleration backends, redistribution requirements, and package size will be documented when integrated.
 
+### mpv (libmpv)
+
+**Purpose:**
+Video decoding and rendering for the CarPlay video stream.
+
+**Version:**
+`v0.41.0-1092-g3186d369f` (mpv development build, x64 Windows).
+
+**Source:**
+Official mpv project (prebuilt `mpv-dev` archive, `mpv-dev.7z`).
+
+**License:**
+The client API (`client.h`, `render.h`, `render_gl.h`, `stream_cb.h`) is ISC.
+The mpv core is GPLv2+ by default, or LGPLv2+ when built with `-Dgpl=false`.
+The prebuilt `libmpv-2.dll` in this directory is a GPL build; redistribution
+follows the GPL terms.
+
+**Reason:**
+The in-process Media Foundation (MFT) decode + D3D11 render pipeline deadlocked
+under GPU contention (the hardware MFT blocks on the renderer's shared texture,
+and software MFT is too slow at 1280x720@60). libmpv decodes with its own
+hardware-accelerated D3D11 VA path, independent of the renderer's D3D11 device,
+so it avoids that contention.
+
+**Integration:**
+Used behind the `IVideoDecoder` interface via `Core/Media/MpvVideoPlayer.cpp`.
+The DLL is loaded dynamically at runtime with `LoadLibrary("libmpv-2.dll")`
+(resolved from the executable directory); only the C headers are needed at
+compile time. Decrypted H.264 Annex-B access units are fed to mpv through a
+custom read-only stream protocol (`mpv_stream_cb_add_ro`) backed by a bounded
+ring buffer, keeping the data path in-process (no HTTP server). Decoded frames
+are rendered into a software buffer via the libmpv SW render API
+(`MPV_RENDER_API_TYPE_SW`, format `bgr0` = B8G8R8A8) and uploaded into a
+D3D11 shared texture consumed by the UI renderer.
+
+**Notes:**
+- The CMake build (`Core/CMakeLists.txt`) adds `Lib/mpv/include` to the include
+  path and copies `Lib/mpv/libmpv-2.dll` next to the executable at build time.
+- `libmpv-2.dll` (~115 MB) and the `mpv-dev.7z` archive are not committed to
+  git (see `.gitignore`); they are vendored locally under `Lib/mpv/`.
+- The mpv render API only exposes `MPV_RENDER_API_TYPE_OPENGL` and
+  `MPV_RENDER_API_TYPE_SW` (no native D3D11), so the SW render path is used and
+  the frame is uploaded to a D3D11 shared texture by CarPlayStation.
+
 ## Dependency Policy
 
 `Core/` contains CarPlayStation's own implementation.

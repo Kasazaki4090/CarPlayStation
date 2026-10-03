@@ -68,6 +68,7 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
     std::unique_ptr<pairing::ControlChannel> event_channel;
     std::thread event_drain_thread;
     std::atomic<uint32_t> event_cseq{0};
+    std::mutex event_send_mutex;
 
     socket_t keepalive_sock{INVALID_SOCK};
     uint16_t keepalive_port{0};
@@ -92,9 +93,13 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
             CLOSE_SOCK(event_listen_sock);
             event_listen_sock = INVALID_SOCK;
         }
-        if (event_stream_sock != INVALID_SOCK) {
-            CLOSE_SOCK(event_stream_sock);
-            event_stream_sock = INVALID_SOCK;
+        {
+            std::lock_guard<std::mutex> lock(event_send_mutex);
+            if (event_stream_sock != INVALID_SOCK) {
+                CLOSE_SOCK(event_stream_sock);
+                event_stream_sock = INVALID_SOCK;
+            }
+            event_channel.reset();
         }
         if (event_drain_thread.joinable()) {
             event_drain_thread.join();
@@ -163,6 +168,7 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
     }
 
     bool SendEventCommand(const std::vector<uint8_t>& body_plist) {
+        std::lock_guard<std::mutex> lock(event_send_mutex);
         if (event_stream_sock == INVALID_SOCK || !event_channel) {
             return false;
         }
@@ -182,6 +188,21 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
             total_sent += sent;
         }
         return true;
+    }
+
+    bool HasEventChannel() {
+        std::lock_guard<std::mutex> lock(event_send_mutex);
+        return event_stream_sock != INVALID_SOCK && event_channel != nullptr;
+    }
+
+    bool SendHidReport(uint32_t device_uid, Common::ByteSpan report) {
+        using namespace Pairing;
+        BplistDict command;
+        command.emplace_back("type", BplistValue("hidSendReport"));
+        command.emplace_back("uuid", BplistValue(std::to_string(device_uid)));
+        command.emplace_back("hidReport",
+            BplistValue(std::vector<uint8_t>(report.begin(), report.end())));
+        return SendEventCommand(BplistEncoder::Encode(BplistValue(std::move(command))));
     }
 
     bool SendRequestUI() {
@@ -262,15 +283,60 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
                     if (auth_failed || !pt) break;
                     rx.erase(rx.begin(), rx.begin() + consumed);
                     std::string first_line;
-                    for (char c : *pt) {
-                        if (c == '\r' || c == '\n') break;
-                        first_line += c;
+                    std::string ev_ascii;
+                    for (uint8_t c : *pt) {
+                        if (first_line.size() < 128 && c != '\r' && c != '\n' && ev_ascii.empty()) {
+                            first_line += static_cast<char>(c);
+                        }
+                        if (c >= 32 && c <= 126) ev_ascii += static_cast<char>(c);
+                        else ev_ascii += '.';
                     }
-                    CPS_LOG_INFO("AirPlayRtsp", "Event channel received: '", first_line, "' (", std::to_string(pt->size()), " B)");
+                    CPS_LOG_INFO("AirPlayRtsp", "Event channel received: '", first_line, "' (", std::to_string(pt->size()), " B), body=[", ev_ascii, "]");
                 }
             }
             CPS_LOG_INFO("AirPlayRtsp", "Event channel reader thread finished");
         });
+    }
+
+    bool TryAcceptEventChannel(int timeout_ms = 500) {
+        if (event_listen_sock == INVALID_SOCK) {
+            return false;
+        }
+        {
+            std::lock_guard<std::mutex> lock(event_send_mutex);
+            if (event_stream_sock != INVALID_SOCK && event_channel) {
+                return true;
+            }
+        }
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(event_listen_sock, &rfds);
+        timeval tv{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+        int sel = select(static_cast<int>(event_listen_sock + 1), &rfds, nullptr, nullptr, &tv);
+        if (sel > 0 && FD_ISSET(event_listen_sock, &rfds)) {
+            sockaddr_in peer{};
+            int peer_len = sizeof(peer);
+            socket_t accepted = accept(event_listen_sock, reinterpret_cast<sockaddr*>(&peer), &peer_len);
+            if (accepted != INVALID_SOCK) {
+                {
+                    std::lock_guard<std::mutex> lock(event_send_mutex);
+                    event_stream_sock = accepted;
+                    auto ekeys = pairing::DeriveEventKeys(shared_secret);
+                    event_channel = std::make_unique<pairing::ControlChannel>(ekeys);
+                }
+                CPS_LOG_INFO("AirPlayRtsp", "Event channel TCP accepted!");
+                #ifdef _WIN32
+                int nodelay = 1;
+                setsockopt(event_stream_sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
+                #endif
+                StartEventDrain();
+                SendRequestUI();
+                SendTakeScreen();
+                SendForceKeyFrame();
+                return true;
+            }
+        }
+        return false;
     }
 };
 
@@ -431,6 +497,30 @@ public:
     void SetNegotiatedParams(NegotiatedMediaParams params) {
         std::lock_guard<std::mutex> lock(mutex_);
         params_ = std::move(params);
+    }
+
+    Common::Status SendHidReport(uint32_t device_uid, Common::ByteSpan report) {
+        std::vector<std::shared_ptr<ClientSession>> candidates;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            candidates.reserve(sessions_.size());
+            for (const auto& [socket, session] : sessions_) {
+                (void)socket;
+                candidates.push_back(session);
+            }
+        }
+
+        for (auto it = candidates.rbegin(); it != candidates.rend(); ++it) {
+            if ((*it)->HasEventChannel()) {
+                if ((*it)->SendHidReport(device_uid, report)) {
+                    return Common::Status::Ok();
+                }
+                return Common::MakeError(Common::StatusCode::Unavailable,
+                    "Failed to send HID report over the AirPlay event channel");
+            }
+        }
+        return Common::MakeError(Common::StatusCode::Unavailable,
+            "No active AirPlay event channel is available for HID input");
     }
 
     RtspResponse ProcessSimulatedRequest(const RtspRequest& req) {
@@ -595,6 +685,7 @@ private:
                         sess->pending_encryption = false;
                         CPS_LOG_INFO("AirPlayRtsp", "Switched RTSP control channel to ChaCha20-Poly1305 encryption");
                     }
+
                 } catch (const std::exception& ex) {
                     CPS_LOG_ERROR("AirPlayRtsp", "Exception handling RTSP request: ", ex.what());
                     auto err_resp = AirPlayRtspCodec::MakeErrorResponse(RtspStatus::InternalServerError, req.GetCSeq());
@@ -602,10 +693,6 @@ private:
                     send(sock, reinterpret_cast<const char*>(out_bytes.data()), static_cast<int>(out_bytes.size()), 0);
                 } catch (...) {
                     CPS_LOG_ERROR("AirPlayRtsp", "Unknown exception handling RTSP request");
-                }
-
-                if (req.method == RtspMethod::Teardown) {
-                    break;
                 }
             }
         }
@@ -631,6 +718,23 @@ private:
         uint32_t cseq = req.GetCSeq();
         std::string path = std::string(req.Path());
 
+        if (!req.body.empty() && (path == "/command" || path == "/feedback" || req.method == RtspMethod::Teardown || req.method == RtspMethod::Post || req.method == RtspMethod::Setup)) {
+            std::string printable;
+            std::string hexDump;
+            for (size_t i = 0; i < req.body.size(); ++i) {
+                uint8_t b = req.body[i];
+                if (b >= 32 && b <= 126) printable += static_cast<char>(b);
+                else printable += '.';
+                if (i < 64) {
+                    char hbuf[4];
+                    snprintf(hbuf, sizeof(hbuf), "%02x ", b);
+                    hexDump += hbuf;
+                }
+            }
+            CPS_LOG_INFO("AirPlayRtsp", "Request [", RtspMethodToString(req.method), " ", path, "] body len=",
+                         std::to_string(req.body.size()), ", hex[:64]=[", hexDump, "], ascii=[", printable, "]");
+        }
+
         if (path == "/pair-setup") {
             return HandlePairSetup(req, cseq, sess);
         }
@@ -643,8 +747,13 @@ private:
         if (path == "/info") {
             return HandleInfo(req, cseq);
         }
-        if (path == "/feedback" || path == "/command" || path == "/diagInfo" || path == "/log") {
-            return AirPlayRtspCodec::MakeOkResponse(cseq);
+        if (path == "/command") {
+            return HandleCommand(req, cseq, sess);
+        }
+        if (path == "/feedback" || path == "/diagInfo" || path == "/diag-info" || path == "/log" || path == "/logs") {
+            auto resp = AirPlayRtspCodec::MakeOkResponse(cseq);
+            resp.SetHeader("Content-Length", "0");
+            return resp;
         }
 
         switch (req.method) {
@@ -666,34 +775,8 @@ private:
             case RtspMethod::Record: {
                 if (params_.session_id.empty()) params_.session_id = "1";
 
-                if (sess && sess->event_listen_sock != INVALID_SOCK && sess->event_stream_sock == INVALID_SOCK) {
-                    CPS_LOG_INFO("AirPlayRtsp", "RECORD: accepting iPhone eventPort connection on port ",
-                                 std::to_string(sess->event_port));
-                    fd_set rfds;
-                    FD_ZERO(&rfds);
-                    FD_SET(sess->event_listen_sock, &rfds);
-                    timeval tv{3, 0}; // wait up to 3 seconds
-                    int sel = select(static_cast<int>(sess->event_listen_sock + 1), &rfds, nullptr, nullptr, &tv);
-                    if (sel > 0 && FD_ISSET(sess->event_listen_sock, &rfds)) {
-                        sockaddr_in peer{};
-                        int peer_len = sizeof(peer);
-                        sess->event_stream_sock = accept(sess->event_listen_sock, reinterpret_cast<sockaddr*>(&peer), &peer_len);
-                        if (sess->event_stream_sock != INVALID_SOCK) {
-                            CPS_LOG_INFO("AirPlayRtsp", "Event channel TCP accepted!");
-                            #ifdef _WIN32
-                            int nodelay = 1;
-                            setsockopt(sess->event_stream_sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
-                            #endif
-                            auto ekeys = pairing::DeriveEventKeys(sess->shared_secret);
-                            sess->event_channel = std::make_unique<pairing::ControlChannel>(ekeys);
-                            sess->StartEventDrain();
-                            sess->SendRequestUI();
-                            sess->SendTakeScreen();
-                            sess->SendForceKeyFrame();
-                        }
-                    } else {
-                        CPS_LOG_WARN("AirPlayRtsp", "eventPort accept timeout or not pending at RECORD");
-                    }
+                if (sess) {
+                    sess->TryAcceptEventChannel(2000);
                 }
 
                 auto resp = AirPlayRtspCodec::MakeOkResponse(cseq, params_.session_id);
@@ -982,6 +1065,25 @@ private:
         return resp;
     }
 
+    RtspResponse HandleCommand(const RtspRequest& req, uint32_t cseq, std::shared_ptr<ClientSession>& sess) {
+        using namespace Pairing;
+        (void)sess;
+        std::string cmd_type = "unknown";
+        if (!req.body.empty()) {
+            auto bplist = BplistDecoder::Decode(req.body.data(), req.body.size());
+            if (const auto* ty = bplist.Find("type")) {
+                cmd_type = ty->AsString();
+            }
+        }
+        CPS_LOG_INFO("AirPlayRtsp", "Handling /command: type='", cmd_type, "' (body len=", std::to_string(req.body.size()), ")");
+
+        auto resp = AirPlayRtspCodec::MakeOkResponse(cseq);
+        resp.SetHeader("Content-Type", "application/x-apple-binary-plist");
+        // Always respond with the standard 42-byte empty binary plist dict matching Apple CarPlay reference
+        resp.body = BplistEncoder::Encode(BplistValue(BplistDict{}));
+        return resp;
+    }
+
     RtspResponse HandleSetup(const RtspRequest& req, uint32_t cseq, std::shared_ptr<ClientSession>& sess) {
         using namespace Pairing;
 
@@ -997,57 +1099,86 @@ private:
             return resp;
         }
 
-        std::string body_str(req.body.begin(), req.body.end());
-        bool has_streams = (body_str.find("streams") != std::string::npos);
+        auto root = BplistDecoder::Decode(req.body.data(), req.body.size());
+        const auto* streams_val = root.Find("streams");
 
-        if (has_streams) {
-            CPS_LOG_INFO("AirPlayRtsp", "SETUP Phase 2 (Streams) received");
+        if (streams_val && streams_val->AsArray()) {
+            CPS_LOG_INFO("AirPlayRtsp", "SETUP Phase 2 (Streams) received with ",
+                         std::to_string(streams_val->AsArray()->size()), " stream(s)");
 
-            uint64_t scid = 0;
-            auto scid_pos = body_str.find("streamConnectionID");
-            if (scid_pos != std::string::npos) {
-                size_t search_start = scid_pos + 18;
-                for (size_t i = search_start; i + 8 <= req.body.size() && i < search_start + 60; ++i) {
-                    uint8_t m = req.body[i];
-                    if (m == 0x13 && i + 9 <= req.body.size()) {
-                        scid = Common::Endian::ReadBe64(req.body.data() + i + 1);
-                        break;
-                    } else if (m == 0x12 && i + 5 <= req.body.size()) {
-                        scid = Common::Endian::ReadBe32(req.body.data() + i + 1);
-                        break;
-                    } else if (m == 0x11 && i + 3 <= req.body.size()) {
-                        scid = Common::Endian::ReadBe16(req.body.data() + i + 1);
-                        break;
+            BplistArray out_streams;
+            bool has_screen = false;
+
+            for (const auto& s_entry : *streams_val->AsArray()) {
+                int64_t ty = s_entry.Find("type") ? s_entry.Find("type")->AsInt() : 0;
+                uint64_t scid = s_entry.Find("streamConnectionID") ? s_entry.Find("streamConnectionID")->AsUInt() : 0;
+                CPS_LOG_INFO("AirPlayRtsp", "SETUP Phase 2 stream: type=", std::to_string(ty),
+                             ", streamConnectionID=", std::to_string(scid));
+
+                if (ty == 110) { // Screen
+                    has_screen = true;
+                    if (scid != 0 && sess) {
+                        auto skeys = pairing::DeriveStreamKeys(sess->shared_secret, scid);
+                        params_.video_decrypt_key = skeys.output;
+                        params_.video_encrypted = true;
+                        CPS_LOG_INFO("AirPlayRtsp", "SETUP Phase 2: screen streamConnectionID=", std::to_string(scid),
+                                     ", video encryption key derived successfully");
                     }
+
+                    BplistDict stream_dict;
+                    stream_dict.emplace_back("type", BplistValue(110));
+                    stream_dict.emplace_back("dataPort", BplistValue(7100));
+                    // Note: Per genuine Apple CarPlay / carplayd / xcertplay, Screen (110)
+                    // MUST NOT include controlPort, uuid, or streamConnectionID in response!
+                    out_streams.push_back(BplistValue(stream_dict));
+                } else if (ty >= 100 && ty <= 102) { // Audio
+                    BplistDict stream_dict;
+                    stream_dict.emplace_back("type", BplistValue(ty));
+                    if (scid != 0) {
+                        stream_dict.emplace_back("streamConnectionID", BplistValue(scid));
+                    }
+                    uint16_t dport = (ty == 102) ? 7002 : (ty == 101 ? 7001 : 7000);
+                    stream_dict.emplace_back("dataPort", BplistValue(dport));
+                    if (ty == 102) {
+                        stream_dict.emplace_back("controlPort", BplistValue(dport + 1));
+                    }
+                    out_streams.push_back(BplistValue(stream_dict));
+                } else {
+                    CPS_LOG_WARN("AirPlayRtsp", "SETUP Phase 2: unhandled stream type ", std::to_string(ty));
                 }
             }
 
-            if (scid != 0 && sess) {
-                auto skeys = pairing::DeriveStreamKeys(sess->shared_secret, scid);
-                params_.video_decrypt_key = skeys.output;
-                params_.video_encrypted = true;
-                CPS_LOG_INFO("AirPlayRtsp", "SETUP Phase 2: streamConnectionID=", std::to_string(scid), ", video encryption key derived");
+            if (out_streams.empty()) {
+                // Default fallback if iPhone provided empty array
+                BplistDict stream_dict;
+                stream_dict.emplace_back("type", BplistValue(110));
+                stream_dict.emplace_back("dataPort", BplistValue(7100));
+                out_streams.push_back(BplistValue(stream_dict));
+                has_screen = true;
             }
-
-            BplistDict stream_dict;
-            stream_dict.emplace_back("type", BplistValue(110)); // Screen
-            stream_dict.emplace_back("dataPort", BplistValue(7100));
-            if (scid != 0) {
-                stream_dict.emplace_back("streamConnectionID", BplistValue(scid));
-            }
-
-            BplistArray streams;
-            streams.push_back(BplistValue(stream_dict));
 
             BplistDict resp_dict;
-            resp_dict.emplace_back("streams", BplistValue(streams));
+            resp_dict.emplace_back("streams", BplistValue(out_streams));
+            // In SETUP Phase 2, the root dictionary ONLY contains "streams".
+            // Do NOT echo eventPort or timingPort here (they belong to Phase 1 only).
 
             auto bplist = BplistEncoder::Encode(BplistValue(resp_dict));
             auto resp = AirPlayRtspCodec::MakeOkResponse(cseq);
             resp.SetHeader("Content-Type", "application/x-apple-binary-plist");
             resp.body = std::move(bplist);
+
             params_.video_data_port = 7100;
-            params_.video_control_port = 7101;
+            params_.video_control_port = 0; // Screen stream has no RTCP control port
+            if (has_screen) {
+                if (streaming_cb_) {
+                    streaming_cb_(params_);
+                }
+                // NOTE: Do NOT send takeScreen here. Per the genuine Apple CarPlay SDK
+                // reference (c_flow_chatty.log) and carplayd (session.rs:424-435),
+                // takeScreen is sent ONCE AND ONLY ONCE at RECORD (via TryAcceptEventChannel).
+                // Sending a duplicate takeScreen after SETUP Phase 2 confuses iOS's
+                // FigVirtualDisplay controller, causing an immediate TEARDOWN of stream 110.
+            }
             return resp;
         } else {
             CPS_LOG_INFO("AirPlayRtsp", "SETUP Phase 1 (Session) received");
@@ -1201,6 +1332,10 @@ NegotiatedMediaParams AirPlayRtspServer::GetNegotiatedParams() const noexcept {
 
 void AirPlayRtspServer::SetNegotiatedParams(NegotiatedMediaParams params) {
     impl_->SetNegotiatedParams(std::move(params));
+}
+
+Common::Status AirPlayRtspServer::SendHidReport(uint32_t deviceUid, Common::ByteSpan report) {
+    return impl_->SendHidReport(deviceUid, report);
 }
 
 RtspResponse AirPlayRtspServer::ProcessSimulatedRequest(const RtspRequest& req) {

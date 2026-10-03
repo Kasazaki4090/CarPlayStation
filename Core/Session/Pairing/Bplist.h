@@ -42,11 +42,187 @@ struct BplistValue {
     BplistValue(uint16_t u) : type(Type::Integer), int_val(static_cast<int64_t>(u)) {}
     BplistValue(uint32_t u) : type(Type::Integer), int_val(static_cast<int64_t>(u)) {}
     BplistValue(uint64_t u) : type(Type::Integer), int_val(static_cast<int64_t>(u)) {}
-    BplistValue(const char* s) : type(Type::String), str_val(s) {}
+    BplistValue(const char* s) : type(Type::String), str_val(s ? s : "") {}
     BplistValue(std::string s) : type(Type::String), str_val(std::move(s)) {}
     BplistValue(std::vector<uint8_t> d) : type(Type::Data), data_val(std::move(d)) {}
     BplistValue(BplistArray a) : type(Type::Array), array_val(std::move(a)) {}
     BplistValue(BplistDict d) : type(Type::Dict), dict_val(std::move(d)) {}
+
+    [[nodiscard]] const BplistValue* Find(const std::string& key) const {
+        if (type != Type::Dict) return nullptr;
+        for (const auto& kv : dict_val) {
+            if (kv.first == key) return &kv.second;
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] int64_t AsInt(int64_t def = 0) const {
+        return (type == Type::Integer) ? int_val : def;
+    }
+
+    [[nodiscard]] uint64_t AsUInt(uint64_t def = 0) const {
+        return (type == Type::Integer) ? static_cast<uint64_t>(int_val) : def;
+    }
+
+    [[nodiscard]] std::string AsString(const std::string& def = "") const {
+        return (type == Type::String) ? str_val : def;
+    }
+
+    [[nodiscard]] bool AsBool(bool def = false) const {
+        return (type == Type::Boolean) ? bool_val : def;
+    }
+
+    [[nodiscard]] const BplistArray* AsArray() const {
+        return (type == Type::Array) ? &array_val : nullptr;
+    }
+
+    [[nodiscard]] const BplistDict* AsDict() const {
+        return (type == Type::Dict) ? &dict_val : nullptr;
+    }
+};
+
+class BplistDecoder {
+public:
+    static BplistValue Decode(const uint8_t* data, size_t size) {
+        if (!data || size < 40) return BplistValue(false);
+        if (memcmp(data, "bplist00", 8) != 0) return BplistValue(false);
+
+        size_t trailer = size - 32;
+        uint8_t offset_size = data[trailer + 6];
+        uint8_t ref_size = data[trailer + 7];
+        if (offset_size == 0 || ref_size == 0) return BplistValue(false);
+
+        auto read_be = [](const uint8_t* p, size_t bytes) -> uint64_t {
+            uint64_t val = 0;
+            for (size_t i = 0; i < bytes; ++i) {
+                val = (val << 8) | p[i];
+            }
+            return val;
+        };
+
+        uint64_t num_objects = read_be(data + trailer + 8, 8);
+        uint64_t top_object = read_be(data + trailer + 16, 8);
+        uint64_t offset_table_offset = read_be(data + trailer + 24, 8);
+
+        if (num_objects == 0 || top_object >= num_objects) return BplistValue(false);
+        if (offset_table_offset + num_objects * offset_size > trailer) return BplistValue(false);
+
+        std::vector<uint64_t> offsets(num_objects);
+        for (size_t i = 0; i < num_objects; ++i) {
+            offsets[i] = read_be(data + offset_table_offset + i * offset_size, offset_size);
+            if (offsets[i] >= trailer) return BplistValue(false);
+        }
+
+        std::vector<bool> visiting(num_objects, false);
+        auto read_object = [&](auto& self, size_t index) -> BplistValue {
+            if (index >= num_objects || visiting[index]) return BplistValue(false);
+            visiting[index] = true;
+            size_t pos = static_cast<size_t>(offsets[index]);
+            if (pos >= trailer) {
+                visiting[index] = false;
+                return BplistValue(false);
+            }
+
+            uint8_t marker = data[pos++];
+            uint8_t high = marker >> 4;
+            uint8_t low = marker & 0x0F;
+
+            auto read_count = [&]() -> size_t {
+                if (low != 0x0F) return low;
+                if (pos >= trailer) return 0;
+                uint8_t count_marker = data[pos++];
+                size_t int_bytes = 1ULL << (count_marker & 0x0F);
+                if (pos + int_bytes > trailer) return 0;
+                size_t cnt = static_cast<size_t>(read_be(data + pos, int_bytes));
+                pos += int_bytes;
+                return cnt;
+            };
+
+            BplistValue result;
+            switch (high) {
+                case 0x0: {
+                    if (low == 0x08) result = BplistValue(false);
+                    else if (low == 0x09) result = BplistValue(true);
+                    else result = BplistValue(false);
+                    break;
+                }
+                case 0x1: { // Integer
+                    size_t int_bytes = 1ULL << low;
+                    if (pos + int_bytes <= trailer) {
+                        uint64_t val = read_be(data + pos, int_bytes);
+                        result = BplistValue(val);
+                    }
+                    break;
+                }
+                case 0x4: { // Data
+                    size_t count = read_count();
+                    if (pos + count <= trailer) {
+                        result = BplistValue(std::vector<uint8_t>(data + pos, data + pos + count));
+                    }
+                    break;
+                }
+                case 0x5: { // ASCII String
+                    size_t count = read_count();
+                    if (pos + count <= trailer) {
+                        result = BplistValue(std::string(reinterpret_cast<const char*>(data + pos), count));
+                    }
+                    break;
+                }
+                case 0x6: { // UTF-16BE String
+                    size_t count = read_count();
+                    std::string s;
+                    for (size_t c = 0; c < count && pos + 2 <= trailer; ++c, pos += 2) {
+                        uint16_t ch = (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
+                        if (ch < 0x80) s.push_back(static_cast<char>(ch));
+                        else s.push_back('?');
+                    }
+                    result = BplistValue(std::move(s));
+                    break;
+                }
+                case 0xA: { // Array
+                    size_t count = read_count();
+                    BplistArray arr;
+                    arr.reserve(count);
+                    for (size_t i = 0; i < count && pos + ref_size <= trailer; ++i) {
+                        size_t ref = static_cast<size_t>(read_be(data + pos, ref_size));
+                        pos += ref_size;
+                        arr.push_back(self(self, ref));
+                    }
+                    result = BplistValue(std::move(arr));
+                    break;
+                }
+                case 0xD: { // Dict
+                    size_t count = read_count();
+                    std::vector<size_t> key_refs(count);
+                    for (size_t i = 0; i < count && pos + ref_size <= trailer; ++i) {
+                        key_refs[i] = static_cast<size_t>(read_be(data + pos, ref_size));
+                        pos += ref_size;
+                    }
+                    std::vector<size_t> val_refs(count);
+                    for (size_t i = 0; i < count && pos + ref_size <= trailer; ++i) {
+                        val_refs[i] = static_cast<size_t>(read_be(data + pos, ref_size));
+                        pos += ref_size;
+                    }
+                    BplistDict dict;
+                    dict.reserve(count);
+                    for (size_t i = 0; i < count; ++i) {
+                        auto k = self(self, key_refs[i]).AsString();
+                        auto v = self(self, val_refs[i]);
+                        dict.emplace_back(std::move(k), std::move(v));
+                    }
+                    result = BplistValue(std::move(dict));
+                    break;
+                }
+                default:
+                    result = BplistValue(false);
+                    break;
+            }
+            visiting[index] = false;
+            return result;
+        };
+
+        return read_object(read_object, static_cast<size_t>(top_object));
+    }
 };
 
 class BplistEncoder {
@@ -180,19 +356,15 @@ private:
                         nodes_[idx].raw_payload.push_back(static_cast<uint8_t>(sz & 0xFF));
                     }
                 }
-                std::vector<size_t> key_indices;
-                std::vector<size_t> val_indices;
-                key_indices.reserve(sz);
-                val_indices.reserve(sz);
+                std::vector<size_t> all_refs;
+                all_refs.reserve(sz * 2);
                 for (const auto& kv : val.dict_val) {
-                    key_indices.push_back(Add(BplistValue(kv.first)));
+                    all_refs.push_back(Add(BplistValue(kv.first)));
                 }
                 for (const auto& kv : val.dict_val) {
-                    val_indices.push_back(Add(kv.second));
+                    all_refs.push_back(Add(kv.second));
                 }
-                nodes_[idx].child_refs = std::move(key_indices);
-                nodes_[idx].child_refs.insert(nodes_[idx].child_refs.end(),
-                                              val_indices.begin(), val_indices.end());
+                nodes_[idx].child_refs = std::move(all_refs);
                 break;
             }
         }

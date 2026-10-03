@@ -104,6 +104,11 @@ public:
      */
     void SetNegotiatedParams(NegotiatedMediaParams params);
 
+    /**
+     * @brief Send a HID input report to the active AirPlay event channel.
+     */
+    [[nodiscard]] Common::Status SendHidReport(uint32_t deviceUid, Common::ByteSpan report);
+
     // --- Simulation & In-Memory Testing ---
 
     /**

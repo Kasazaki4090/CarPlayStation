@@ -26,6 +26,13 @@ struct SliderItem {
     bool dragging{false};
 };
 
+struct ButtonItem {
+    std::wstring label;
+    D2D1_RECT_F rect{};
+    bool is_active{false};
+    std::function<void()> on_click;
+};
+
 class OverlayRenderer {
 public:
     OverlayRenderer();
@@ -36,13 +43,18 @@ public:
 
     /**
      * @brief Initialize Direct2D and DirectWrite resources bound to the DXGI swapchain.
+     * @param swapChain The swapchain whose backbuffer the D2D target renders into.
+     * @param backBufferIndex Index of the swapchain buffer that is the current
+     *        back buffer (BufferCount-1 for a flip-model swapchain, 0 for a
+     *        discard-model swapchain). The D2D target must render into this
+     *        buffer so it composes with the D3D11 video and is presented.
      */
-    [[nodiscard]] Core::Common::Status Init(IDXGISwapChain1* swapChain);
+    [[nodiscard]] Core::Common::Status Init(IDXGISwapChain1* swapChain, uint32_t backBufferIndex);
 
     /**
      * @brief Recreate render target upon swapchain buffer resize.
      */
-    [[nodiscard]] Core::Common::Status Resize(IDXGISwapChain1* swapChain);
+    [[nodiscard]] Core::Common::Status Resize(IDXGISwapChain1* swapChain, uint32_t backBufferIndex);
 
     /**
      * @brief Update application state snapshot for HUD display.
@@ -73,6 +85,22 @@ public:
     void ToggleSettingsDrawer();
 
     /**
+     * @brief Toggle the standalone log panel visibility (e.g. via F4).
+     */
+    void ToggleLogPanel();
+
+    /**
+     * @brief Toggle or dismiss the centered welcome pairing guide (e.g. via ESC or [X]).
+     */
+    void ToggleWelcomeGuide();
+    void DismissWelcomeGuide();
+
+    /**
+     * @brief Set the number of most-recent log lines the panel displays.
+     */
+    void SetLogPanelLineCount(int count) { log_panel_line_count_ = count > 0 ? count : 12; }
+
+    /**
      * @brief Set callback for when user modifies settings in the HUD.
      */
     void SetSettingsCallback(SettingsChangeCallback callback) {
@@ -83,14 +111,16 @@ public:
 
     // --- Accessors ---
     [[nodiscard]] bool IsSettingsDrawerOpen() const noexcept { return show_settings_drawer_; }
+    [[nodiscard]] bool IsWelcomeGuideVisible() const noexcept;
     [[nodiscard]] float GetOverlayAlpha() const noexcept { return overlay_alpha_; }
 
 private:
-    [[nodiscard]] Core::Common::Status CreateDeviceResources(IDXGISwapChain1* swapChain);
+    [[nodiscard]] Core::Common::Status CreateDeviceResources(IDXGISwapChain1* swapChain, uint32_t backBufferIndex);
     void DiscardDeviceResources();
     void DrawStatusPill(float width, float height);
     void DrawSettingsDrawer(float width, float height);
     void DrawWelcomeGuide(float width, float height);
+    void DrawLogPanel(float width, float height);
 
     Microsoft::WRL::ComPtr<ID2D1Factory> d2d_factory_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_factory_;
@@ -105,6 +135,7 @@ private:
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush_status_orange_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush_slider_track_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush_slider_thumb_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush_log_error_;
 
     // Text Formats
     Microsoft::WRL::ComPtr<IDWriteTextFormat> tf_header_;
@@ -112,13 +143,15 @@ private:
     Microsoft::WRL::ComPtr<IDWriteTextFormat> tf_small_;
 
     // State & Settings
-    mutable std::mutex mutex_;
+    mutable std::recursive_mutex mutex_;
     Application::AppUiState ui_state_{};
     Application::AppSettings settings_{};
     SettingsChangeCallback settings_callback_;
 
     // Swapchain the D2D target is bound to (kept so Draw can self-heal after a resize).
     IDXGISwapChain1* swap_chain_{nullptr};
+    // Index of the swapchain buffer that is the current back buffer.
+    uint32_t back_buffer_index_{0};
 
     // Size (in physical pixels) the current D2D target was created at. Draw()
     // recreates the target whenever the requested size differs, so the target
@@ -127,6 +160,8 @@ private:
     uint32_t target_height_{0};
 
     bool show_settings_drawer_{false};
+    bool show_log_panel_{false};
+    bool show_welcome_guide_{true};
     float overlay_alpha_{1.0f};
     uint64_t last_mouse_interaction_tick_{0};
 
@@ -134,8 +169,16 @@ private:
     D2D1_RECT_F gear_btn_rect_{};
     D2D1_RECT_F drawer_rect_{};
     D2D1_RECT_F drawer_close_btn_rect_{};
+    D2D1_RECT_F welcome_card_rect_{};
+    D2D1_RECT_F welcome_close_btn_rect_{};
+    D2D1_RECT_F log_panel_rect_{};
+    D2D1_RECT_F log_panel_close_btn_rect_{};
     std::vector<SliderItem> sliders_;
+    std::vector<ButtonItem> drawer_buttons_;
     int active_dragging_slider_{-1};
+
+    // Standalone log panel: number of most-recent lines to display.
+    int log_panel_line_count_{12};
 
     bool initialized_{false};
 };

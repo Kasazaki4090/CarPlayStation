@@ -3,9 +3,12 @@
 
 #include <cmath>
 #include <cstring>
+#include <algorithm>
 
 #ifdef _WIN32
 #include <windows.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
 #endif
 
 namespace CarPlayStation::Core::Media {
@@ -31,7 +34,7 @@ int32_t ReadInt24(const uint8_t* p) {
 // ---------------------------------------------------------------------------
 
 Common::Status WasapiAudioPipeline::Start(const Common::AudioOutputFormat& format) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (running_) {
         return Common::MakeError(Common::StatusCode::InvalidState, "Audio pipeline already running");
     }
@@ -53,19 +56,70 @@ Common::Status WasapiAudioPipeline::Start(const Common::AudioOutputFormat& forma
     // remains fully functional and testable.
     wasapiActive_ = false;
 #ifdef _WIN32
-    // The real backend would CoInitialize, enumerate the default render
-    // device, call GetMixFormat() and activate the shared-mode IAudioClient.
-    // We keep the COM surface opaque (void*) and only mark it active when a
-    // device is actually present; otherwise the null renderer is used.
-    wasapiActive_ = false; // null renderer path (no device / headless)
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IMMDeviceEnumerator* enumerator = nullptr;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                  __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator));
+    if (SUCCEEDED(hr) && enumerator) {
+        IMMDevice* device = nullptr;
+        hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+        if (SUCCEEDED(hr) && device) {
+            IAudioClient* client = nullptr;
+            hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&client));
+            if (SUCCEEDED(hr) && client) {
+                WAVEFORMATEX* mixFormat = nullptr;
+                hr = client->GetMixFormat(&mixFormat);
+                if (SUCCEEDED(hr) && mixFormat) {
+                    mixChannels_ = mixFormat->nChannels;
+                    mixBitsPerSample_ = mixFormat->wBitsPerSample;
+                    mixIsFloat_ = false;
+                    if (mixFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
+                        mixIsFloat_ = true;
+                    } else if (mixFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+                        auto* ext = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(mixFormat);
+                        if (ext->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) {
+                            mixIsFloat_ = true;
+                        }
+                    }
+
+                    REFERENCE_TIME bufferDuration = 1000000; // 100ms
+                    hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, bufferDuration, 0, mixFormat, nullptr);
+                    if (SUCCEEDED(hr)) {
+                        IAudioRenderClient* renderClient = nullptr;
+                        hr = client->GetService(__uuidof(IAudioRenderClient), reinterpret_cast<void**>(&renderClient));
+                        if (SUCCEEDED(hr) && renderClient) {
+                            client->Start();
+                            wasapiClient_ = client;
+                            wasapiRender_ = renderClient;
+                            wasapiActive_ = true;
+                            CPS_LOG_INFO("WasapiAudioPipeline", "WASAPI shared-mode endpoint active (",
+                                         std::to_string(mixFormat->nSamplesPerSec), "Hz, ",
+                                         std::to_string(mixFormat->nChannels), "ch, ",
+                                         mixIsFloat_ ? "FLOAT " : "PCM ",
+                                         std::to_string(mixBitsPerSample_), "bit)");
+                        } else {
+                            client->Release();
+                        }
+                    } else {
+                        client->Release();
+                    }
+                    CoTaskMemFree(mixFormat);
+                } else {
+                    client->Release();
+                }
+            }
+            device->Release();
+        }
+        enumerator->Release();
+    }
 #endif
     CPS_LOG_INFO("WasapiAudioPipeline", "started at ", format.sample_rate, "Hz ",
-                 format.channels, "ch (wasapi=", wasapiActive_.load() ? "yes" : "null", ")");
+                 static_cast<int>(format.channels), "ch (wasapi=", wasapiActive_.load() ? "yes" : "null", ")");
     return Common::Status::Ok();
 }
 
 Common::Status WasapiAudioPipeline::Reconfigure(const Common::AudioOutputFormat& format) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!running_) {
         return Common::MakeError(Common::StatusCode::InvalidState, "Audio pipeline not running");
     }
@@ -78,7 +132,7 @@ Common::Status WasapiAudioPipeline::Reconfigure(const Common::AudioOutputFormat&
 }
 
 Common::Status WasapiAudioPipeline::WriteAudio(AudioLane lane, Common::ByteSpan pcmData) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!running_) {
         return Common::MakeError(Common::StatusCode::InvalidState, "Audio pipeline not running");
     }
@@ -99,11 +153,54 @@ Common::Status WasapiAudioPipeline::WriteAudio(AudioLane lane, Common::ByteSpan 
     if (bytesPerSample > 0) {
         renderedSampleCount_ += pcmData.size() / bytesPerSample;
     }
+
+#ifdef _WIN32
+    if (wasapiActive_.load() && wasapiClient_ && wasapiRender_) {
+        auto* client = reinterpret_cast<IAudioClient*>(wasapiClient_);
+        auto* render = reinterpret_cast<IAudioRenderClient*>(wasapiRender_);
+        UINT32 bufferFrameCount = 0;
+        UINT32 paddingFrames = 0;
+        if (SUCCEEDED(client->GetBufferSize(&bufferFrameCount)) &&
+            SUCCEEDED(client->GetCurrentPadding(&paddingFrames))) {
+            UINT32 availableFrames = (bufferFrameCount > paddingFrames) ? (bufferFrameCount - paddingFrames) : 0;
+            size_t sampleCount = samples.size();
+            UINT32 ch = mixChannels_ > 0 ? mixChannels_ : 2;
+            UINT32 inCh = format_.channels > 0 ? format_.channels : 2;
+            UINT32 framesToWrite = static_cast<UINT32>(sampleCount / inCh);
+            if (framesToWrite > availableFrames) {
+                framesToWrite = availableFrames;
+            }
+            if (framesToWrite > 0) {
+                BYTE* pData = nullptr;
+                if (SUCCEEDED(render->GetBuffer(framesToWrite, &pData)) && pData) {
+                    size_t samplesNeeded = framesToWrite * inCh;
+                    std::vector<float> mixed = RenderMixed(samplesNeeded);
+                    if (mixIsFloat_ && mixBitsPerSample_ == 32) {
+                        float* outFloat = reinterpret_cast<float*>(pData);
+                        size_t toCopy = (std::min)(samplesNeeded, mixed.size());
+                        memcpy(outFloat, mixed.data(), toCopy * sizeof(float));
+                    } else if (mixBitsPerSample_ == 16) {
+                        int16_t* out16 = reinterpret_cast<int16_t*>(pData);
+                        size_t toCopy = (std::min)(samplesNeeded, mixed.size());
+                        for (size_t i = 0; i < toCopy; ++i) {
+                            float clamped = std::clamp(mixed[i], -1.0f, 1.0f);
+                            out16[i] = static_cast<int16_t>(clamped * 32767.0f);
+                        }
+                    } else {
+                        memset(pData, 0, framesToWrite * (mixBitsPerSample_ / 8) * ch);
+                    }
+                    render->ReleaseBuffer(framesToWrite, 0);
+                    ClearMixBuffers();
+                }
+            }
+        }
+    }
+#endif
     return Common::Status::Ok();
 }
 
 void WasapiAudioPipeline::SetLaneVolume(AudioLane lane, float volume) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     laneVolumes_[lane] = volume;
 }
 
@@ -112,7 +209,7 @@ void WasapiAudioPipeline::SetDuckingRatio(float ratio) {
 }
 
 AudioCapabilities WasapiAudioPipeline::QueryCapabilities() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     return capabilities_;
 }
 
@@ -121,17 +218,28 @@ uint64_t WasapiAudioPipeline::GetRenderedSampleCount() const noexcept {
 }
 
 void WasapiAudioPipeline::StopLane(AudioLane lane) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     laneStopCounts_[lane]++;
     laneBuffers_[static_cast<size_t>(lane)].clear();
 }
 
 void WasapiAudioPipeline::Shutdown() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     running_ = false;
     wasapiActive_ = false;
-    wasapiClient_ = nullptr;
-    wasapiRender_ = nullptr;
+#ifdef _WIN32
+    if (wasapiClient_) {
+        auto* client = reinterpret_cast<IAudioClient*>(wasapiClient_);
+        client->Stop();
+        client->Release();
+        wasapiClient_ = nullptr;
+    }
+    if (wasapiRender_) {
+        auto* render = reinterpret_cast<IAudioRenderClient*>(wasapiRender_);
+        render->Release();
+        wasapiRender_ = nullptr;
+    }
+#endif
     wasapiEvent_ = nullptr;
     for (auto& buf : laneBuffers_) {
         buf.clear();
@@ -143,7 +251,7 @@ void WasapiAudioPipeline::Shutdown() {
 // ---------------------------------------------------------------------------
 
 void WasapiAudioPipeline::PushLaneSamples(AudioLane lane, const float* samples, size_t sampleCount) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     PushLaneSamplesLocked(lane, samples, sampleCount);
 }
 
@@ -168,7 +276,7 @@ void WasapiAudioPipeline::PushLaneSamplesLocked(AudioLane lane, const float* sam
 }
 
 std::vector<float> WasapiAudioPipeline::RenderMixed(size_t sampleCount) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<float> out(sampleCount, 0.0f);
     for (size_t l = 0; l < kLaneCount; ++l) {
         const auto& buf = laneBuffers_[l];
@@ -190,7 +298,7 @@ std::vector<float> WasapiAudioPipeline::RenderMixed(size_t sampleCount) {
 }
 
 void WasapiAudioPipeline::ClearMixBuffers() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     for (auto& buf : laneBuffers_) {
         buf.clear();
     }
@@ -241,29 +349,29 @@ std::vector<float> WasapiAudioPipeline::ResampleLinear(const float* src, size_t 
 // ---------------------------------------------------------------------------
 
 float WasapiAudioPipeline::GetLaneVolume(AudioLane lane) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = laneVolumes_.find(lane);
     return it != laneVolumes_.end() ? it->second : 0.0f;
 }
 
 uint32_t WasapiAudioPipeline::GetReconfigureCount() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     return reconfigureCount_;
 }
 
 uint32_t WasapiAudioPipeline::GetLaneStopCount(AudioLane lane) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = laneStopCounts_.find(lane);
     return it != laneStopCounts_.end() ? it->second : 0;
 }
 
 Common::AudioOutputFormat WasapiAudioPipeline::GetCurrentFormat() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     return format_;
 }
 
 void WasapiAudioPipeline::SetCapabilities(const AudioCapabilities& caps) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     capabilities_ = caps;
 }
 

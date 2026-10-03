@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "D3D11Renderer.h"
+#include "Core/Common/Logging.h"
 #include <windowsx.h>
 
 namespace CarPlayStation::UI {
@@ -90,14 +91,34 @@ Core::Common::Status MainWindow::Create(const WindowConfig& config) {
     );
 
     if (!hwnd_) {
+        DWORD err = GetLastError();
+        CPS_LOG_ERROR("MainWindow", "CreateWindowExW failed: err=", err);
         return Core::Common::MakeError(Core::Common::StatusCode::IoError,
-            "CreateWindowExW failed: err=" + std::to_string(GetLastError()));
+            "CreateWindowExW failed: err=" + std::to_string(err));
+    }
+    CPS_LOG_INFO("MainWindow", "CreateWindowExW succeeded: HWND=", reinterpret_cast<uintptr_t>(hwnd_),
+                 " rect=", posX, ",", posY, " ", windowWidth, "x", windowHeight);
+
+    // The window frame size depends on the monitor DPI (this process is
+    // Per-Monitor-V2 aware), so the real client area can differ from the
+    // requested config size (AdjustWindowRectEx assumes 96 DPI). Query the
+    // actual client rect so the D3D11 swapchain and the D2D overlay are
+    // created at the true physical client size. Otherwise the backbuffer is
+    // stretched to fit a smaller client area and the overlay hit-test
+    // geometry (settings drawer, sliders, close button) drifts away from the
+    // mouse coordinates, making the drawer contents unclickable.
+    RECT clientRect{};
+    if (GetClientRect(hwnd_, &clientRect) &&
+        clientRect.right > clientRect.left && clientRect.bottom > clientRect.top) {
+        client_width_ = static_cast<uint32_t>(clientRect.right - clientRect.left);
+        client_height_ = static_cast<uint32_t>(clientRect.bottom - clientRect.top);
     }
 
     dpi_ = GetDpiForWindow(hwnd_);
     if (dpi_ == 0) {
         dpi_ = 96;
     }
+    CPS_LOG_INFO("MainWindow", "Client size=", client_width_, "x", client_height_, " DPI=", dpi_);
 
     is_open_ = true;
     prev_style_ = dwStyle;
@@ -111,8 +132,12 @@ void MainWindow::AttachRenderer(D3D11Renderer* renderer) {
 
 void MainWindow::Show(int nCmdShow) {
     if (hwnd_) {
+        CPS_LOG_INFO("MainWindow", "Showing window HWND=", reinterpret_cast<uintptr_t>(hwnd_), " nCmdShow=", nCmdShow);
         ShowWindow(hwnd_, nCmdShow);
         UpdateWindow(hwnd_);
+        SetForegroundWindow(hwnd_);
+    } else {
+        CPS_LOG_WARN("MainWindow", "Show called but hwnd_ is NULL");
     }
 }
 
@@ -178,6 +203,7 @@ bool MainWindow::ProcessMessages() {
 }
 
 void MainWindow::Close() {
+    CPS_LOG_INFO("MainWindow", "Close called, hwnd_=", reinterpret_cast<uintptr_t>(hwnd_));
     if (hwnd_) {
         DestroyWindow(hwnd_);
         hwnd_ = nullptr;
@@ -271,6 +297,7 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         }
 
         case WM_CLOSE: {
+            CPS_LOG_INFO("MainWindow", "WM_CLOSE received for hwnd=", reinterpret_cast<uintptr_t>(hwnd));
             if (close_callback_) {
                 close_callback_();
             }
@@ -279,6 +306,7 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         }
 
         case WM_DESTROY: {
+            CPS_LOG_INFO("MainWindow", "WM_DESTROY received for hwnd=", reinterpret_cast<uintptr_t>(hwnd));
             hwnd_ = nullptr;
             is_open_ = false;
             PostQuitMessage(0);

@@ -47,6 +47,7 @@ private:
     OverlayRenderer* overlay_{nullptr};
 
     bool is_mouse_down_{false};
+    bool is_overlay_capturing_{false};
     float last_norm_x_{0.5f};
     float last_norm_y_{0.5f};
 };

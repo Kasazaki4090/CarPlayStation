@@ -8,6 +8,7 @@ ProjectManagementTemplate/
 /.vscode
 /cmake
 /Lib/ffmpeg
+/Lib/mpv
 /Tests
 /Tests
 /Tests
@@ -17,3 +18,5 @@ Tests/HardwareTests.cpp
 Tests/SessionTests.cpp
 Tests/TransportTests.cpp
 build.bat
+/_wer_dump
+carplay_pairings.json

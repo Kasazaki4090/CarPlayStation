@@ -76,6 +76,54 @@ Historical information belongs in:
 
 ## Current TODO
 
+### 🚨 2026-10-03 Real-Device Urgent Hotfixes (P0 Urgent)
+
+Derived from live run logs (`carplaystation.log`) and real-device testing issues:
+
+1. **OverlayRenderer Mutex Deadlock & UI Freeze Fix** (`BUG-005` — Settings panel freeze / cannot click or close after opening)
+   - [x] **P0** Change `OverlayRenderer::mutex_` to `std::recursive_mutex` and dispatch `settings_callback_` outside the lock guard to eliminate recursive deadlock where `OnMouseDown` -> `settings_callback_` -> `ApplySettings` -> `UpdateUiState` re-enters the mutex and freezes the UI thread.
+   - [x] **P0** Decouple slider dragging: update in-memory volume gain smoothly during `WM_MOUSEMOVE` without invoking synchronous `ApplySettings` and synchronous INI disk writes on every single pixel movement; trigger `settings_callback_` on `WM_LBUTTONUP` (debounced).
+
+2. **Window Close & Exit Thread Join Deadlock Fix** (`BUG-001` — Closing window permanently hangs)
+   - [x] **P0** Track all active client connection sockets in `AirPlayVideoReceiver`; in `Stop()`, actively invoke `shutdown(sock, SD_BOTH)` and `closesocket` on all client sockets before joining threads so `TcpClientWorker` unblocks immediately from `recv()` instead of hanging indefinitely on `th.join()`.
+   - [x] **P0** Configure receive timeout (`SO_RCVTIMEO` 1000ms) on `AirPlayVideoReceiver` client sockets to prevent hung worker threads.
+   - [x] **P0** Fix settings drawer close button [✕] hit testing and mouse capture: call Win32 `SetCapture` on `WM_LBUTTONDOWN` inside drawer/sliders and `ReleaseCapture` on `WM_LBUTTONUP`; enlarge close button click hotzone and support Esc / click-outside dismiss.
+
+3. **Video Stream Reception & Decryption Pipeline Fix** (`BUG-003` — No incoming video, stuck on Welcome Card)
+   - [x] **P0** Fix RTSP stream encryption key notification timing: in `AirPlayRtspServer::HandleSetup` (SETUP Phase 2 Streams, CSeq=14), notify `CarPlayCoreService` and immediately pass derived `video_decrypt_key` to `video_receiver_->SetDecryptionKey(key)` so ChaCha20-Poly1305 ciphertext frames are properly decrypted before NALU demuxing.
+   - [x] **P0** Fix session state machine transition for Mobile Hotspot reconnection: relax `CarPlaySessionStateMachine::OnWifiConnected` and `OnAirPlayStreamingStarted` preconditions to accept paired iPhone reconnects from `Idle` state, updating `ui_state_.is_streaming` to `true` and hiding the Welcome Guide card overlay.
+   - [x] **P0** After SETUP Phase 2 establishes video streams, send `takeScreen` and `forceKeyFrame` commands over the RTSP event channel to trigger iPhone video frame transmission.
+
+4. **Audio Pipeline Initialization & WASAPI Device Output** (`BUG-002` — Volume cannot be adjusted / no sound)
+   - [x] **P0** Add `audio_pipeline_->Start(default_format)` call in `CarPlayCoreService::Start()` so `audio_pipeline_->IsRunning()` is true and `ApplySettings` -> `Reconfigure` no longer fails with `Audio pipeline not running`.
+   - [x] **P1** Implement real Windows WASAPI Shared Mode playback engine (`IAudioClient` + `IAudioRenderClient`) in `WasapiAudioPipeline.cpp` to output 3-Lane mixed PCM audio to the default Windows playback device with adaptive format handling (IEEE Float 32-bit & PCM 16-bit).
+
+5. **UI Video Resolution & Display Settings Drawer** (`BUG-004` — Missing video resolution settings)
+   - [x] **P0** Expand `OverlayRenderer` Settings Drawer into a comprehensive settings panel with a dedicated **Video & Display** section (support resolution selection: 1280x720 720p / 1920x1080 1080p / 2560x1440 2K, FPS: 60/30, and Codec: H.264/HEVC).
+   - [x] **P1** Wire resolution changes to `ApplicationService::ApplySettings` -> `decoder->Reconfigure(spec)` to adapt window viewport and decoder stream spec dynamically.
+
+6. **iPhone Port 7100 Video Stream Teardown & Event Command Timing** (`BUG-006` — Black screen due to iPhone tearing down video connection 9ms after connect)
+   - [x] **P0** Move event channel commands (`takeScreen` and `forceKeyFrame`) to send AFTER the RTSP 200 OK response has been transmitted to avoid client-side race conditions in iOS.
+   - [x] **P0** Add verbose payload logging (hex + ASCII) for `POST /command`, `TEARDOWN`, and event channel incoming frames.
+   - [x] **P0** Add socket error reporting (`WSAGetLastError()`), partial byte counts, and packet header dumps in `AirPlayVideoReceiver::TcpClientWorker`.
+
+7. **Screen Stream Negotiation & Welcome Guide Dismissal** (`BUG-007` — Persistent Welcome Card)
+   - [x] **P0** Fix RTSP connection lifecycle: remove premature socket shutdown (`break;`) on `RtspMethod::Teardown` in `ClientWorker` so RTSP control channel stays alive.
+   - [x] **P0** Fix `unborrowConstraint` in `/info` and `changeModes` commands for standard CarPlay resource arbitration.
+   - [x] **P0** Fix Welcome Guide Card dismissal: add [X] close button, support ESC key dismissal, and hide card once video streaming starts or user dismisses it.
+
+8. **Standards Compliance for Screen Stream SETUP Phase 2 & Bplist Parsing** (`BUG-008` — Discovered from local `carplayd` & `xcertplay` reference implementations)
+   - [x] **P0** Implement standard `BplistDecoder` in [Bplist.h](file:///d:/CarPlayStation/Core/Session/Pairing/Bplist.h) to cleanly and correctly parse incoming binary plists from iPhone, eliminating random memory reads during `streamConnectionID` key extraction.
+   - [x] **P0** Fix RTSP SETUP Phase 2 response for Screen (type 110): per reference implementations (`carplayd/session.rs`, `xcertplay/AirPlaySession.kt`, and genuine Apple capture `c_flow_chatty.log`), the response for screen MUST ONLY contain `type: 110` and `dataPort: 7100`. Removed `controlPort: 7101`, `uuid`, and `streamConnectionID` from the stream dict, and removed `eventPort`/`timingPort` from the Phase 2 root dict, which previously triggered iOS schema validation rejection and immediate stream `TEARDOWN`.
+   - [x] **P0** Enhanced [AirPlayVideoReceiver.cpp](file:///d:/CarPlayStation/Core/Media/AirPlayVideoReceiver.cpp): enabled `TCP_NODELAY` and `SO_KEEPALIVE` on video socket, added full 128-byte header hex dump, verbose logging on `bodySize == 0` headers, robust boxed/unboxed avcC parsing, and real-time frame decode rate statistics.
+
+9. **RTSP POST /command Response & Comprehensive Diagnostic Logging** (`BUG-009` — iOS aborts stream due to unhandled /command response)
+   - [x] **P0** Implement dedicated `HandleCommand` in [`AirPlayRtspServer.cpp`](file:///d:/CarPlayStation/Core/Session/AirPlayRtspServer.cpp): when iPhone sends `POST /command` (e.g. `modesChanged`, `disableBluetooth`), decode the command type and return HTTP 200 OK with `Content-Type: application/x-apple-binary-plist` and the exact 42-byte standard empty bplist `{}` matching Apple CarPlay CCPA and `carplayd` reference `c_flow_chatty.log`. Previously, unrouted `/command` fell into the default handler which returned a bare response with no body and no `Content-Type`, causing iOS to abort the TCP 7100 screen stream within 3ms.
+   - [x] **P0** Cleaned up resource constraints: removed non-standard `unborrowConstraint` in `/info` and `SendTakeScreen` to adhere to Apple AirPlay specification.
+   - [x] **P0** Added comprehensive real-time logging in [`AirPlayVideoReceiver.cpp`](file:///d:/CarPlayStation/Core/Media/AirPlayVideoReceiver.cpp): per-frame NAL unit type extraction (IDR keyframe 5 vs non-IDR slices 1), H.264 (avcC) & HEVC (hvcC) parameter decoding, decrypted payload sizing, and 1-second rolling FPS/bitrate metrics.
+
+---
+
 Project-wide review completed on 2026-10-01:
 - **Phase 1 基本目标已全面达成**：全栈 8 个分区（Core/Hardware, Core/Transport, Core/Protocol, Core/Session, Core/Media, Core/Input, Core/Service + Application, UI/Win32）已 100% 研发完成并通过自动化单元测试与端到端无头集成测试。
 - **全量测试通过率 100%**：9/9 测试套件（Common, Hardware, Transport, Protocol, Session, Media, Input, Service, Ui）全部通过验证（耗时 ~3.32s）。

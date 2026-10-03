@@ -77,6 +77,11 @@ public:
     [[nodiscard]] ID3D11DeviceContext* GetContext() const noexcept { return context_.Get(); }
     [[nodiscard]] IDXGISwapChain1* GetSwapChain() const noexcept { return swap_chain_.Get(); }
     [[nodiscard]] ViewportRect GetCurrentViewport() const noexcept { return current_viewport_; }
+    // Index of the swapchain buffer that is the current back buffer. For a
+    // flip-model swapchain this is BufferCount-1 (buffer 0 is the front buffer
+    // on screen); for a discard-model swapchain it is 0. Both the D3D11 video
+    // and the D2D overlay must draw into this buffer, and Present() flips it.
+    [[nodiscard]] uint32_t GetBackBufferIndex() const noexcept { return back_buffer_index_; }
     [[nodiscard]] uint64_t GetPresentedFrameCount() const noexcept { return presented_frame_count_; }
     [[nodiscard]] bool HasActiveFrame() const noexcept { return active_frame_available_; }
 
@@ -111,6 +116,7 @@ private:
     Microsoft::WRL::ComPtr<IDXGIKeyedMutex> current_keyed_mutex_;
 
     mutable std::mutex frame_mutex_;
+    uint32_t back_buffer_index_{0};
     bool active_frame_available_{false};
     uint64_t presented_frame_count_{0};
     bool initialized_{false};

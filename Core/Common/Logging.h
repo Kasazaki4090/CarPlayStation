@@ -103,6 +103,14 @@ public:
         }
     }
 
+    // Accept a raw pointer (e.g. a process-wide singleton sink) and keep it
+    // alive with a no-op deleter, since the caller owns its lifetime.
+    void Add(ILogSink* sink) {
+        if (sink) {
+            sinks_.emplace_back(sink, [](ILogSink*) {});
+        }
+    }
+
     void Write(LogLevel level, std::string_view tag, const std::string& message) override {
         for (auto& s : sinks_) {
             s->Write(level, tag, message);
@@ -111,6 +119,53 @@ public:
 
 private:
     std::vector<std::shared_ptr<ILogSink>> sinks_;
+};
+
+// In-memory ring buffer of the most recent log lines. Backs the GUI log panel:
+// the UI reads a snapshot each frame, so the panel is a pure consumer and never
+// blocks the logging path. Kept as a process-wide singleton so any module can
+// register it into a MultiLogSink and the overlay can read it without wiring.
+class RingBufferLogSink final : public ILogSink {
+public:
+    static RingBufferLogSink& Instance() noexcept {
+        static RingBufferLogSink instance;
+        return instance;
+    }
+
+    void Write(LogLevel level, std::string_view tag, const std::string& message) override {
+        std::lock_guard lock(mutex_);
+        const std::string line =
+            "[" + NowStamp() + "] [" + std::string(LogLevelToString(level)) + "] [" +
+            std::string(tag) + "] " + message;
+        buffer_.push_back(std::move(line));
+        if (buffer_.size() > kCapacity) {
+            buffer_.erase(buffer_.begin(),
+                          buffer_.begin() + static_cast<std::ptrdiff_t>(buffer_.size() - kCapacity));
+        }
+    }
+
+    // Returns a copy of the most recent lines, oldest first. maxLines == 0 means
+    // "all buffered lines".
+    std::vector<std::string> Snapshot(std::size_t maxLines = 0) const {
+        std::lock_guard lock(mutex_);
+        if (maxLines == 0 || maxLines >= buffer_.size()) {
+            return buffer_;
+        }
+        return std::vector<std::string>(buffer_.end() - static_cast<std::ptrdiff_t>(maxLines),
+                                         buffer_.end());
+    }
+
+    void Clear() {
+        std::lock_guard lock(mutex_);
+        buffer_.clear();
+    }
+
+private:
+    RingBufferLogSink() = default;
+
+    static constexpr std::size_t kCapacity = 500;
+    mutable std::mutex mutex_;
+    std::vector<std::string> buffer_;
 };
 
 } // namespace detail

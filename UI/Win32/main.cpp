@@ -8,6 +8,8 @@
 #include <string.h>
 #include <windows.h>
 #include <shellapi.h>
+#include <dbghelp.h>
+#include <cstdio>
 
 namespace {
 // Route all log output to a file next to the executable (append mode) so the
@@ -35,7 +37,56 @@ void AttachFileLogSink() {
     auto multi = std::make_shared<CarPlayStation::Core::Common::detail::MultiLogSink>();
     multi->Add(std::make_shared<CarPlayStation::Core::Common::detail::ConsoleLogSink>());
     multi->Add(std::make_shared<CarPlayStation::Core::Common::detail::FileLogSink>(logPath));
+    // Also feed the in-memory ring buffer that the GUI log panel renders, so
+    // background activity is visible inside the app (kept separate from the
+    // video/HUD, per the "单独分开放" requirement).
+    multi->Add(&CarPlayStation::Core::Common::detail::RingBufferLogSink::Instance());
     logger.SetSink(multi);
+}
+
+// Install a top-level exception filter that writes a full minidump next to the
+// executable on any unhandled exception (e.g. heap corruption). This lets us
+// capture the real crash stack in a normal (non-debugger) run, where the
+// debugger's timing masks the race.
+LONG WINAPI CrashDumpFilter(EXCEPTION_POINTERS* ep) {
+    (void)ep;
+    wchar_t exePath[MAX_PATH] = { 0 };
+    if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    std::wstring dir(exePath);
+    const auto pos = dir.find_last_of(L"\\/");
+    if (pos != std::wstring::npos) {
+        dir.resize(pos + 1);
+    }
+    std::wstring dumpPath = dir + L"crash_dump.dmp";
+    HANDLE hFile = CreateFileW(dumpPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD pid = GetCurrentProcessId();
+        MINIDUMP_EXCEPTION_INFORMATION info{};
+        info.ExceptionPointers = ep;
+        info.ThreadId = pid;
+        // Numeric MINIDUMP_TYPE flags (the SDK's dbghelp.h predates the named
+        // constants): FULL_MEMORY | THREAD_CONTEXTS | STACKS | MODULE_LIST |
+        // HANDLE_TABLE.
+        const MINIDUMP_TYPE kFull =
+            static_cast<MINIDUMP_TYPE>(0x00000001 | 0x00000010 | 0x00000002 | 0x00000008 | 0x00000040);
+        if (!MiniDumpWriteDump(GetCurrentProcess(), pid, hFile, kFull,
+                               &info, nullptr, nullptr)) {
+            // Fall back to a smaller dump if the full one fails.
+            const MINIDUMP_TYPE kSmall =
+                static_cast<MINIDUMP_TYPE>(0x00000002 | 0x00000008);
+            MiniDumpWriteDump(GetCurrentProcess(), pid, hFile, kSmall, &info, nullptr, nullptr);
+        }
+        CloseHandle(hFile);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void InstallCrashDumpHandler() {
+    // dbghelp.dll is loaded on demand; the loader resolves MiniDumpWriteDump.
+    SetUnhandledExceptionFilter(CrashDumpFilter);
 }
 
 // Returns true if the current process is running with administrator privileges.
@@ -57,6 +108,9 @@ bool IsElevated() {
 int main(int argc, char* argv[]) {
     // 0. Attach a file log sink so background activity is captured to disk.
     AttachFileLogSink();
+
+    // 0b. Install a minidump writer so a crash in a normal run is captured.
+    InstallCrashDumpHandler();
 
     if (IsElevated()) {
         CPS_LOG_INFO("CarPlayStation", "Process privilege: Administrator.");
@@ -95,6 +149,7 @@ int main(int argc, char* argv[]) {
         CoUninitialize();
         return (status.Code() == CarPlayStation::Core::Common::StatusCode::Unavailable) ? 0 : 1;
     }
+    CPS_LOG_INFO("CarPlayStation", "Controller initialized successfully. Entering UI loop...");
 
     // 4. Run UI Loop
     int exitCode = 0;
@@ -106,6 +161,7 @@ int main(int argc, char* argv[]) {
         controller.Shutdown();
     }
 
+    CPS_LOG_INFO("CarPlayStation", "UI loop exited with code ", exitCode);
     CoUninitialize();
     return exitCode;
 }

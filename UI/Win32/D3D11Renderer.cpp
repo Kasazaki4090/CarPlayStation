@@ -114,6 +114,11 @@ Core::Common::Status D3D11Renderer::Init(HWND hwnd, uint32_t initialWidth, uint3
         return Core::Common::MakeError(Core::Common::StatusCode::MediaPipelineError, "Get IDXGIFactory2 failed");
     }
 
+    // DISCARD + BufferCount=2 is the canonical configuration for D3D11 +
+    // Direct2D interop: the back buffer is buffer 0, which both the D3D11
+    // video pass and the D2D overlay render into, and Present() flips it.
+    // (A flip-model swapchain's back buffer cannot be used to create a D3D11
+    // render-target view, so it is not suitable for this interop pattern.)
     DXGI_SWAP_CHAIN_DESC1 scDesc{};
     scDesc.Width = client_width_;
     scDesc.Height = client_height_;
@@ -123,7 +128,7 @@ Core::Common::Status D3D11Renderer::Init(HWND hwnd, uint32_t initialWidth, uint3
     scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     scDesc.BufferCount = 2;
     scDesc.Scaling = DXGI_SCALING_STRETCH;
-    scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    scDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
     scDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
 
     hr = dxgiFactory->CreateSwapChainForHwnd(
@@ -134,26 +139,24 @@ Core::Common::Status D3D11Renderer::Init(HWND hwnd, uint32_t initialWidth, uint3
         nullptr,
         &swap_chain_
     );
-
-    // Fallback for older Windows if FLIP_DISCARD is not supported
     if (FAILED(hr)) {
-        scDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-        hr = dxgiFactory->CreateSwapChainForHwnd(
-            device_.Get(),
-            hwnd_,
-            &scDesc,
-            nullptr,
-            nullptr,
-            &swap_chain_
-        );
-        if (FAILED(hr)) {
-            return Core::Common::MakeError(Core::Common::StatusCode::MediaPipelineError,
-                "CreateSwapChainForHwnd failed: hr=0x" + std::to_string(static_cast<uint32_t>(hr)));
-        }
+        return Core::Common::MakeError(Core::Common::StatusCode::MediaPipelineError,
+            "CreateSwapChainForHwnd failed: hr=0x" + std::to_string(static_cast<uint32_t>(hr)));
     }
 
     // Prevent DXGI from monitoring Alt+Enter automatically (we handle it in Win32)
     dxgiFactory->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER);
+
+    // For a flip-model swapchain the back buffer (the one Present() flips to
+    // the screen) is the LAST buffer, not buffer 0. Buffer 0 is the front
+    // buffer currently on screen. Drawing into buffer 0 on a flip-model
+    // swapchain renders into the on-screen buffer, which is never presented,
+    // so the window stays black. For a discard-model swapchain the back
+    // buffer is buffer 0.
+    back_buffer_index_ = (scDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL ||
+                          scDesc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD)
+                             ? scDesc.BufferCount - 1
+                             : 0;
 
     // 3. Create Render Target View
     auto rtStatus = CreateRenderTarget();
@@ -177,14 +180,18 @@ Core::Common::Status D3D11Renderer::CreateRenderTarget() {
     }
 
     ComPtr<ID3D11Texture2D> backBuffer;
-    HRESULT hr = swap_chain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+    HRESULT hr = swap_chain_->GetBuffer(back_buffer_index_, IID_PPV_ARGS(&backBuffer));
     if (FAILED(hr)) {
-        return Core::Common::MakeError(Core::Common::StatusCode::MediaPipelineError, "GetBuffer(0) failed");
+        return Core::Common::MakeError(Core::Common::StatusCode::MediaPipelineError,
+            "GetBuffer(" + std::to_string(back_buffer_index_) + ") failed");
     }
 
     hr = device_->CreateRenderTargetView(backBuffer.Get(), nullptr, &render_target_view_);
     if (FAILED(hr)) {
-        return Core::Common::MakeError(Core::Common::StatusCode::MediaPipelineError, "CreateRenderTargetView failed");
+        return Core::Common::MakeError(Core::Common::StatusCode::MediaPipelineError,
+            "CreateRenderTargetView failed: hr=0x" +
+            std::to_string(static_cast<unsigned long>(hr)) +
+            " (back_buffer_index=" + std::to_string(back_buffer_index_) + ")");
     }
 
     return Core::Common::Status::Ok();
@@ -284,7 +291,12 @@ Core::Common::Status D3D11Renderer::Resize(uint32_t newWidth, uint32_t newHeight
             "ResizeBuffers failed: hr=0x" + std::to_string(static_cast<uint32_t>(hr)));
     }
 
-    return CreateRenderTarget();
+    auto rtStatus = CreateRenderTarget();
+    if (rtStatus.IsError()) {
+        CPS_LOG_ERROR("D3D11Renderer", "Resize: CreateRenderTarget failed after ResizeBuffers (",
+            rtStatus.Message(), ")");
+    }
+    return rtStatus;
 }
 
 void D3D11Renderer::ConsumeFrame(uintptr_t textureHandle, uint32_t width, uint32_t height, uint64_t ptsUs) {
@@ -303,7 +315,7 @@ void D3D11Renderer::ConsumeFrame(uintptr_t textureHandle, uint32_t width, uint32
         if (textureHandle != last_texture_handle_) {
             UpdateSharedTexture(textureHandle, width, height);
         }
-        if (!active_frame_available_) {
+        if (current_srv_ && !active_frame_available_) {
             active_frame_available_ = true;
             Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Info, "D3D11Renderer",
                 "First frame consumed by renderer, size=", std::to_string(width), "x", std::to_string(height));
@@ -321,7 +333,8 @@ void D3D11Renderer::UpdateSharedTexture(uintptr_t handle, uint32_t width, uint32
     current_srv_.Reset();
     current_keyed_mutex_.Reset();
     current_texture_.Reset();
-    last_texture_handle_ = handle;
+    active_frame_available_ = false;
+    last_texture_handle_ = 0;
 
     // 1. Try to open as shared resource handle
     ComPtr<ID3D11Texture2D> sharedTex;
@@ -359,13 +372,39 @@ void D3D11Renderer::UpdateSharedTexture(uintptr_t handle, uint32_t width, uint32
     hr = device_->CreateShaderResourceView(current_texture_.Get(), &srvDesc, &current_srv_);
     if (FAILED(hr)) {
         // Fallback with null desc for default SRV
-        device_->CreateShaderResourceView(current_texture_.Get(), nullptr, &current_srv_);
+        hr = device_->CreateShaderResourceView(current_texture_.Get(), nullptr, &current_srv_);
     }
+    if (FAILED(hr)) {
+        Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Error, "D3D11Renderer",
+            "CreateShaderResourceView failed: hr=0x", std::to_string(static_cast<unsigned long>(hr)));
+        current_texture_.Reset();
+        current_keyed_mutex_.Reset();
+        return;
+    }
+
+    // Only remember a handle after it has been opened and made renderable.
+    // Otherwise later frame callbacks with the same handle must retry.
+    last_texture_handle_ = handle;
 }
 
 Core::Common::Status D3D11Renderer::Render(bool autoPresent) {
-    if (!initialized_ || !context_ || !render_target_view_) {
+    if (!initialized_ || !context_) {
         return Core::Common::MakeError(Core::Common::StatusCode::InvalidState, "Renderer not initialized");
+    }
+    // Self-heal: if the render-target view was invalidated (e.g. by a D2D
+    // device reset or a resize that failed to recreate it), rebuild it from
+    // the current back buffer so the video quad can be drawn again.
+    if (!render_target_view_) {
+        auto rtStatus = CreateRenderTarget();
+        if (rtStatus.IsError()) {
+            static uint32_t rt_fail_count = 0;
+            if (rt_fail_count < 3 || (rt_fail_count % 300) == 0) {
+                CPS_LOG_WARN("D3D11Renderer", "Render: RTV self-heal failed (", rtStatus.Message(), ")");
+            }
+            ++rt_fail_count;
+            return Core::Common::MakeError(Core::Common::StatusCode::InvalidState, "RTV unavailable");
+        }
+        CPS_LOG_INFO("D3D11Renderer", "Render: RTV self-healed (recreated)");
     }
 
     // 1. Clear backbuffer to solid black (Letterbox bars)
@@ -442,6 +481,7 @@ Core::Common::Status D3D11Renderer::Present() {
         if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
             return Core::Common::MakeError(Core::Common::StatusCode::Unavailable, "Device removed or reset");
         }
+        CPS_LOG_WARN("D3D11Renderer", "Present failed (hr=0x", std::to_string(static_cast<unsigned>(hr)), ", count=", presented_frame_count_);
     }
 
     presented_frame_count_++;

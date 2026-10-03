@@ -252,22 +252,41 @@ Common::Status CarPlaySessionStateMachine::OnIap2Authenticated(
 }
 
 Common::Status CarPlaySessionStateMachine::OnWifiConnected(const Common::MacAddress& client_mac, std::string_view client_ip) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (state_ != SessionState::WifiHandoff) {
-        CPS_LOG_WARN("SessionSM", "OnWifiConnected rejected: state is not WifiHandoff (state=",
-                     static_cast<int>(state_), ") — station re-joined outside the iAP2 handoff path");
-        return Common::MakeError(Common::StatusCode::InvalidState, "Station connected outside WifiHandoff state");
+    std::vector<SessionStateObserver> observers_to_notify;
+    SessionState old_state = SessionState::Idle;
+    bool should_notify = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (state_ != SessionState::WifiHandoff) {
+            if (state_ == SessionState::Idle || state_ == SessionState::BtDiscovered) {
+                CPS_LOG_INFO("SessionSM", "OnWifiConnected: device reconnected on Wi-Fi from state ",
+                             static_cast<int>(state_), ", transitioning to WifiHandoff");
+                old_state = state_;
+                state_ = SessionState::WifiHandoff;
+                active_session_.state_entered_time = std::chrono::steady_clock::now();
+                observers_to_notify = observers_;
+                should_notify = true;
+            } else {
+                CPS_LOG_WARN("SessionSM", "OnWifiConnected rejected: state is not WifiHandoff (state=",
+                             static_cast<int>(state_), ") — station re-joined outside the iAP2 handoff path");
+                return Common::MakeError(Common::StatusCode::InvalidState, "Station connected outside WifiHandoff state");
+            }
+        }
+
+        active_session_.wifi_mac = client_mac;
+        if (deps_.pairing_store && !active_session_.device_id.empty()) {
+            auto dev_res = deps_.pairing_store->GetDevice(active_session_.device_id);
+            if (dev_res.IsOk()) {
+                auto dev = dev_res.Value();
+                dev.wifi_mac = client_mac;
+                dev.last_connected_timestamp = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                deps_.pairing_store->SaveDevice(dev);
+            }
+        }
     }
 
-    active_session_.wifi_mac = client_mac;
-    if (deps_.pairing_store && !active_session_.device_id.empty()) {
-        auto dev_res = deps_.pairing_store->GetDevice(active_session_.device_id);
-        if (dev_res.IsOk()) {
-            auto dev = dev_res.Value();
-            dev.wifi_mac = client_mac;
-            dev.last_connected_timestamp = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-            deps_.pairing_store->SaveDevice(dev);
-        }
+    if (should_notify) {
+        DispatchObservers(observers_to_notify, old_state, SessionState::WifiHandoff, Common::Status::Ok());
     }
 
     // Station joined! Trigger immediate mDNS announcement burst and target unicast!
@@ -286,8 +305,11 @@ Common::Status CarPlaySessionStateMachine::OnAirPlayStreamingStarted(const Negot
     SessionState old_state;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (state_ != SessionState::WifiHandoff && state_ != SessionState::Paused && state_ != SessionState::Reconnecting) {
-            CPS_LOG_WARN("SessionSM", "OnAirPlayStreamingStarted rejected: current state is not WifiHandoff/Paused/Reconnecting (state=",
+        if (state_ != SessionState::WifiHandoff && state_ != SessionState::Paused &&
+            state_ != SessionState::Reconnecting && state_ != SessionState::AirPlayStreaming &&
+            state_ != SessionState::Idle && state_ != SessionState::BtDiscovered &&
+            state_ != SessionState::iAP2Authenticated) {
+            CPS_LOG_WARN("SessionSM", "OnAirPlayStreamingStarted rejected: current state is not valid for streaming (state=",
                          static_cast<int>(state_), ")");
             return Common::MakeError(Common::StatusCode::InvalidState, "Cannot start streaming from current state");
         }

@@ -35,19 +35,16 @@ target_include_directories(CarPlayStation PRIVATE
 
 target_link_libraries(CarPlayStation PRIVATE
     CarPlayUI
+    dbghelp
 )
 
 target_compile_features(CarPlayStation PRIVATE cxx_std_20)
 
-# CMake auto-embeds its own default manifest (resource ID 1) at link time.
-# Replace it with the UAC manifest (requireAdministrator) so the AF_BTH RFCOMM
-# Bluetooth server socket can bind. This is done post-build with mt.exe, which
-# avoids the duplicate-resource (CVT1100) error that a .rc RT_MANIFEST would
-# cause alongside CMake's embedded manifest.
+# Embed application manifest (asInvoker) into CarPlayStation.exe.
 add_custom_command(TARGET CarPlayStation POST_BUILD
     COMMAND ${CMAKE_MT} -manifest ${CMAKE_CURRENT_SOURCE_DIR}/CarPlayStation.manifest
             -outputresource:$<TARGET_FILE:CarPlayStation>\;1
-    COMMENT "Embedding UAC manifest (requireAdministrator) into CarPlayStation.exe"
+    COMMENT "Embedding application manifest (asInvoker) into CarPlayStation.exe"
 )
 
 if(WIN32)
