@@ -998,8 +998,17 @@ private:
         disp.emplace_back("maxFPS", BplistValue(60));
         disp.emplace_back("widthPixels", BplistValue(static_cast<int64_t>(options_.default_video_width)));
         disp.emplace_back("heightPixels", BplistValue(static_cast<int64_t>(options_.default_video_height)));
-        disp.emplace_back("widthPhysical", BplistValue(240));
-        disp.emplace_back("heightPhysical", BplistValue(90));
+        // widthPhysical/heightPhysical describe the physical shape of the screen.
+        // The phone uses that shape to lay out the CarPlay UI, then encodes it
+        // into widthPixels x heightPixels. If the two aspect ratios disagree the
+        // phone's layout gets squashed into the video (with 240x90 the icons came
+        // out 1.5x too tall), so keep the physical size proportional to pixels.
+        const int64_t physical_w = 240;
+        const int64_t physical_h = (physical_w * static_cast<int64_t>(options_.default_video_height) +
+                                    static_cast<int64_t>(options_.default_video_width) / 2) /
+                                   static_cast<int64_t>(options_.default_video_width);
+        disp.emplace_back("widthPhysical", BplistValue(physical_w));
+        disp.emplace_back("heightPhysical", BplistValue(physical_h));
         disp.emplace_back("type", BplistValue(110));
         BplistArray disp_arr;
         disp_arr.push_back(BplistValue(disp));

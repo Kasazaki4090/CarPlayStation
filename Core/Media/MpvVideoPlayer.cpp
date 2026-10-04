@@ -457,12 +457,18 @@ void MpvVideoPlayer::RenderThreadMain() {
                 std::lock_guard<std::mutex> lk(stream_mutex_);
                 curAvail = ring_size_;
             }
+            // dwidth/dheight are the size of the decoded picture (after sample
+            // aspect), spec is what we asked mpv to scale it into. A mismatch in
+            // aspect means the SW render below is squashing the picture.
             CPS_LOG_INFO("MpvVideoPlayer", "DIAG: demuxer=", dumpProp("demuxer"),
                          " decoder=", dumpProp("decoder"),
                          " video-codec=", dumpProp("video-codec"),
                          " cache=", dumpProp("demuxer-cache-duration"),
                          " ringAvail=", std::to_string(curAvail),
-                         " decoded=", std::to_string(decoded_frames_.load()));
+                         " decoded=", std::to_string(decoded_frames_.load()),
+                         " decodedSize=", dumpProp("dwidth"), "x", dumpProp("dheight"),
+                         " dar=", dumpProp("video-aspect"),
+                         " spec=", std::to_string(spec_.width), "x", std::to_string(spec_.height));
         }
 
         // Check if a new frame needs rendering.
