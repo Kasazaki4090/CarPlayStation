@@ -1,5 +1,6 @@
 #include "Core/Media/MicrophoneRtpSender.h"
 #include "Core/Common/Logging.h"
+#include "Core/Session/Pairing/Crypto.h"
 #include <cstring>
 
 #ifdef _WIN32
@@ -36,15 +37,41 @@ Common::Status MicrophoneRtpSender::Start(const MicrophoneRtpConfig& config) {
     }
 
     config_ = config;
+
+    seq_ = 0;
+    ts_ = 0;
+    packets_sent_ = 0;
+    nonce_counter_ = 0;
+    sample_accumulator_.clear();
+
+    if (config_.aac_eld) {
+        // The C reference receiver encodes the mic at AAC-ELD 16 kHz mono,
+        // 24 kbps, 480-sample frames. Frame length comes from the encoder.
+        AudioStreamFormat enc{};
+        enc.codec = AudioCodecKind::AacEld;
+        enc.sample_rate = config_.sample_rate;
+        enc.channels = static_cast<uint8_t>(config_.channels);
+        enc.bitrate_bps = config_.bitrate_bps ? config_.bitrate_bps : 24000;
+        encoder_ = std::make_unique<AacAudioEncoder>();
+        if (!encoder_->Open(enc)) {
+            encoder_.reset();
+            return Common::MakeError(Common::StatusCode::IoError, "Failed to open AAC-ELD encoder for microphone uplink");
+        }
+        config_.packet_samples = encoder_->frame_size();
+        CPS_LOG_INFO("MicrophoneRtpSender", "AAC-ELD uplink encoder open: rate=", config_.sample_rate,
+                     " ch=", static_cast<int>(config_.channels), " bitrate=", enc.bitrate_bps,
+                     " frame=", encoder_->frame_size(), " asc=",
+                     Common::ToHexString(Common::ByteSpan(encoder_->audio_specific_config().data(),
+                                                         encoder_->audio_specific_config().size())),
+                     " encrypted=", config_.encrypted ? 1 : 0);
+    }
+
     if (config_.packet_samples == 0) {
         config_.packet_samples = 320; // Default ~20ms @ 16kHz
     }
 
-    sample_accumulator_.clear();
     sample_accumulator_.reserve(config_.packet_samples * 2);
-    seq_ = 0;
-    ts_ = 0;
-    packets_sent_ = 0;
+    send_buffer_.reserve(1536);
 
 #ifdef _WIN32
     WSADATA wsa_data;
@@ -78,8 +105,8 @@ Common::Status MicrophoneRtpSender::Start(const MicrophoneRtpConfig& config) {
     socket_ = static_cast<uintptr_t>(sock);
     running_ = true;
 
-    CPS_LOG_INFO("MicrophoneRtpSender started on local UDP port %u -> %s:%u",
-                 bound_port_, config_.destination_ip.c_str(), config_.destination_port);
+    CPS_LOG_INFO("MicrophoneRtpSender", "started on local UDP port ", bound_port_, " -> ",
+                 config_.destination_ip, ":", std::to_string(config_.destination_port));
 
     return Common::Status::Ok();
 }
@@ -99,6 +126,8 @@ void MicrophoneRtpSender::Stop() {
 
     bound_port_ = 0;
     sample_accumulator_.clear();
+    encoder_.reset();
+    nonce_counter_ = 0;
 }
 
 bool MicrophoneRtpSender::IsRunning() const noexcept {
@@ -140,17 +169,25 @@ void MicrophoneRtpSender::PushPcmSamples(const int16_t* samples, size_t count, u
     sample_accumulator_.insert(sample_accumulator_.end(), samples, samples + count);
 
     const size_t frameSize = config_.packet_samples;
+    if (encoder_) {
+        while (sample_accumulator_.size() >= frameSize) {
+            // The encoder consumes interleaved S16 in host order; the AU it
+            // emits is what goes on the wire.
+            FlushAacFrameLocked(sample_accumulator_.data());
+            sample_accumulator_.erase(sample_accumulator_.begin(), sample_accumulator_.begin() + frameSize);
+        }
+        return;
+    }
+
     while (sample_accumulator_.size() >= frameSize) {
         std::vector<int16_t> chunk(sample_accumulator_.begin(), sample_accumulator_.begin() + frameSize);
         sample_accumulator_.erase(sample_accumulator_.begin(), sample_accumulator_.begin() + frameSize);
-        FlushPacketLocked(chunk);
+        FlushPcmPacketLocked(chunk);
     }
 }
 
-void MicrophoneRtpSender::FlushPacketLocked(const std::vector<int16_t>& chunk) {
-    if (chunk.empty()) return;
-
-    // Standard 12-byte RTP header + payload
+void MicrophoneRtpSender::WriteHeaderLocked(uint8_t* hdr) {
+    // Standard 12-byte RTP header
     // RFC 3550:
     // 0                   1                   2                   3
     // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -161,57 +198,107 @@ void MicrophoneRtpSender::FlushPacketLocked(const std::vector<int16_t>& chunk) {
     // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     // |           synchronization source (SSRC) identifier            |
     // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    hdr[0] = 0x80; // V=2, P=0, X=0, CC=0
+    hdr[1] = config_.payload_type & 0x7F; // M=0, PT=payload_type (100)
+    Common::Endian::WriteBe16(hdr + 2, seq_);
+    Common::Endian::WriteBe32(hdr + 4, ts_);
+    // SSRC stays 0 to match the reference C uplink.
+    Common::Endian::WriteBe32(hdr + 8, config_.ssrc);
+}
+
+void MicrophoneRtpSender::FlushPcmPacketLocked(const std::vector<int16_t>& chunk) {
+    if (chunk.empty()) return;
+
     std::vector<uint8_t> rtpPacket;
     rtpPacket.resize(12 + chunk.size() * 2);
 
-    rtpPacket[0] = 0x80; // V=2, P=0, X=0, CC=0
-    rtpPacket[1] = config_.payload_type & 0x7F; // M=0, PT=payload_type (100)
-
-    // Sequence number (Big-Endian)
-    rtpPacket[2] = static_cast<uint8_t>((seq_ >> 8) & 0xFF);
-    rtpPacket[3] = static_cast<uint8_t>(seq_ & 0xFF);
-
-    // Timestamp (Big-Endian)
-    rtpPacket[4] = static_cast<uint8_t>((ts_ >> 24) & 0xFF);
-    rtpPacket[5] = static_cast<uint8_t>((ts_ >> 16) & 0xFF);
-    rtpPacket[6] = static_cast<uint8_t>((ts_ >> 8) & 0xFF);
-    rtpPacket[7] = static_cast<uint8_t>(ts_ & 0xFF);
-
-    // SSRC (Big-Endian)
-    rtpPacket[8]  = static_cast<uint8_t>((config_.ssrc >> 24) & 0xFF);
-    rtpPacket[9]  = static_cast<uint8_t>((config_.ssrc >> 16) & 0xFF);
-    rtpPacket[10] = static_cast<uint8_t>((config_.ssrc >> 8) & 0xFF);
-    rtpPacket[11] = static_cast<uint8_t>(config_.ssrc & 0xFF);
+    WriteHeaderLocked(rtpPacket.data());
 
     // Apple expects Big-Endian 16-bit PCM for the uplink stream payload
     uint8_t* payloadPtr = rtpPacket.data() + 12;
     for (size_t i = 0; i < chunk.size(); ++i) {
-        int16_t sample = chunk[i];
-        payloadPtr[i * 2]     = static_cast<uint8_t>((sample >> 8) & 0xFF);
-        payloadPtr[i * 2 + 1] = static_cast<uint8_t>(sample & 0xFF);
+        Common::Endian::WriteBe16(payloadPtr + i * 2, static_cast<uint16_t>(chunk[i]));
     }
 
-    // Deliver to interceptor if set
     if (interceptor_) {
         interceptor_(Common::ByteSpan(rtpPacket.data(), rtpPacket.size()));
     }
 
-    // Send UDP packet over network socket
-    if (socket_ != ~static_cast<uintptr_t>(0)) {
-        sockaddr_in dst_addr{};
-        dst_addr.sin_family = AF_INET;
-        dst_addr.sin_port = htons(config_.destination_port);
-        inet_pton(AF_INET, config_.destination_ip.c_str(), &dst_addr.sin_addr);
+    SendLocked(rtpPacket.data(), rtpPacket.size());
 
-        socket_t s = static_cast<socket_t>(socket_);
-        sendto(s, reinterpret_cast<const char*>(rtpPacket.data()),
-               static_cast<int>(rtpPacket.size()), 0,
-               reinterpret_cast<const sockaddr*>(&dst_addr), sizeof(dst_addr));
-    }
-
-    seq_ = static_cast<uint16_t>((seq_ + 1) & 0xFFFF);
+    seq_ = static_cast<uint16_t>(seq_ + 1);
     ts_ += static_cast<uint32_t>(chunk.size());
     packets_sent_++;
+}
+
+// One AAC-ELD access unit per RTP packet: [header][ciphertext][tag:16][nonce:8].
+// The AAD is the timestamp+SSRC fields of the header, matching the downlink.
+void MicrophoneRtpSender::FlushAacFrameLocked(const int16_t* pcm) {
+    if (!encoder_) return;
+
+    const size_t frameSize = encoder_->frame_size();
+    std::vector<uint8_t> au = encoder_->Encode(pcm, frameSize);
+
+    // Advance the RTP clock per input frame even while the encoder is priming
+    // (empty AU), so timestamps stay aligned to the audio sample position.
+    const uint32_t advance = static_cast<uint32_t>(frameSize);
+    if (au.empty()) {
+        ts_ += advance;
+        return;
+    }
+
+    uint8_t hdr[12];
+    WriteHeaderLocked(hdr);
+
+    send_buffer_.clear();
+    if (config_.encrypted) {
+        uint8_t nonce12[12] = {0};
+        for (int i = 0; i < 8; ++i) {
+            nonce12[4 + i] = static_cast<uint8_t>((nonce_counter_ >> (8 * i)) & 0xFF);
+        }
+        const uint8_t* nonce8 = nonce12 + 4;
+        // AAD = hdr[4..12] (timestamp ‖ SSRC).
+        std::vector<uint8_t> sealed = pairing::ChaCha20Poly1305SealWithAad(
+            config_.input_key.data(), nonce12, hdr + 4, 8, au.data(), au.size());
+        if (sealed.empty()) {
+            CPS_LOG_ERROR("MicrophoneRtpSender", "AAC uplink AEAD seal failed; packet dropped");
+            ts_ += advance;
+            return;
+        }
+        send_buffer_.reserve(12 + sealed.size() + 8);
+        send_buffer_.insert(send_buffer_.end(), hdr, hdr + 12);
+        send_buffer_.insert(send_buffer_.end(), sealed.begin(), sealed.end());
+        send_buffer_.insert(send_buffer_.end(), nonce8, nonce8 + 8);
+        nonce_counter_++;
+    } else {
+        send_buffer_.reserve(12 + au.size());
+        send_buffer_.insert(send_buffer_.end(), hdr, hdr + 12);
+        send_buffer_.insert(send_buffer_.end(), au.begin(), au.end());
+    }
+
+    if (interceptor_) {
+        interceptor_(Common::ByteSpan(send_buffer_.data(), send_buffer_.size()));
+    }
+
+    SendLocked(send_buffer_.data(), send_buffer_.size());
+
+    seq_ = static_cast<uint16_t>(seq_ + 1);
+    ts_ += advance;
+    packets_sent_++;
+}
+
+void MicrophoneRtpSender::SendLocked(const uint8_t* data, size_t len) {
+    if (socket_ == ~static_cast<uintptr_t>(0) || !data || len == 0) {
+        return;
+    }
+    sockaddr_in dst_addr{};
+    dst_addr.sin_family = AF_INET;
+    dst_addr.sin_port = htons(config_.destination_port);
+    inet_pton(AF_INET, config_.destination_ip.c_str(), &dst_addr.sin_addr);
+
+    socket_t s = static_cast<socket_t>(socket_);
+    sendto(s, reinterpret_cast<const char*>(data), static_cast<int>(len), 0,
+           reinterpret_cast<const sockaddr*>(&dst_addr), sizeof(dst_addr));
 }
 
 void MicrophoneRtpSender::AttachToUplink(const std::shared_ptr<IMicrophoneUplink>& uplink) {

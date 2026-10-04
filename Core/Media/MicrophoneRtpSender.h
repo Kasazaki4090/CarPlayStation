@@ -2,7 +2,9 @@
 
 #include "Core/Common/Types.h"
 #include "Core/Common/Result.h"
+#include "Core/Media/AacCodecAdapter.h"
 #include "Core/Media/IMicrophoneUplink.h"
+#include <array>
 #include <string>
 #include <vector>
 #include <mutex>
@@ -26,6 +28,17 @@ struct MicrophoneRtpConfig {
     uint16_t channels{1};
     size_t packet_samples{320};              // ~20ms frames (320 samples @ 16kHz mono)
     Common::AudioSampleType input_sample_type{Common::AudioSampleType::PcmFloat32};
+
+    // Wireless CarPlay encodes the uplink instead of sending linear PCM: the
+    // iPhone selects AAC-ELD (16 kHz mono, 24 kbps, 480-sample frames) for the
+    // voice streams. When enabled, packet_samples is replaced by the encoder's
+    // frame length.
+    bool aac_eld{false};
+    uint32_t bitrate_bps{24000};
+    // ChaCha20-Poly1305 key derived from the stream's streamConnectionID
+    // (*input* direction). Ignored unless aac_eld is set.
+    bool encrypted{false};
+    std::array<uint8_t, 32> input_key{};
 };
 
 /**
@@ -103,7 +116,11 @@ public:
     void SetPacketInterceptor(PacketInterceptor interceptor);
 
 private:
-    void FlushPacketLocked(const std::vector<int16_t>& chunk);
+    void FlushPcmPacketLocked(const std::vector<int16_t>& chunk);
+    void FlushAacFrameLocked(const int16_t* pcm);
+    // Writes the 12-byte RTP header shared by both payload formats.
+    void WriteHeaderLocked(uint8_t* hdr);
+    void SendLocked(const uint8_t* data, size_t len);
 
     mutable std::mutex mutex_;
     MicrophoneRtpConfig config_{};
@@ -116,6 +133,11 @@ private:
     uint32_t ts_{0};
     std::atomic<uint64_t> packets_sent_{0};
     PacketInterceptor interceptor_;
+
+    // AAC-ELD uplink state.
+    std::unique_ptr<AacAudioEncoder> encoder_;
+    uint64_t nonce_counter_{0};
+    std::vector<uint8_t> send_buffer_;
 };
 
 } // namespace CarPlayStation::Core::Media

@@ -272,40 +272,35 @@ void TestRtspAnnounceAndSetupWireReplay() {
     ASSERT_EQ(announce_resp.status_code, 200);
     ASSERT_EQ(announce_resp.cseq, 1);
 
-    // TODO(microphone-uplink): the Voice Audio SETUP half of this replay is disabled.
-    // AirPlayRtspServer::HandleSetup only negotiates the video stream (7100/7101) today;
-    // it never parses a streamType=100 SETUP nor fills NegotiatedParams::mic_audio_data_port /
-    // mic_audio_control_port, so the expected server_port=5002/control_port=5003 reply cannot
-    // be produced yet. Re-enable this block together with the microphone uplink work
-    // (see TODO.md section 8 "Media: audio and microphone").
-    //
-    // std::string voice_setup_req =
-    //     "SETUP rtsp://127.0.0.1/audio?streamType=100 RTSP/1.0\r\n"
-    //     "CSeq: 2\r\n"
-    //     "Transport: RTP/AVP/UDP;unicast;client_port=50002;timing_port=50003\r\n"
-    //     "\r\n";
-    //
-    // consumed = 0;
-    // auto parsed_setup = AirPlayRtspCodec::ParseRequest(
-    //     Common::ByteSpan(reinterpret_cast<const uint8_t*>(voice_setup_req.data()), voice_setup_req.size()),
-    //     consumed);
-    // ASSERT_TRUE(parsed_setup.IsOk());
-    // ASSERT_TRUE(parsed_setup.Value().has_value());
-    //
-    // auto setup_resp = server.ProcessSimulatedRequest(*parsed_setup.Value());
-    // ASSERT_EQ(setup_resp.status_code, 200);
-    // ASSERT_EQ(setup_resp.cseq, 2);
-    //
-    // std::string_view transport_val = setup_resp.GetHeader("Transport");
-    // ASSERT_TRUE(transport_val.find("server_port=5002") != std::string_view::npos);
-    // ASSERT_TRUE(transport_val.find("control_port=5003") != std::string_view::npos);
-    //
-    // auto params = server.GetNegotiatedParams();
-    // ASSERT_EQ(params.mic_audio_data_port, 5002);
-    // ASSERT_EQ(params.mic_audio_control_port, 5003);
+    // The Voice Audio SETUP half of the replay: a streamType=100 SETUP carried on a
+    // Transport header must be answered with our microphone ports, and the negotiated
+    // parameters must record them (NegotiatedMediaParams::mic_audio_*).
+    std::string voice_setup_req =
+        "SETUP rtsp://127.0.0.1/audio?streamType=100 RTSP/1.0\r\n"
+        "CSeq: 2\r\n"
+        "Transport: RTP/AVP/UDP;unicast;client_port=50002;timing_port=50003\r\n"
+        "\r\n";
 
-    std::cout << "  [PASS] RTSP ANNOUNCE wire replay verified "
-                 "(Voice SETUP half skipped, see TODO above)" << std::endl;
+    consumed = 0;
+    auto parsed_setup = AirPlayRtspCodec::ParseRequest(
+        Common::ByteSpan(reinterpret_cast<const uint8_t*>(voice_setup_req.data()), voice_setup_req.size()),
+        consumed);
+    ASSERT_TRUE(parsed_setup.IsOk());
+    ASSERT_TRUE(parsed_setup.Value().has_value());
+
+    auto setup_resp = server.ProcessSimulatedRequest(*parsed_setup.Value());
+    ASSERT_EQ(setup_resp.status_code, 200);
+    ASSERT_EQ(setup_resp.cseq, 2);
+
+    std::string_view transport_val = setup_resp.GetHeader("Transport");
+    ASSERT_TRUE(transport_val.find("server_port=5002") != std::string_view::npos);
+    ASSERT_TRUE(transport_val.find("control_port=5003") != std::string_view::npos);
+
+    auto params = server.GetNegotiatedParams();
+    ASSERT_EQ(params.mic_audio_data_port, 5002);
+    ASSERT_EQ(params.mic_audio_control_port, 5003);
+
+    std::cout << "  [PASS] RTSP ANNOUNCE + Voice SETUP wire replay verified" << std::endl;
 }
 
 // ============================================================================

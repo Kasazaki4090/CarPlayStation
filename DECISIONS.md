@@ -806,3 +806,113 @@ Negative / limitations:
 - `Lib/Readme.md` (mpv library record)
 - `Tests/MediaTests.cpp`
 - Commits `ab9d3f0` (MpvVideoPlayer), and the cleanup commit that removed MF/FFmpeg
+
+---
+
+## DEC-010 — CarPlay audio: RTSP phase-2 negotiation, fdk-aac, and a sealed microphone uplink
+
+**Status:** `Accepted`
+
+**Date:** 2026-10-04
+
+### Context
+
+`CarPlayStation` decoded and presented video only. Every audio stream in a real session was produced by the
+streamer side of the reference implementation: the iPhone announces its audio formats, the receiver negotiates
+per-stream audio parameters over RTSP, and the C process pushed decoded media audio to the speaker while feeding
+the car microphone back to the phone. With no audio path at all, music, navigation guidance, Siri responses and
+the telephony uplink were all missing, and a session that reached `STREAMING` was still unusable as a head unit.
+
+`DEC-002` reserved `Core/Media` for audio decoding and the microphone uplink, and `DEC-009` had just removed the
+FFmpeg backend, so no codec library capable of AAC was left in the tree. The authoritative behaviour was taken
+from the vendored `Reference/carplayd` implementation (`rtsp/server.rs`, `rtsp/handlers.rs`, `session.rs`,
+`audio/receiver.rs`, `audio/encoder.rs`, `stream.rs`) and cross-checked against the capture in
+`docs/carplay-core-protocol-and-wire-analysis.md` plus the live `c_flow_chatty.log` SETUP bodies.
+
+### Decision
+
+1. **The RTSP server owns phase-2 audio negotiation.** `AirPlayRtspServer::HandleSetup` now parses the bplist
+   body of a phase-2 SETUP and:
+   - routes media and voice by the `audioType` string, not by `type` (`media` -> media stream, anything else ->
+     voice stream);
+   - binds one UDP data port per stream and answers it as `dataPort`;
+   - binds a `controlPort` **only** for `type=102`, which is the only stream the iPhone sends RTCP SR for;
+   - accepts `input` as a boolean or an integer, and treats the newest `type=100` SETUP as superseding any
+     previous one;
+   - keeps the legacy branch for `audio?streamType=100` SETUPs that carry a `Transport:` header, which are
+     answered with `server_port`/`control_port` instead of a bplist body.
+   The negotiated parameters are published on `NegotiatedMediaParams` (`audio_streams`, `mic_*`).
+2. **The `/info` advert is the wireless receiver set.** `audioFormats` advertises the eight CCPA entries the C
+   process advertises (PCM 16k mono, PCM 48k stereo, AAC-LC 44.1k/48k stereo, AAC-ELD 44.1k/48k stereo,
+   AAC-ELD 16k/24k mono). `CarPlayStation` is a wireless receiver, so the wired-only rows are not offered.
+3. **Audio lives in `Core/Media`.** Four new units:
+   - `AirPlayAudioDemuxer` — RTP header, AEAD nonce placement, ChaCha20-Poly1305 open, length validation;
+   - `AirPlayAudioReceiver` — one instance per stream/lane, decode into PCM, hand the PCM to the pipeline;
+   - `AacCodecAdapter` — the only file that includes fdk-aac; pimpl with opaque handles on both sides;
+   - `MicrophoneRtpSender` — WASAPI float capture to AAC-ELD frames to a sealed RTP packet on the phone's
+     microphone port.
+   `CarPlayCoreService` wires them up when the RTSP server reports `STREAMING` and tears them down before the
+   session subsystems.
+4. **fdk-aac is a pinned git submodule.** `Lib/fdk-aac` tracks `https://github.com/mstorsjo/fdk-aac` at the
+   official tag `v2.0.3`, is added with `add_subdirectory(... EXCLUDE_FROM_ALL)`, built as a static library, and
+   linked `PUBLIC` into `CarPlayCore`. The same tag was first vendored as a plain copy and verified byte-identical
+   to upstream (modulo `core.autocrlf`) before being replaced by the submodule.
+5. **The AES-CTR PCM path stays.** Format `0x8000` (PCM S16 BE 48k stereo, AES-CTR) is still demuxed and played,
+   so a receiver that negotiates PCM instead of AAC keeps working.
+
+### Alternatives
+
+- **Media Foundation (`IMFTransform`)**: rejected. It is already the reason `Lib/` had to carry extra backends
+  before `DEC-009`, it cannot be relied on to *encode* AAC-ELD at 16 kHz mono (the microphone uplink requirement),
+   and feeding it a raw `AudioSpecificConfig` is awkward. It would also leave the encode and decode paths in two
+   different libraries.
+- **Re-add FFmpeg (`avcodec`)**: rejected. `DEC-009` removed it deliberately, and pulling back the whole
+  framework for one codec family is far more third-party weight than AAC needs.
+- **System codecs / "let the phone send PCM"**: rejected. The iPhone picks the format from what the receiver
+  advertises; advertising only PCM loses the bitrate and latency behaviour of a real head unit, and there is no
+  system encoder for the uplink.
+- **Opus**: rejected. It is not part of the CCPA `audioFormats` set the iPhone will accept here.
+- **Vendor fdk-aac as a plain directory** (like the old FFmpeg copy): considered and briefly implemented; the
+  submodule was chosen instead so the pin is a real upstream tag, the diff against upstream is always checkable,
+  and the 439-file tree does not enter our own history.
+
+### Reason
+
+AAC-LC (media) and AAC-ELD (Siri, telephony, alert tones, microphone uplink) have to come from one library, and
+fdk-aac is what the reference implementation uses, so the parameter sets, the `AudioSpecificConfig` handling and
+the frame sizes are already known good. It builds with CMake in the existing tree, needs no runtime DLL, and its
+surface can be confined to one adapter file. Pinning a tag rather than a tarball keeps the license text, the
+changelog and the upstream diff available to anyone auditing the third-party list.
+
+### Consequences
+
+Positive:
+- Media audio, Siri/telephony audio and the microphone uplink all work end to end in the same process as video.
+- The negotiation is verified against hardware-confirmed SETUP bodies, and the AEAD/ASC handling is covered by
+  unit tests (`TestAudioFormatBitmask`, `TestAirPlayAudioDemuxerRoundTrip`, `TestAirPlayAudioDemuxerPlainPcm`,
+  `TestAacEldCodecRoundTrip`, `TestMicrophoneRtpSenderAacEld`).
+- `git submodule update --init --recursive` is the only extra step for a new clone.
+
+Negative / limitations:
+- fdk-aac is Fraunhofer's "FDK AAC Codec Library for Android" licence, which upstream metadata marks
+  `BY_EXCEPTION_ONLY`; that has to stay in the third-party list before any distribution (see `Lib/Readme.md`).
+- No hardware offload: audio is software decoded, which is irrelevant at these bitrates but rules out reuse of a
+  hardware codec path.
+- `Core/Media` already depends on `Core/Session/Pairing/Crypto.h`, so `Core/Session` must not include
+  `Core/Media`. The audio codec enum is therefore duplicated in `AirPlayRtspTypes.h` and mapped with a
+  `static_cast` in the service layer; a static_assert in `MediaTests` pins the two enumerants together.
+- `AacAudioDecoder`/`AacAudioEncoder` hand out a reference into their own state for the `AudioSpecificConfig`;
+  callers must copy it before `Close()` (a dangling reference silently produced an empty ASC in the first version
+  of the round-trip test).
+- Changing a widely included header such as `AirPlayRtspTypes.h` needs a full rebuild: stale object files with a
+  different `NegotiatedMediaParams` layout crashed `SessionTests` and `ServiceTests` in destructors far from the
+  change.
+
+### Related
+
+- `DEC-002` (layering, `Core/Media` owns audio), `DEC-008`, `DEC-009` (why no other codec backend is present)
+- `Core/Session/AirPlayRtspServer.cpp`, `Core/Session/AirPlayRtspTypes.h`
+- `Core/Media/AirPlayAudioDemuxer.h`, `Core/Media/AirPlayAudioReceiver.h`, `Core/Media/AacCodecAdapter.h`,
+  `Core/Media/MicrophoneRtpSender.h`, `Core/Service/CarPlayCoreService.cpp`
+- `Lib/Readme.md` (fdk-aac library record), `.gitmodules`
+- `TODO.md` section 8

@@ -12,6 +12,7 @@
 #include "Core/Input/IInputEventSink.h"
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace CarPlayStation::Core::Transport {
     class IWifiSoftApManager;
@@ -20,9 +21,12 @@ namespace CarPlayStation::Core::Transport {
 namespace CarPlayStation::Core::Session {
     class AirPlayRtspServer;
     class IPairingStore;
+    struct NegotiatedMediaParams;
 }
 namespace CarPlayStation::Core::Media {
     class AirPlayVideoReceiver;
+    class AirPlayAudioReceiver;
+    class MicrophoneRtpSender;
 }
 
 namespace CarPlayStation::Core::Service {
@@ -98,6 +102,10 @@ private:
     // Bring up the Wi-Fi SoftAP + mDNS advertiser so the device is always
     // discoverable (continuous broadcasting), independent of an active session.
     void StartPersistentBroadcasting();
+    // (Re)build the per-lane audio downlink receivers from an RTSP SETUP
+    // phase-2 negotiation and hand each lane its stream decryption key.
+    void ConfigureAudioReceivers(const Session::NegotiatedMediaParams& params);
+    void ConfigureMicrophoneUplink(const Session::NegotiatedMediaParams& params);
 
     CarPlayCoreDependencies deps_;
     CoreEventBus event_bus_;
@@ -111,12 +119,22 @@ private:
     std::shared_ptr<Media::IVideoDecoder> video_decoder_;
     std::shared_ptr<Media::IAudioPipeline> audio_pipeline_;
     std::shared_ptr<Media::IMicrophoneUplink> microphone_uplink_;
+    // RTP packetizer that carries captured microphone audio back to the iPhone
+    // (AAC-ELD sealed with ChaCha20-Poly1305, or legacy PCM). Armed from the
+    // RTSP SETUP phase-2 negotiation when the iPhone requests microphone input.
+    std::shared_ptr<Media::MicrophoneRtpSender> microphone_sender_;
+    // Format the audio pipeline was actually started with. Audio receivers
+    // resample into this so their output is injectable without further work.
+    Common::AudioOutputFormat audio_output_{};
     std::shared_ptr<Input::IInputEventSink> input_sink_;
 
     std::shared_ptr<Transport::IWifiSoftApManager> wifi_manager_;
     std::shared_ptr<Transport::IMdnsAdvertiser> mdns_advertiser_;
     std::shared_ptr<Session::AirPlayRtspServer> rtsp_server_;
     std::shared_ptr<Media::AirPlayVideoReceiver> video_receiver_;
+    // One audio downlink receiver per negotiated lane (ports 7000/7001/7002).
+    // Built lazily from the RTSP SETUP phase-2 stream negotiation.
+    std::vector<std::shared_ptr<Media::AirPlayAudioReceiver>> audio_receivers_;
     // Shared pairing store (also owned by the session) so the service can
     // look up known devices by MAC and proactively dial a re-joining iPhone's
     // _carplay-ctrl port (fast reconnect without re-doing the BT/iAP2 flow).

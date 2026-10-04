@@ -15,7 +15,9 @@
 #include "Core/Media/MpvVideoPlayer.h"
 #include "Core/Media/WasapiAudioPipeline.h"
 #include "Core/Media/WasapiMicrophoneUplink.h"
+#include "Core/Media/AirPlayAudioReceiver.h"
 #include "Core/Media/AirPlayVideoReceiver.h"
+#include "Core/Media/MicrophoneRtpSender.h"
 #include "Core/Common/Logging.h"
 
 #include <algorithm>
@@ -514,6 +516,8 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
             if (video_receiver_ && params.video_encrypted) {
                 video_receiver_->SetDecryptionKey(params.video_decrypt_key);
             }
+            ConfigureAudioReceivers(params);
+            ConfigureMicrophoneUplink(params);
             if (auto session_sm = std::dynamic_pointer_cast<Session::CarPlaySessionStateMachine>(session_)) {
                 (void)session_sm->OnAirPlayStreamingStarted(params);
             }
@@ -804,12 +808,12 @@ Common::Status CarPlayCoreService::Start() {
 
     // Start Audio Pipeline
     if (audio_pipeline_) {
-        Common::AudioOutputFormat default_audio_format{};
-        default_audio_format.sample_rate = 48000;
-        default_audio_format.channels = 2;
-        default_audio_format.bit_depth = 16;
-        default_audio_format.sample_type = Common::AudioSampleType::PcmInt16;
-        auto ap_st = audio_pipeline_->Start(default_audio_format);
+        audio_output_ = Common::AudioOutputFormat{};
+        audio_output_.sample_rate = 48000;
+        audio_output_.channels = 2;
+        audio_output_.bit_depth = 16;
+        audio_output_.sample_type = Common::AudioSampleType::PcmInt16;
+        auto ap_st = audio_pipeline_->Start(audio_output_);
         if (ap_st.IsOk()) {
             Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
                 "Audio Pipeline started at 48000Hz stereo");
@@ -905,6 +909,141 @@ void CarPlayCoreService::WireSessionStateObserver() {
         });
 }
 
+// Maps a negotiated audio stream onto the local playback lane that owns it.
+// Mirrors the lane split documented in IAudioPipeline: stream 102 is the
+// buffered media lane, 101 is the secondary/navigation lane, and every
+// unbuffered voice stream (alert/default/telephony/speechRecognition) shares
+// the Siri/telephony lane, which is also the only stream the iPhone expects
+// a microphone back-channel for.
+static Media::AudioLane SelectAudioLane(const Session::AudioStreamNegotiation& stream) {
+    if (stream.type == 102 || stream.audio_type == "media") {
+        return Media::AudioLane::MainMedia;
+    }
+    if (stream.type == 101) {
+        return Media::AudioLane::AltNavigation;
+    }
+    return Media::AudioLane::SiriTelephony;
+}
+
+void CarPlayCoreService::ConfigureAudioReceivers(const Session::NegotiatedMediaParams& params) {
+    // Tear down the previous set first: the iPhone re-SETUPs the audio streams
+    // several times per Siri turn, and every negotiation re-binds the UDP
+    // ports, so a stale receiver would keep draining the old stream's port.
+    for (auto& receiver : audio_receivers_) {
+        if (receiver) {
+            receiver->Stop();
+        }
+    }
+    audio_receivers_.clear();
+
+    for (const auto& stream : params.audio_streams) {
+        if (stream.data_port == 0) {
+            CPS_LOG_WARN("CoreService", "Audio stream without a data port skipped: type=", stream.type,
+                         " audioType=", stream.audio_type);
+            continue;
+        }
+
+        Media::AirPlayAudioReceiver::Config config;
+        config.lane = SelectAudioLane(stream);
+        config.udp_port = stream.data_port;
+        // RtspAudioCodec and AudioCodecKind share the same numbering; Core/Session
+        // cannot include Core/Media (Media already depends on Session/Pairing).
+        config.stream.codec = static_cast<Media::AudioCodecKind>(stream.codec);
+        config.stream.sample_rate = stream.sample_rate;
+        config.stream.channels = stream.channels;
+
+        auto receiver = std::make_shared<Media::AirPlayAudioReceiver>(audio_pipeline_, config);
+        // The render format is fixed when the pipeline starts, so the receiver
+        // has to resample into it.
+        Media::AirPlayAudioReceiver::OutputFormat output{};
+        output.sample_rate = audio_output_.sample_rate;
+        output.channels = audio_output_.channels;
+        receiver->SetOutputFormat(output);
+        receiver->SetDecryptionKey(stream.output_key);
+
+        auto st = receiver->Start();
+        if (!st.IsOk()) {
+            CPS_LOG_ERROR("CoreService", "Audio receiver start failed: lane=", static_cast<int>(config.lane),
+                          " port=", config.udp_port, " codec=", Media::AudioCodecKindName(config.stream.codec),
+                          " rate=", config.stream.sample_rate, " ch=", static_cast<int>(config.stream.channels),
+                          " err=", st.Message());
+            continue;
+        }
+        CPS_LOG_INFO("CoreService", "Audio receiver started: lane=", static_cast<int>(config.lane),
+                     " port=", receiver->GetPort(), " codec=", Media::AudioCodecKindName(config.stream.codec),
+                     " rate=", config.stream.sample_rate, " ch=", static_cast<int>(config.stream.channels),
+                     " audioType=", stream.audio_type);
+        audio_receivers_.push_back(receiver);
+    }
+
+    CPS_LOG_INFO("CoreService", "Audio receivers configured: count=", audio_receivers_.size());
+}
+
+// Arm the microphone back-channel when the iPhone asked for input on the voice
+// stream. The capture format follows the negotiation (AAC-ELD 16 kHz mono in
+// practice), and the sender encodes + seals each frame before sending it to the
+// iPhone's dataPort on the RTSP control connection's address.
+void CarPlayCoreService::ConfigureMicrophoneUplink(const Session::NegotiatedMediaParams& params) {
+    // A re-SETUP supersedes the previous mic state, so always drop the old
+    // sender first (it owns the UDP socket and the uplink callback).
+    if (microphone_sender_) {
+        microphone_sender_->Stop();
+        microphone_sender_.reset();
+    }
+    if (!params.mic_input_requested || params.mic_uplink_port == 0 || params.mic_peer_address.empty()) {
+        if (microphone_uplink_ && microphone_uplink_->IsCapturing()) {
+            (void)microphone_uplink_->Stop();
+        }
+        return;
+    }
+    if (!microphone_uplink_) {
+        CPS_LOG_WARN("CoreService", "Microphone uplink requested but no capture device available");
+        return;
+    }
+
+    const uint32_t rate = params.mic_sample_rate ? params.mic_sample_rate : 16000;
+    const uint8_t channels = params.mic_channels ? params.mic_channels : 1;
+
+    Media::MicrophoneRtpConfig cfg{};
+    cfg.destination_ip = params.mic_peer_address;
+    cfg.destination_port = params.mic_uplink_port;
+    cfg.payload_type = 100;
+    cfg.ssrc = 0;
+    cfg.sample_rate = rate;
+    cfg.channels = channels;
+    cfg.input_sample_type = Common::AudioSampleType::PcmFloat32;
+    cfg.aac_eld = params.mic_codec == Session::RtspAudioCodec::AacEld;
+    cfg.bitrate_bps = 24000;
+    cfg.encrypted = true;
+    cfg.input_key = params.mic_input_key;
+
+    microphone_sender_ = std::make_shared<Media::MicrophoneRtpSender>();
+    microphone_sender_->AttachToUplink(microphone_uplink_);
+
+    auto st = microphone_sender_->Start(cfg);
+    if (!st.IsOk()) {
+        CPS_LOG_ERROR("CoreService", "Microphone RTP sender start failed: ", st.Message());
+        microphone_sender_.reset();
+        return;
+    }
+
+    Common::AudioOutputFormat cap{};
+    cap.sample_rate = rate;
+    cap.channels = channels;
+    cap.bit_depth = 16;
+    cap.sample_type = Common::AudioSampleType::PcmFloat32;
+    auto cap_st = microphone_uplink_->Start(cap);
+    if (!cap_st.IsOk()) {
+        CPS_LOG_WARN("CoreService", "Microphone capture start failed: ", cap_st.Message());
+    }
+
+    CPS_LOG_INFO("CoreService", "Microphone uplink started: dst=", cfg.destination_ip,
+                 ":", std::to_string(cfg.destination_port), " local=", std::to_string(microphone_sender_->GetBoundPort()),
+                 " codec=", cfg.aac_eld ? "aac-eld" : "pcm", " rate=", std::to_string(rate),
+                 " ch=", std::to_string(static_cast<int>(channels)),
+                 " encrypted=", cfg.encrypted ? 1 : 0);
+}
+
 void CarPlayCoreService::StartPersistentBroadcasting() {
     // Bring up the Wi-Fi SoftAP (Mobile Hotspot) so the iPhone can always
     // find and join the network, and start the mDNS advertiser so the device
@@ -976,6 +1115,19 @@ void CarPlayCoreService::TearDownSubsystems() {
     }
     video_receiver_.reset();
 
+    // Audio receivers feed the pipeline, so they stop before it does.
+    for (auto& receiver : audio_receivers_) {
+        if (receiver) {
+            receiver->Stop();
+        }
+    }
+    audio_receivers_.clear();
+
+    // The RTP sender owns the uplink callback, so it stops before the capture.
+    if (microphone_sender_) {
+        microphone_sender_->Stop();
+        microphone_sender_.reset();
+    }
     if (microphone_uplink_) {
         microphone_uplink_->Shutdown();
     }

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <iostream>
 #include <sstream>
+#include <cstdio>
 #include <algorithm>
 
 #ifdef _WIN32
@@ -47,8 +48,47 @@ inline uint64_t NtpNow() {
     return (ntp_secs << 32) | ntp_frac;
 }
 
+// Bind an ephemeral UDP socket and report the port the OS handed out. Used for the
+// per-stream audio dataPort / controlPort answers (carplayd binds `[::]:0` likewise).
+inline socket_t BindUdpEphemeral(uint16_t& out_port) {
+    out_port = 0;
+    socket_t sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == INVALID_SOCK) {
+        return INVALID_SOCK;
+    }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = 0;
+    if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCK_ERR) {
+        CLOSE_SOCK(sock);
+        return INVALID_SOCK;
+    }
+    int len = sizeof(addr);
+    if (getsockname(sock, reinterpret_cast<sockaddr*>(&addr), &len) == SOCK_ERR) {
+        CLOSE_SOCK(sock);
+        return INVALID_SOCK;
+    }
+    out_port = ntohs(addr.sin_port);
+    return sock;
+}
+
+// A plist integer may be stored signed or unsigned; accept both (carplayd session.rs:232-238).
+inline uint64_t PlistAsUInt(const Pairing::BplistValue& v) {
+    return v.AsUInt(0);
+}
+
+inline std::string Hex64(uint64_t v) {
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(v));
+    return std::string(buf);
+}
+
 struct ClientSession : public std::enable_shared_from_this<ClientSession> {
     socket_t sock{INVALID_SOCK};
+    // Dotted-quad address of the iPhone's RTSP control channel. The microphone uplink
+    // sends RTP to this address with only the port swapped (carplayd `uplink_dst`).
+    std::string peer_address;
     std::unique_ptr<Pairing::PairSetupServer> pair_setup;
     std::unique_ptr<Pairing::PairVerifyServer> pair_verify;
     std::unique_ptr<Pairing::AuthSetupServer> auth_setup;
@@ -73,6 +113,10 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
     socket_t keepalive_sock{INVALID_SOCK};
     uint16_t keepalive_port{0};
     std::thread keepalive_thread;
+
+    // Phase 2 audio control sockets (the controlPort we answer for stream type 102).
+    // They stay bound for the session so the port we advertised cannot be reused.
+    std::vector<socket_t> audio_ctrl_socks;
 
     std::atomic<bool> alive{true};
 
@@ -111,6 +155,12 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
         if (keepalive_thread.joinable()) {
             keepalive_thread.join();
         }
+        for (socket_t sock : audio_ctrl_socks) {
+            if (sock != INVALID_SOCK) {
+                CLOSE_SOCK(sock);
+            }
+        }
+        audio_ctrl_socks.clear();
     }
 
     void StartTimingResponder() {
@@ -546,6 +596,7 @@ private:
 
             auto sess = std::make_shared<ClientSession>();
             sess->sock = client_sock;
+            sess->peer_address = ipStr;
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -976,18 +1027,36 @@ private:
         lat_arr.push_back(BplistValue(lat));
         root.emplace_back("audioLatencies", BplistValue(lat_arr));
 
-        // audioFormats
+        // audioFormats: the 8-entry wireless CCPA advert (stock CCPA `_BuildAudioFormatsArray`,
+        // live-captured in c_flow_chatty.log). Format bits: 0x10 PCM 16k mono, 0x8000 PCM 48k
+        // stereo, 0x800000 AAC-LC 48k stereo, 0x2000000 AAC-ELD 48k stereo, 0x4000000 AAC-ELD
+        // 16k mono. `audioInputFormats` is only present on the two-way (microphone) entries.
+        // Without this the iPhone cannot plan audio and tears the session down after RECORD.
         BplistArray af_arr;
-        auto make_af = [](int64_t ty, int64_t inp, int64_t outp) {
+        constexpr int64_t kPcm16kMono = 0x10;
+        constexpr int64_t kPcm48kStereo = 0x8000;
+        constexpr int64_t kAacLc48kStereo = 0x00800000;
+        constexpr int64_t kAacEld48kStereo = 0x02000000;
+        constexpr int64_t kAacEld16kMono = 0x04000000;
+        auto make_af = [](int64_t ty, const char* audio_type, int64_t inp, int64_t outp) {
             BplistDict e;
             e.emplace_back("type", BplistValue(ty));
+            e.emplace_back("audioType", BplistValue(audio_type));
             if (inp != 0) e.emplace_back("audioInputFormats", BplistValue(inp));
             e.emplace_back("audioOutputFormats", BplistValue(outp));
             return BplistValue(e);
         };
-        af_arr.push_back(make_af(100, 0x10, 0x8000 | 0x10)); // media PCM
-        af_arr.push_back(make_af(101, 0x10, 0x8000));        // alt PCM
-        af_arr.push_back(make_af(102, 0, 0x00800000));       // AAC-LC
+        // MainAudio (100): legacy PCM catch-all, alerts, and the two-way voice lanes.
+        af_arr.push_back(make_af(100, "compatibility", kPcm16kMono, kPcm48kStereo | kPcm16kMono));
+        af_arr.push_back(make_af(100, "alert", 0, kAacEld48kStereo));
+        af_arr.push_back(make_af(100, "default", kPcm16kMono, kAacEld16kMono));
+        af_arr.push_back(make_af(100, "telephony", kPcm16kMono, kAacEld16kMono));
+        af_arr.push_back(make_af(100, "speechRecognition", kPcm16kMono, kAacEld16kMono));
+        // AltAudio (101): guidance/navigation.
+        af_arr.push_back(make_af(101, "compatibility", 0, kPcm48kStereo));
+        af_arr.push_back(make_af(101, "default", 0, kAacEld48kStereo));
+        // MainHighAudio (102): buffered media, AAC-LC.
+        af_arr.push_back(make_af(102, "media", 0, kAacLc48kStereo));
         root.emplace_back("audioFormats", BplistValue(af_arr));
 
         // displays
@@ -1097,6 +1166,23 @@ private:
         using namespace Pairing;
 
         if (auto it = req.headers.find("Transport"); it != req.headers.end()) {
+            // Legacy single-stream SETUP carried on a Transport header. The URI query selects the
+            // stream: `?streamType=100` is the microphone (voice) stream, everything else is video.
+            const bool mic_setup = req.uri.find("streamType=100") != std::string::npos ||
+                                   req.uri.find("/audio") != std::string::npos;
+            if (mic_setup) {
+                params_.mic_audio_data_port = 5002;
+                params_.mic_audio_control_port = 5003;
+                auto resp = AirPlayRtspCodec::MakeOkResponse(cseq, params_.session_id);
+                if (it->second.find("control_port") != std::string::npos) {
+                    resp.SetHeader("Transport", it->second + ";server_port=5002;control_port=5003");
+                } else {
+                    resp.SetHeader("Transport", "RTP/AVP/UDP;unicast;server_port=5002;control_port=5003");
+                }
+                CPS_LOG_INFO("AirPlayRtsp", "SETUP (Transport) microphone stream: server_port=5002 control_port=5003");
+                return resp;
+            }
+
             params_.video_data_port = 7100;
             params_.video_control_port = 7101;
             auto resp = AirPlayRtspCodec::MakeOkResponse(cseq, params_.session_id);
@@ -1117,6 +1203,16 @@ private:
 
             BplistArray out_streams;
             bool has_screen = false;
+            // A SETUP supersedes the previous one (the iPhone re-SETUPs MainAudio several times
+            // per Siri turn), so drop any audio state negotiated by an earlier request.
+            params_.audio_streams.clear();
+            params_.mic_input_requested = false;
+            params_.mic_uplink_port = 0;
+            params_.mic_peer_address.clear();
+            params_.mic_codec = RtspAudioCodec::Unknown;
+            params_.mic_sample_rate = 0;
+            params_.mic_channels = 0;
+            params_.mic_input_key = {};
 
             for (const auto& s_entry : *streams_val->AsArray()) {
                 int64_t ty = s_entry.Find("type") ? s_entry.Find("type")->AsInt() : 0;
@@ -1141,15 +1237,104 @@ private:
                     // MUST NOT include controlPort, uuid, or streamConnectionID in response!
                     out_streams.push_back(BplistValue(stream_dict));
                 } else if (ty >= 100 && ty <= 102) { // Audio
+                    // Faithful to carplayd session.rs:246-320. Route by audioType, not by stream
+                    // type; derive this stream's ChaCha20-Poly1305 keys from its own
+                    // streamConnectionID; only stream 102 gets a controlPort.
+                    AudioStreamNegotiation neg;
+                    neg.type = ty;
+                    neg.stream_connection_id = scid;
+                    if (const auto* v = s_entry.Find("audioFormat")) {
+                        neg.format_mask = PlistAsUInt(*v);
+                    }
+                    if (const auto* v = s_entry.Find("audioType")) {
+                        neg.audio_type = v->AsString();
+                    }
+                    DecodeAudioFormat(neg.format_mask, neg.codec, neg.sample_rate, neg.channels);
+
+                    if (scid != 0 && sess) {
+                        auto skeys = pairing::DeriveStreamKeys(sess->shared_secret, scid);
+                        neg.output_key = skeys.output;
+                        neg.input_key = skeys.input;
+                    }
+
+                    if (ty == 100) {
+                        // Bidirectional MainAudio: the iPhone may offer a microphone uplink.
+                        // `input` may be a plist boolean OR an integer.
+                        if (const auto* v = s_entry.Find("input")) {
+                            neg.input_requested = v->AsBool(false) || (v->AsUInt(0) != 0);
+                        }
+                        if (const auto* v = s_entry.Find("dataPort")) {
+                            neg.iphone_uplink_port = static_cast<uint16_t>(PlistAsUInt(*v));
+                        }
+                    }
+
+                    // Downlink data port. The receiver in the Service layer owns the actual socket;
+                    // we only reserve/announce the port here.
+                    neg.data_port = (ty == 102) ? 7002 : (ty == 101 ? 7001 : 7000);
+                    if (ty == 102) {
+                        // RTCP control port: bound, reported, and drained by the iPhone. carplayd
+                        // binds an ephemeral socket and never reads it; we do the same.
+                        uint16_t cport = 0;
+                        socket_t ctrl = BindUdpEphemeral(cport);
+                        if (ctrl != INVALID_SOCK) {
+                            neg.control_port = cport;
+                            if (sess) {
+                                sess->audio_ctrl_socks.push_back(ctrl);
+                            } else {
+                                CLOSE_SOCK(ctrl);
+                            }
+                        }
+                    }
+
+                    CPS_LOG_INFO("AirPlayRtsp", "SETUP Phase 2 audio(", std::to_string(ty),
+                                 "): scid=", std::to_string(scid),
+                                 ", audioFormat=0x", Hex64(neg.format_mask),
+                                 ", audioType=", neg.audio_type.empty() ? std::string("(none)") : neg.audio_type,
+                                 ", ", std::to_string(neg.sample_rate), "Hz ", std::to_string(neg.channels), "ch",
+                                 ", input=", neg.input_requested ? "yes" : "no",
+                                 ", iphonePort=", std::to_string(neg.iphone_uplink_port),
+                                 " -> dataPort=", std::to_string(neg.data_port));
+
+                    if (ty == 102) {
+                        params_.main_audio_data_port = neg.data_port;
+                        params_.main_audio_control_port = neg.control_port;
+                    } else if (ty == 101) {
+                        params_.alt_audio_data_port = neg.data_port;
+                        params_.alt_audio_control_port = neg.control_port;
+                    } else {
+                        params_.mic_audio_data_port = neg.data_port;
+                        params_.mic_audio_control_port = neg.control_port;
+                    }
+                    // The legacy scalar fields describe the media lane the audio pipeline is
+                    // configured for, so only the media stream may overwrite them.
+                    if (neg.channels > 0 && (ty == 102 || neg.audio_type == "media")) {
+                        params_.audio_sample_rate = neg.sample_rate;
+                        params_.audio_channels = neg.channels;
+                    }
+
+                    if (ty == 100 && neg.input_requested && neg.iphone_uplink_port > 0 && sess &&
+                        !sess->peer_address.empty()) {
+                        params_.mic_input_requested = true;
+                        params_.mic_uplink_port = neg.iphone_uplink_port;
+                        params_.mic_peer_address = sess->peer_address;
+                        params_.mic_codec = neg.codec;
+                        params_.mic_sample_rate = neg.sample_rate;
+                        params_.mic_channels = neg.channels;
+                        params_.mic_input_key = neg.input_key;
+                        CPS_LOG_INFO("AirPlayRtsp", "Microphone uplink armed: dst=", params_.mic_peer_address,
+                                     ":", std::to_string(params_.mic_uplink_port));
+                    }
+
+                    params_.audio_streams.push_back(neg);
+
                     BplistDict stream_dict;
                     stream_dict.emplace_back("type", BplistValue(ty));
                     if (scid != 0) {
                         stream_dict.emplace_back("streamConnectionID", BplistValue(scid));
                     }
-                    uint16_t dport = (ty == 102) ? 7002 : (ty == 101 ? 7001 : 7000);
-                    stream_dict.emplace_back("dataPort", BplistValue(dport));
-                    if (ty == 102) {
-                        stream_dict.emplace_back("controlPort", BplistValue(dport + 1));
+                    stream_dict.emplace_back("dataPort", BplistValue(neg.data_port));
+                    if (ty == 102 && neg.control_port != 0) {
+                        stream_dict.emplace_back("controlPort", BplistValue(neg.control_port));
                     }
                     out_streams.push_back(BplistValue(stream_dict));
                 } else {
@@ -1178,7 +1363,7 @@ private:
 
             params_.video_data_port = 7100;
             params_.video_control_port = 0; // Screen stream has no RTCP control port
-            if (has_screen) {
+            if (has_screen || !params_.audio_streams.empty()) {
                 if (streaming_cb_) {
                     streaming_cb_(params_);
                 }

@@ -30,6 +30,9 @@ add_library(CarPlayCore STATIC
     Media/AirPlayVideoDemuxer.cpp
     Media/AirPlayVideoReceiver.cpp
     Media/MpvVideoPlayer.cpp
+    Media/AacCodecAdapter.cpp
+    Media/AirPlayAudioDemuxer.cpp
+    Media/AirPlayAudioReceiver.cpp
     Media/AudioDuckingManager.cpp
     Media/WasapiAudioPipeline.cpp
     Media/WasapiMicrophoneUplink.cpp
@@ -61,6 +64,11 @@ if(WIN32)
 endif()
 
 target_compile_features(CarPlayCore PUBLIC cxx_std_20)
+
+# fdk-aac: AAC-LC decode (main media audio) + AAC-ELD decode/encode (Siri/telephony
+# downlink and microphone uplink). Hidden behind Core/Media/AacCodecAdapter.{h,cpp}
+# so no fdk-aac header reaches the rest of Core (Lib/Readme.md rule 9).
+target_link_libraries(CarPlayCore PUBLIC FDK-AAC::fdk-aac)
 
 if(WIN32)
     target_link_libraries(CarPlayCore PUBLIC ws2_32 bcrypt windowsapp)

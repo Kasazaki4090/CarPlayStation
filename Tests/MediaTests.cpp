@@ -11,10 +11,18 @@
 #include "Core/Media/AudioDuckingManager.h"
 #include "Core/Media/WasapiAudioPipeline.h"
 #include "Core/Media/WasapiMicrophoneUplink.h"
+#include "Core/Media/AacCodecAdapter.h"
+#include "Core/Media/AirPlayAudioDemuxer.h"
+#include "Core/Media/MicrophoneRtpSender.h"
+#include "Core/Session/AirPlayRtspTypes.h"
+#include "Core/Session/Pairing/Crypto.h"
 #include <iostream>
 #include <cassert>
+#include <cmath>
 #include <string>
 #include <vector>
+#include <array>
+#include <cstring>
 #include <type_traits>
 
 using namespace CarPlayStation::Core;
@@ -26,6 +34,11 @@ template <typename T>
 void PrintValue(std::ostream& os, const T& v) {
     if constexpr (std::is_enum_v<T>) {
         os << static_cast<std::underlying_type_t<T>>(v);
+    } else if constexpr (std::is_same_v<T, std::vector<uint8_t>>) {
+        for (uint8_t b : v) {
+            os << std::hex << static_cast<int>(b) << ' ';
+        }
+        os << std::dec;
     } else {
         os << v;
     }
@@ -640,6 +653,311 @@ void TestMockEndToEndIntegration() {
     std::cout << "[PASS] TestMockEndToEndIntegration" << std::endl;
 }
 
+// ============================================================================
+// Step 5: audio negotiation, AEAD demuxing, AAC codec and the sealed uplink
+// ============================================================================
+
+// The audioFormat bitmask must decode exactly like the reference implementation.
+void TestAudioFormatBitmask() {
+    std::cout << "[RUN] TestAudioFormatBitmask" << std::endl;
+
+    using namespace CarPlayStation::Core::Session;
+
+    struct Case {
+        uint64_t mask;
+        RtspAudioCodec codec;
+        uint32_t rate;
+        uint8_t channels;
+    };
+    const Case cases[] = {
+        {0x0000000000000010ULL, RtspAudioCodec::PcmS16Be, 16000, 1},
+        {0x0000000000008000ULL, RtspAudioCodec::PcmS16Be, 48000, 2},
+        {0x0000000000800000ULL, RtspAudioCodec::AacLc,    48000, 2},
+        {0x0000000001000000ULL, RtspAudioCodec::AacEld,   44100, 2},
+        {0x0000000002000000ULL, RtspAudioCodec::AacEld,   48000, 2},
+        {0x0000000004000000ULL, RtspAudioCodec::AacEld,   16000, 1},
+        {0x0000000008000000ULL, RtspAudioCodec::AacEld,   24000, 1},
+        {0x0000000100000000ULL, RtspAudioCodec::AacEld,   48000, 1},
+    };
+    for (const auto& c : cases) {
+        RtspAudioCodec codec = RtspAudioCodec::Unknown;
+        uint32_t rate = 0;
+        uint8_t channels = 0;
+        DecodeAudioFormat(c.mask, codec, rate, channels);
+        ASSERT_EQ(static_cast<int>(codec), static_cast<int>(c.codec));
+        ASSERT_EQ(rate, c.rate);
+        ASSERT_EQ(static_cast<int>(channels), static_cast<int>(c.channels));
+    }
+
+    // Combined masks prefer the richest PCM entry; unknown masks fall back to ELD 24k mono.
+    RtspAudioCodec codec = RtspAudioCodec::Unknown;
+    uint32_t rate = 0;
+    uint8_t channels = 0;
+    DecodeAudioFormat(0x0000000000008010ULL, codec, rate, channels);
+    ASSERT_EQ(static_cast<int>(codec), static_cast<int>(RtspAudioCodec::PcmS16Be));
+    ASSERT_EQ(rate, 48000u);
+    ASSERT_EQ(static_cast<int>(channels), 2);
+
+    DecodeAudioFormat(0x0000000000000000ULL, codec, rate, channels);
+    ASSERT_EQ(static_cast<int>(codec), static_cast<int>(RtspAudioCodec::AacEld));
+    ASSERT_EQ(rate, 24000u);
+    ASSERT_EQ(static_cast<int>(channels), 1);
+
+    // The Media-side enum must stay numerically compatible with the Session-side one.
+    // The Service layer maps between them with a static_cast, so this is checked at compile time.
+    static_assert(static_cast<int>(AudioCodecKind::Unknown) == static_cast<int>(RtspAudioCodec::Unknown));
+    static_assert(static_cast<int>(AudioCodecKind::PcmS16Be) == static_cast<int>(RtspAudioCodec::PcmS16Be));
+    static_assert(static_cast<int>(AudioCodecKind::AacLc) == static_cast<int>(RtspAudioCodec::AacLc));
+    static_assert(static_cast<int>(AudioCodecKind::AacEld) == static_cast<int>(RtspAudioCodec::AacEld));
+
+    std::cout << "[PASS] TestAudioFormatBitmask" << std::endl;
+}
+
+// Build a wire-format encrypted audio datagram and check the demuxer recovers the AU.
+void TestAirPlayAudioDemuxerRoundTrip() {
+    std::cout << "[RUN] TestAirPlayAudioDemuxerRoundTrip" << std::endl;
+
+    std::array<uint8_t, 32> key{};
+    for (size_t i = 0; i < key.size(); ++i) {
+        key[i] = static_cast<uint8_t>(i * 7 + 1);
+    }
+    const uint64_t nonceCounter = 0x0102030405060708ULL;
+    const uint32_t timestamp = 0xDEADBEEFu;
+    const uint32_t ssrc = 0x01020304u;
+    const std::vector<uint8_t> au = {0xFF, 0x01, 0x50, 0x44, 0xAB, 0xCD, 0x11, 0x22};
+
+    uint8_t hdr[12] = {0x80, 0x64, 0x00, 0x07};
+    Common::Endian::WriteBe32(hdr + 4, timestamp);
+    Common::Endian::WriteBe32(hdr + 8, ssrc);
+
+    uint8_t nonce12[12] = {0};
+    for (int i = 0; i < 8; ++i) {
+        nonce12[4 + i] = static_cast<uint8_t>((nonceCounter >> (8 * i)) & 0xFF);
+    }
+    // AAD for audio is the timestamp + SSRC fields only.
+    auto sealed = pairing::ChaCha20Poly1305SealWithAad(key.data(), nonce12, hdr + 4, 8,
+                                                       au.data(), au.size());
+    ASSERT_EQ(sealed.size(), au.size() + 16);
+
+    std::vector<uint8_t> packet;
+    packet.insert(packet.end(), hdr, hdr + 12);
+    packet.insert(packet.end(), sealed.begin(), sealed.end());
+    packet.insert(packet.end(), nonce12 + 4, nonce12 + 12);
+    ASSERT_EQ(packet.size(), AirPlayAudioDemuxer::kMinEncryptedPacket + au.size());
+
+    AirPlayAudioDemuxer demuxer;
+    demuxer.SetDecryptionKey(key);
+    ASSERT_TRUE(demuxer.IsEncrypted());
+
+    std::vector<AirPlayAudioDemuxer::AudioPacket> got;
+    demuxer.SetPacketCallback([&](const AirPlayAudioDemuxer::AudioPacket& p) { got.push_back(p); });
+
+    ASSERT_TRUE(demuxer.Demux(packet.data(), packet.size()));
+    ASSERT_EQ(got.size(), 1u);
+    ASSERT_EQ(static_cast<int>(got[0].payload_type), 0x64);
+    ASSERT_EQ(got[0].seq, 7);
+    ASSERT_EQ(got[0].timestamp, timestamp);
+    ASSERT_EQ(got[0].au, au);
+    ASSERT_EQ(demuxer.GetStats().decryptErrors, 0ULL);
+    ASSERT_EQ(demuxer.GetStats().malformedPackets, 0ULL);
+
+    // A tampered tag must be rejected, not emitted.
+    packet[12] ^= 0xFF;
+    ASSERT_TRUE(!demuxer.Demux(packet.data(), packet.size()));
+    ASSERT_EQ(got.size(), 1u);
+    ASSERT_EQ(demuxer.GetStats().decryptErrors, 1ULL);
+
+    // Too short to carry header + tag + nonce.
+    ASSERT_TRUE(!demuxer.Demux(packet.data(), AirPlayAudioDemuxer::kMinEncryptedPacket - 1));
+    ASSERT_EQ(demuxer.GetStats().malformedPackets, 1ULL);
+
+    std::cout << "[PASS] TestAirPlayAudioDemuxerRoundTrip" << std::endl;
+}
+
+// Uncompressed (wired) streams pass the payload through untouched.
+void TestAirPlayAudioDemuxerPlainPcm() {
+    std::cout << "[RUN] TestAirPlayAudioDemuxerPlainPcm" << std::endl;
+
+    std::vector<uint8_t> packet(12 + 8, 0);
+    packet[0] = 0x80;
+    packet[1] = 0x64;
+    Common::Endian::WriteBe16(packet.data() + 2, 1);
+    for (size_t i = 0; i < 8; ++i) {
+        packet[12 + i] = static_cast<uint8_t>(0x10 + i);
+    }
+
+    AirPlayAudioDemuxer demuxer;
+    std::vector<AirPlayAudioDemuxer::AudioPacket> got;
+    demuxer.SetPacketCallback([&](const AirPlayAudioDemuxer::AudioPacket& p) { got.push_back(p); });
+    ASSERT_TRUE(demuxer.Demux(packet.data(), packet.size()));
+    ASSERT_EQ(got.size(), 1u);
+    ASSERT_EQ(got[0].au.size(), 8u);
+    ASSERT_EQ(got[0].au[0], 0x10);
+    ASSERT_TRUE(!demuxer.IsEncrypted());
+
+    std::cout << "[PASS] TestAirPlayAudioDemuxerPlainPcm" << std::endl;
+}
+
+// Encode a tone with the ELD encoder, decode the access units back, and confirm
+// the round trip reproduces the tone. This is the whole uplink payload path.
+void TestAacEldCodecRoundTrip() {
+    std::cout << "[RUN] TestAacEldCodecRoundTrip" << std::endl;
+
+    const uint32_t rate = 16000;
+    const uint8_t channels = 1;
+
+    AudioStreamFormat enc{};
+    enc.codec = AudioCodecKind::AacEld;
+    enc.sample_rate = rate;
+    enc.channels = channels;
+    enc.bitrate_bps = 24000;
+
+    AacAudioEncoder encoder;
+    ASSERT_TRUE(encoder.Open(enc));
+    // The reference C receiver uses 480-sample ELD frames at this rate.
+    ASSERT_EQ(encoder.frame_size(), 480u);
+    ASSERT_EQ(static_cast<int>(encoder.channels()), static_cast<int>(channels));
+
+    // The AudioSpecificConfig the encoder reports must describe the same stream.
+    const std::vector<uint8_t> asc = encoder.audio_specific_config();
+    ASSERT_TRUE(asc.size() >= 2);
+    uint32_t ascRate = 0;
+    uint8_t ascChannels = 0;
+    ASSERT_TRUE(ParseAudioSpecificConfig(asc.data(), asc.size(), ascRate, ascChannels));
+    ASSERT_EQ(ascRate, rate);
+    // Channel config may be signalled as 0 (implicit); never more than negotiated.
+    ASSERT_TRUE(ascChannels <= channels);
+
+    const size_t frame = encoder.frame_size();
+    std::vector<std::vector<uint8_t>> aus;
+    std::vector<int16_t> pcm(frame * 4, 0);
+    for (size_t f = 0; f < 4; ++f) {
+        for (size_t i = 0; i < frame; ++i) {
+            const size_t n = f * frame + i;
+            pcm[i] = static_cast<int16_t>(12000.0 * std::sin(2.0 * 3.14159265358979 * 440.0 * n / rate));
+        }
+        std::vector<uint8_t> au = encoder.Encode(pcm.data(), frame);
+        if (!au.empty()) {
+            aus.push_back(std::move(au));
+        }
+    }
+    encoder.Close();
+    ASSERT_TRUE(!encoder.is_open());
+    // Priming may swallow the first frame, but the rest must produce AUs.
+    ASSERT_TRUE(aus.size() >= 2);
+
+    AudioStreamFormat dec{};
+    dec.codec = AudioCodecKind::AacEld;
+    dec.sample_rate = rate;
+    dec.channels = channels;
+
+    AacAudioDecoder decoder;
+    ASSERT_TRUE(decoder.Open(dec, asc));
+
+    double energy = 0.0;
+    size_t samples = 0;
+    for (const auto& au : aus) {
+        DecodedAudioFrame out{};
+        bool concealed = false;
+        ASSERT_TRUE(decoder.Decode(au.data(), au.size(), out, concealed));
+        if (out.pcm.empty()) {
+            continue;
+        }
+        ASSERT_EQ(out.sample_rate, rate);
+        ASSERT_EQ(static_cast<int>(out.channels), static_cast<int>(channels));
+        for (int16_t s : out.pcm) {
+            energy += static_cast<double>(s) * static_cast<double>(s);
+        }
+        samples += out.pcm.size();
+    }
+    decoder.Close();
+
+    // A decoded 440 Hz tone has real energy; silence would be near zero.
+    ASSERT_TRUE(samples > 0);
+    const double rms = std::sqrt(energy / static_cast<double>(samples));
+    ASSERT_TRUE(rms > 100.0);
+
+    std::cout << "[PASS] TestAacEldCodecRoundTrip" << std::endl;
+}
+
+// The sealed AAC-ELD uplink must emit [rtp header][ciphertext][tag][nonce] frames.
+void TestMicrophoneRtpSenderAacEld() {
+    std::cout << "[RUN] TestMicrophoneRtpSenderAacEld" << std::endl;
+
+    MicrophoneRtpSender sender;
+    MicrophoneRtpConfig config;
+    config.destination_ip = "127.0.0.1";
+    config.destination_port = 5002;
+    config.payload_type = 100;
+    config.ssrc = 0;
+    config.sample_rate = 16000;
+    config.channels = 1;
+    config.aac_eld = true;
+    config.bitrate_bps = 24000;
+    config.encrypted = true;
+    for (size_t i = 0; i < config.input_key.size(); ++i) {
+        config.input_key[i] = static_cast<uint8_t>(0xA0 + i);
+    }
+
+    auto status = sender.Start(config);
+    ASSERT_TRUE(status.IsOk());
+    // The encoder's frame length replaces the configured packet size.
+    ASSERT_EQ(sender.GetPacketsSent(), 0ULL);
+
+    std::vector<std::vector<uint8_t>> packets;
+    sender.SetPacketInterceptor([&](Common::ByteSpan rtp) {
+        packets.emplace_back(rtp.begin(), rtp.end());
+    });
+
+    // Four 480-sample frames: the first may be consumed by encoder priming.
+    std::vector<int16_t> pcm(480 * 4, 0);
+    for (size_t i = 0; i < pcm.size(); ++i) {
+        pcm[i] = static_cast<int16_t>(8000.0 * std::sin(2.0 * 3.14159265358979 * 440.0 * i / 16000.0));
+    }
+    sender.PushPcmSamples(pcm.data(), pcm.size(), 0);
+
+    ASSERT_TRUE(packets.size() >= 2);
+    ASSERT_EQ(sender.GetPacketsSent(), packets.size());
+
+    uint64_t nonce = 0;
+    for (size_t p = 0; p < packets.size(); ++p) {
+        const auto& pkt = packets[p];
+        // 12-byte header + ciphertext + 16-byte tag + 8-byte nonce suffix.
+        ASSERT_TRUE(pkt.size() >= AirPlayAudioDemuxer::kMinEncryptedPacket);
+        ASSERT_EQ(pkt[0], 0x80);
+        ASSERT_EQ(pkt[1], 100);
+        ASSERT_EQ(static_cast<uint16_t>((pkt[2] << 8) | pkt[3]), static_cast<uint16_t>(p));
+        // Timestamp advances by one frame per input frame, including priming frames.
+        const uint32_t ts = (static_cast<uint32_t>(pkt[4]) << 24) | (static_cast<uint32_t>(pkt[5]) << 16) |
+                            (static_cast<uint32_t>(pkt[6]) << 8) | static_cast<uint32_t>(pkt[7]);
+        ASSERT_TRUE(ts >= 480u * (p + 1) - 480u);
+        ASSERT_EQ(pkt[8], 0);
+        ASSERT_EQ(pkt[9], 0);
+        ASSERT_EQ(pkt[10], 0);
+        ASSERT_EQ(pkt[11], 0);
+
+        // The trailing nonce must be the per-packet counter in little-endian order.
+        const uint8_t* nonce8 = pkt.data() + pkt.size() - 8;
+        for (int i = 0; i < 8; ++i) {
+            ASSERT_EQ(nonce8[i], static_cast<uint8_t>((nonce >> (8 * i)) & 0xFF));
+        }
+        // Decrypting with the same key/AAD proves the sealing is wire-compatible
+        // with the receiver's downlink path.
+        uint8_t nonce12[12] = {0};
+        std::memcpy(nonce12 + 4, nonce8, 8);
+        std::vector<uint8_t> plain;
+        ASSERT_TRUE(pairing::ChaCha20Poly1305OpenWithAad(config.input_key.data(), nonce12,
+                                                         pkt.data() + 4, 8,
+                                                         pkt.data() + 12, pkt.size() - 12 - 8, plain));
+        ASSERT_TRUE(!plain.empty());
+        nonce++;
+    }
+
+    sender.Stop();
+    ASSERT_TRUE(!sender.IsRunning());
+    std::cout << "[PASS] TestMicrophoneRtpSenderAacEld" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "  CarPlayStation Media Tests (Step 1-4) " << std::endl;
@@ -663,6 +981,13 @@ int main() {
 
     // Step 4: end-to-end mock integration.
     TestMockEndToEndIntegration();
+
+    // Step 5: 音频协商、RTP/AEAD 解封装、AAC 编解码与麦克风上行封包。
+    TestAudioFormatBitmask();
+    TestAirPlayAudioDemuxerRoundTrip();
+    TestAirPlayAudioDemuxerPlainPcm();
+    TestAacEldCodecRoundTrip();
+    TestMicrophoneRtpSenderAacEld();
 
     std::cout << "========================================" << std::endl;
     std::cout << "  ALL MEDIA TESTS PASSED!               " << std::endl;

@@ -50,6 +50,54 @@ Important build, runtime, compatibility, or licensing information.
 
 ## Current Libraries
 
+### fdk-aac (Fraunhofer FDK AAC Codec Library)
+
+**Purpose:**
+AAC decoding for the CarPlay audio downlink (AAC-LC for media, AAC-ELD for
+Siri/telephony/alert) and AAC-ELD encoding for the microphone uplink.
+
+**Version:**
+`v2.0.3` (git tag, commit `716f4394641d53f0d79c9ddac3fa93b03a49f278`).
+
+**Source:**
+Fraunhofer IIS FDK AAC Codec Library. Mirrored with official git tags at
+`https://github.com/mstorsjo/fdk-aac`, which is the URL used for the submodule.
+
+**License:**
+"Software License for The Fraunhofer FDK AAC Codec Library for Android"
+(`NOTICE` in the repository). A permissive BSD-3-clause-style grant with a
+separate patent grant; note the upstream `METADATA` flags it as
+`BY_EXCEPTION_ONLY` for Google-internal third-party use, and MPEG-H / HE-AAC
+patent royalties may apply to end products depending on region and use.
+
+**Reason:**
+CarPlay's audio downlink is AAC (LC for `media`, ELD for the low-latency voice
+streams) and the microphone uplink the iPhone asks for is AAC-ELD 16 kHz mono.
+Windows has no public system encoder that produces AAC-ELD, and Media Foundation
+cannot emit the raw ELD access units plus the AudioSpecificConfig the CarPlay
+RTP payload requires. fdk-aac is the same library the reference implementations
+(carplayd, DiPlay) use, so the codec behaviour matches what iPhones expect.
+
+**Integration:**
+Added as a git submodule at `Lib/fdk-aac` (see `.gitmodules`) and built from
+source as a static library by the top-level `CMakeLists.txt`
+(`add_subdirectory(Lib/fdk-aac EXCLUDE_FROM_ALL)` with `BUILD_SHARED_LIBS OFF`),
+so there is no extra runtime DLL. Third-party sources are compiled at `/W3`
+instead of the project's `/W4`. `CarPlayCore` links `FDK-AAC::fdk-aac` and the
+only file that includes an fdk-aac header is `Core/Media/AacCodecAdapter.cpp`,
+which exposes a pimpl facade (`AacAudioDecoder` / `AacAudioEncoder`) to the rest
+of `Core` (rule 9).
+
+**Notes:**
+- The submodule is pinned to the `v2.0.3` tag; run
+  `git submodule update --init --recursive` after cloning.
+- No third-party source is modified.
+- `AacAudioEncoder::audio_specific_config()` returns a reference into encoder
+  state that `Close()` clears; callers must copy it before closing.
+- The decoder is opened with an explicit `AudioSpecificConfig` built from the
+  CarPlay `audioFormat` bitmask; `TT_MP4_RAW` is the right transport type for
+  the ELD access units CarPlay sends.
+
 ### mpv (libmpv)
 
 **Purpose:**

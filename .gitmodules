@@ -7,3 +7,6 @@
 [submodule "Reference/diplay"]
 	path = Reference/diplay
 	url = https://github.com/shihabal3amri/DiPlay
+[submodule "Lib/fdk-aac"]
+	path = Lib/fdk-aac
+	url = https://github.com/mstorsjo/fdk-aac

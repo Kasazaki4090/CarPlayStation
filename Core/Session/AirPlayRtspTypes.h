@@ -151,6 +151,77 @@ struct RtspResponse {
     }
 };
 
+// Codec the iPhone selected for one audio stream, decoded from the `audioFormat` bitmask.
+// The numeric values deliberately mirror Core/Media/AacCodecAdapter.h :: AudioCodecKind so the
+// Service can static_cast them; Session must not include Media (Media already depends on Session).
+enum class RtspAudioCodec : uint8_t {
+    Unknown = 0,
+    PcmS16Be = 1,
+    AacLc = 2,
+    AacEld = 3
+};
+
+// One entry of the SETUP phase-2 `streams` array with type 100/101/102.
+struct AudioStreamNegotiation {
+    int64_t type{0};                  // 100 = MainAudio, 101 = AltAudio, 102 = MainHighAudio
+    std::string audio_type;           // "media" | "speechRecognition" | "telephony" | "alert" | ...
+    RtspAudioCodec codec{RtspAudioCodec::Unknown};
+    uint32_t sample_rate{0};
+    uint8_t channels{0};
+    uint64_t format_mask{0};          // raw audioFormat bitmask as offered by the iPhone
+    uint64_t stream_connection_id{0};
+    std::array<uint8_t, 32> output_key{}; // decrypt the iPhone -> accessory downlink
+    std::array<uint8_t, 32> input_key{};  // encrypt the accessory -> iPhone mic uplink
+    bool input_requested{false};      // type 100 with input=true: the iPhone wants our mic
+    uint16_t iphone_uplink_port{0};   // the iPhone's dataPort for the mic uplink
+    uint16_t data_port{0};            // the port we answered with (downlink)
+    uint16_t control_port{0};         // answered for type 102 only
+};
+
+// Decode the CarPlay `audioFormat` bitmask into codec/sample rate/channel count.
+// Faithful to carplayd's `decode_audio_format` (session.rs:818-834).
+inline void DecodeAudioFormat(uint64_t mask, RtspAudioCodec& codec, uint32_t& sample_rate,
+                              uint8_t& channels) {
+    struct Row {
+        uint64_t mask;
+        RtspAudioCodec codec;
+        uint32_t rate;
+        uint8_t channels;
+    };
+    static constexpr Row kRows[] = {
+        {0x0000000000000010ULL, RtspAudioCodec::PcmS16Be, 16000, 1},
+        {0x0000000000008000ULL, RtspAudioCodec::PcmS16Be, 48000, 2},
+        {0x0000000000400000ULL, RtspAudioCodec::AacLc, 44100, 2},
+        {0x0000000000800000ULL, RtspAudioCodec::AacLc, 48000, 2},
+        {0x0000000001000000ULL, RtspAudioCodec::AacEld, 44100, 2},
+        {0x0000000002000000ULL, RtspAudioCodec::AacEld, 48000, 2},
+        {0x0000000004000000ULL, RtspAudioCodec::AacEld, 16000, 1},
+        {0x0000000008000000ULL, RtspAudioCodec::AacEld, 24000, 1},
+        {0x0000000080000000ULL, RtspAudioCodec::AacEld, 44100, 1},
+        {0x0000000100000000ULL, RtspAudioCodec::AacEld, 48000, 1},
+    };
+    // The iPhone may offer several bits at once (e.g. 0x8010). Prefer the richest
+    // PCM entry, matching carplayd's handling of the combined wired mask.
+    if (mask & 0x0000000000008000ULL) {
+        codec = RtspAudioCodec::PcmS16Be;
+        sample_rate = 48000;
+        channels = 2;
+        return;
+    }
+    for (const Row& row : kRows) {
+        if (mask == row.mask) {
+            codec = row.codec;
+            sample_rate = row.rate;
+            channels = row.channels;
+            return;
+        }
+    }
+    // Nothing matched: CarPlay's documented fallback is AAC-ELD 24 kHz mono.
+    codec = RtspAudioCodec::AacEld;
+    sample_rate = 24000;
+    channels = 1;
+}
+
 struct NegotiatedMediaParams {
     uint32_t video_width{1280};
     uint32_t video_height{720};
@@ -172,6 +243,18 @@ struct NegotiatedMediaParams {
 
     uint16_t mic_audio_data_port{0};
     uint16_t mic_audio_control_port{0};
+
+    // Every audio stream the iPhone set up in SETUP phase 2, in request order. The
+    // Service reads this to start one downlink receiver per lane and to arm the mic
+    // uplink when the iPhone asked for input.
+    std::vector<AudioStreamNegotiation> audio_streams;
+    bool mic_input_requested{false};
+    uint16_t mic_uplink_port{0};
+    std::string mic_peer_address; // the RTSP control peer's address for the mic uplink
+    RtspAudioCodec mic_codec{RtspAudioCodec::Unknown};
+    uint32_t mic_sample_rate{0};
+    uint8_t mic_channels{0};
+    std::array<uint8_t, 32> mic_input_key{};
 
     std::string session_id;
     std::array<uint8_t, 32> video_decrypt_key{0};
