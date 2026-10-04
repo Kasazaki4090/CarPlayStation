@@ -45,6 +45,16 @@ Core::Common::Status ApplicationService::StartCarPlay(const AppSettings& setting
         return status;
     }
 
+    // Inject the UI's D3D11 device into the video decoder so its shared texture
+    // is created on the SAME device the renderer samples from. Cross-device
+    // shared textures in the same process are not coherent, so without this the
+    // reader would never see the writer's updates (frozen first frame).
+    if (video_shared_device_) {
+        if (auto decoder = core_api_->GetVideoDecoder()) {
+            decoder->SetSharedDevice(video_shared_device_, video_shared_context_);
+        }
+    }
+
     // Build + inject the MFi signer for the selected backend (LocalFile /
     // Network / HardwareI2C) so MFi auth uses the user's configuration.
     ApplyMfiSigner(settings);
@@ -63,6 +73,15 @@ Core::Common::Status ApplicationService::StartCarPlay(const AppSettings& setting
             decoder->SetFrameCallback(frame_consumer_);
             Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Info, "AppService",
                 "Wired video frame consumer to video decoder");
+        }
+    }
+
+    // Wire the CPU frame consumer (MpvVideoPlayer presentation path).
+    if (cpu_frame_consumer_) {
+        if (auto decoder = core_api_->GetVideoDecoder()) {
+            decoder->SetCpuFrameCallback(cpu_frame_consumer_);
+            Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Info, "AppService",
+                "Wired CPU frame consumer to video decoder");
         }
     }
 
@@ -221,6 +240,27 @@ void ApplicationService::RegisterFrameConsumer(Core::Media::VideoFrameCallback c
     // Wire the frame consumer to the video decoder.
     if (auto decoder = core_api_->GetVideoDecoder()) {
         decoder->SetFrameCallback(frame_consumer_);
+    }
+}
+
+void ApplicationService::RegisterCpuFrameConsumer(Core::Media::CpuFrameCallback callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cpu_frame_consumer_ = std::move(callback);
+
+    // Wire the CPU frame consumer to the video decoder.
+    if (auto decoder = core_api_->GetVideoDecoder()) {
+        decoder->SetCpuFrameCallback(cpu_frame_consumer_);
+    }
+}
+
+void ApplicationService::SetVideoSharedDevice(void* device, void* context) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    video_shared_device_ = device;
+    video_shared_context_ = context;
+
+    // Apply immediately if the decoder already exists (e.g. re-init path).
+    if (auto decoder = core_api_->GetVideoDecoder()) {
+        decoder->SetSharedDevice(device, context);
     }
 }
 

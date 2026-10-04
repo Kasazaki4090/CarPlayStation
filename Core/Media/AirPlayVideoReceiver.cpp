@@ -21,6 +21,11 @@ AirPlayVideoReceiver::AirPlayVideoReceiver(std::shared_ptr<IVideoDecoder> decode
             decoder_->DecodeAccessUnit(Common::ByteSpan(frame.annexBData.data(), frame.annexBData.size()), frame.ptsUs);
         }
     });
+    // When the decoder stalls (input buffer stays full), ask the demuxer to drop
+    // to the next IDR keyframe so the decoder can resynchronize.
+    if (decoder_) {
+        decoder_->SetResyncCallback([this]() { demuxer_.RequestResync(); });
+    }
 }
 
 AirPlayVideoReceiver::~AirPlayVideoReceiver() {
@@ -227,6 +232,14 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
     uint64_t last_stat_time_ms = 0;
     uint64_t frames_since_stat = 0;
 
+    // Reused across frames. At 60 fps a per-frame allocation on this thread is
+    // pure added latency in front of the decoder, and the ring-buffer notify is
+    // what keeps mpv's demuxer fed.
+    std::vector<uint8_t> plain;
+    std::vector<uint8_t> annexb;
+    plain.reserve(256 * 1024);
+    annexb.reserve(288 * 1024);
+
     while (running_.load()) {
         size_t hdrRead = 0;
         while (hdrRead < sizeof(hdr) && running_.load()) {
@@ -236,7 +249,10 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
 #ifdef _WIN32
                 if (n < 0) {
                     err = WSAGetLastError();
-                    if (err == WSAETIMEDOUT && running_.load()) {
+                    // Transient errors (timeout, interrupted by a signal/console
+                    // event) are not real disconnects: retry the recv.
+                    if ((err == WSAETIMEDOUT || err == WSAEINTR || err == WSAEWOULDBLOCK) &&
+                        running_.load()) {
                         continue;
                     }
                 }
@@ -280,7 +296,10 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
 #ifdef _WIN32
                 if (n < 0) {
                     err = WSAGetLastError();
-                    if (err == WSAETIMEDOUT && running_.load()) {
+                    // Transient errors (timeout, interrupted, would-block) are
+                    // not real disconnects: retry the recv.
+                    if ((err == WSAETIMEDOUT || err == WSAEINTR || err == WSAEWOULDBLOCK) &&
+                        running_.load()) {
                         continue;
                     }
                 }
@@ -298,12 +317,16 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
             std::chrono::steady_clock::now().time_since_epoch()).count());
 
         if (opcode == 0) { // VideoFrame
-            std::vector<uint8_t> plain;
+            // `src` is the AVCC access unit: either the decrypted body, or the
+            // body itself when the session is not encrypted. Decrypting into a
+            // reused buffer avoids a heap allocation per frame.
+            const std::vector<uint8_t>* src = &body;
             if (decrypt_key_set_.load()) {
                 uint8_t nonce[12] = {0};
                 uint64_t cnt = frame_counter_++;
                 memcpy(nonce + 4, &cnt, 8);
 
+                plain.clear();
                 if (!pairing::ChaCha20Poly1305OpenWithAad(
                         decrypt_key_.data(), nonce, hdr, sizeof(hdr),
                         body.data(), body.size(), plain)) {
@@ -316,34 +339,37 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
                                  " decrypted: sealed=", std::to_string(body.size()),
                                  " plain=", std::to_string(plain.size()));
                 }
-            } else {
-                plain = std::move(body);
+                src = &plain;
             }
 
             // Convert AVCC length-prefixed NALUs to Annex-B (00 00 00 01 prefix)
-            std::vector<uint8_t> annexb;
-            annexb.reserve(plain.size() + 16);
+            annexb.clear();
+            if (annexb.capacity() < src->size() + 16) {
+                annexb.reserve(src->size() + 16);
+            }
             size_t off = 0;
             size_t nalu_count = 0;
-            std::string nalu_types_str;
             bool has_idr = false;
+            uint8_t nal_types[8] = {0};
+            size_t nal_type_count = 0;
 
-            while (off + 4 <= plain.size()) {
-                uint32_t naluLen = Common::Endian::ReadBe32(plain.data() + off);
+            while (off + 4 <= src->size()) {
+                uint32_t naluLen = Common::Endian::ReadBe32(src->data() + off);
                 off += 4;
-                if (naluLen == 0 || off + naluLen > plain.size()) {
+                if (naluLen == 0 || off + naluLen > src->size()) {
                     break;
                 }
-                uint8_t nal_type = plain[off] & 0x1F;
+                uint8_t nal_type = src->data()[off] & 0x1F;
                 if (nal_type == 5) has_idr = true;
-                if (!nalu_types_str.empty()) nalu_types_str += ",";
-                nalu_types_str += std::to_string(nal_type);
+                if (nal_type_count < sizeof(nal_types)) {
+                    nal_types[nal_type_count++] = nal_type;
+                }
 
                 annexb.push_back(0);
                 annexb.push_back(0);
                 annexb.push_back(0);
                 annexb.push_back(1);
-                annexb.insert(annexb.end(), plain.data() + off, plain.data() + off + naluLen);
+                annexb.insert(annexb.end(), src->data() + off, src->data() + off + naluLen);
                 off += naluLen;
                 nalu_count++;
             }
@@ -353,7 +379,15 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
                 if (decSt.IsOk()) {
                     uint64_t total = received_frames_.fetch_add(1, std::memory_order_relaxed) + 1;
                     frames_since_stat++;
+                    // Only the first frame and keyframes are logged, so the
+                    // NAL type list is only formatted for those.
                     if (!first_frame_logged_.exchange(true) || has_idr) {
+                        std::string nalu_types_str;
+                        for (size_t t = 0; t < sizeof(nal_types); ++t) {
+                            if (t >= nal_type_count) break;
+                            if (!nalu_types_str.empty()) nalu_types_str += ",";
+                            nalu_types_str += std::to_string(nal_types[t]);
+                        }
                         CPS_LOG_INFO("VideoReceiver", "Video frame #", std::to_string(total),
                                      (has_idr ? " [KEYFRAME IDR]" : ""), " decoded: ",
                                      std::to_string(annexb.size()), " B, ",

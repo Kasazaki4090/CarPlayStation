@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Common/Result.h"
+#include "Core/Media/IVideoDecoder.h"
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -48,6 +49,15 @@ public:
      * @brief Callback invoked by the video decoder when a new frame texture is ready.
      */
     void ConsumeFrame(uintptr_t textureHandle, uint32_t width, uint32_t height, uint64_t ptsUs);
+
+    /**
+     * @brief Callback invoked by a CPU-based decoder (MpvVideoPlayer) when a new
+     *        decoded frame is available in the shared CPU frame buffer. Copies
+     *        the latest frame into a local staging area; the actual D3D11
+     *        upload happens on the UI thread in Render() (single-context, no
+     *        cross-thread GPU work).
+     */
+    void ConsumeCpuFrame(Core::Media::CpuFrameBuffer* buffer);
 
     /**
      * @brief Render the current video frame into the SwapChain with Letterbox letterboxing.
@@ -114,6 +124,20 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> current_texture_;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_srv_;
     Microsoft::WRL::ComPtr<IDXGIKeyedMutex> current_keyed_mutex_;
+
+    // CPU frame path (MpvVideoPlayer): the decoder writes decoded BGRA pixels
+    // into a shared CpuFrameBuffer; we only remember the buffer pointer and the
+    // dimensions here, and upload straight from the shared buffer into a local
+    // D3D11 texture on the UI thread in Render(). Single-context, no cross-
+    // thread GPU work, no keyed mutex / deferred context, and no intermediate
+    // copy of the frame (a 720p frame is ~3.7 MB, so one copy per frame per
+    // thread is latency we can spend elsewhere).
+    Core::Media::CpuFrameBuffer* cpu_frame_buffer_{nullptr};
+    uint64_t last_cpu_frame_counter_{0};
+    uint32_t cpu_frame_width_{0};
+    uint32_t cpu_frame_height_{0};
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> cpu_texture_;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cpu_srv_;
 
     mutable std::mutex frame_mutex_;
     uint32_t back_buffer_index_{0};

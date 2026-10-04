@@ -63,8 +63,14 @@ Core::Common::Status MainWindow::Create(const WindowConfig& config) {
     RegisterClassExW(&wc);
 
     // 4. Calculate Window Dimensions for Target Client Area
+    //
+    // Windowed mode is locked to a single outer size: no WS_THICKFRAME (the user
+    // cannot drag a border to stretch it) and no WS_MAXIMIZEBOX. That makes it
+    // impossible to distort the picture by resizing; only the borderless
+    // fullscreen mode can change the client size, and there the renderer
+    // letterboxes to keep the video aspect.
     RECT rc = { 0, 0, static_cast<LONG>(client_width_), static_cast<LONG>(client_height_) };
-    DWORD dwStyle = WS_OVERLAPPEDWINDOW;
+    DWORD dwStyle = WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
     AdjustWindowRectEx(&rc, dwStyle, FALSE, 0);
 
     int windowWidth = rc.right - rc.left;
@@ -120,10 +126,29 @@ Core::Common::Status MainWindow::Create(const WindowConfig& config) {
     }
     CPS_LOG_INFO("MainWindow", "Client size=", client_width_, "x", client_height_, " DPI=", dpi_);
 
+    // Remember the outer size the window actually ended up with. WM_GETMINMAXINFO
+    // pins it so nothing (drag, maximize, snap, programmatic resize) can change it.
+    locked_client_w_ = client_width_;
+    locked_client_h_ = client_height_;
+    RECT windowRect{};
+    if (GetWindowRect(hwnd_, &windowRect)) {
+        fixed_w_ = windowRect.right - windowRect.left;
+        fixed_h_ = windowRect.bottom - windowRect.top;
+    }
+
     is_open_ = true;
     prev_style_ = dwStyle;
 
     return Core::Common::Status::Ok();
+}
+
+void MainWindow::ComputeFixedSizeForDpi(UINT dpi) {
+    RECT rc = { 0, 0, static_cast<LONG>(locked_client_w_), static_cast<LONG>(locked_client_h_) };
+    if (AdjustWindowRectExForDpi(&rc, prev_style_, FALSE, 0, dpi) == FALSE) {
+        AdjustWindowRectEx(&rc, prev_style_, FALSE, 0);
+    }
+    fixed_w_ = rc.right - rc.left;
+    fixed_h_ = rc.bottom - rc.top;
 }
 
 void MainWindow::AttachRenderer(D3D11Renderer* renderer) {
@@ -156,6 +181,9 @@ void MainWindow::SetDisplayMode(WindowDisplayMode mode) {
         mi.cbSize = sizeof(MONITORINFO);
         if (GetMonitorInfoW(hMon, &mi)) {
             SetWindowLongW(hwnd_, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+            // Must be set before the resize: WM_GETMINMAXINFO only pins the size
+            // while we are in Windowed mode.
+            display_mode_ = WindowDisplayMode::BorderlessFullscreen;
             SetWindowPos(
                 hwnd_,
                 HWND_TOP,
@@ -165,11 +193,15 @@ void MainWindow::SetDisplayMode(WindowDisplayMode mode) {
                 mi.rcMonitor.bottom - mi.rcMonitor.top,
                 SWP_NOOWNERZORDER | SWP_FRAMECHANGED
             );
-            display_mode_ = WindowDisplayMode::BorderlessFullscreen;
         }
     } else {
         // Switch back to Windowed
         SetWindowLongW(hwnd_, GWL_STYLE, prev_style_ | WS_VISIBLE);
+        // Set the mode first so WM_GETMINMAXINFO clamps the restored window to the
+        // locked size.
+        display_mode_ = WindowDisplayMode::Windowed;
+        // Always come back as a normal (non-maximized) window at the locked size.
+        prev_placement_.showCmd = SW_SHOWNORMAL;
         SetWindowPlacement(hwnd_, &prev_placement_);
         SetWindowPos(
             hwnd_,
@@ -177,7 +209,6 @@ void MainWindow::SetDisplayMode(WindowDisplayMode mode) {
             0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED
         );
-        display_mode_ = WindowDisplayMode::Windowed;
     }
 }
 
@@ -244,6 +275,44 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     }
 
     switch (msg) {
+        case WM_GETMINMAXINFO: {
+            // Windowed mode: pin the window to one size so the client area can
+            // never be stretched away from the video aspect. Fullscreen uses a
+            // borderless WS_POPUP window sized to the monitor, so it is left alone.
+            if (display_mode_ == WindowDisplayMode::Windowed && fixed_w_ > 0 && fixed_h_ > 0) {
+                auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+                mmi->ptMinTrackSize.x = fixed_w_;
+                mmi->ptMinTrackSize.y = fixed_h_;
+                mmi->ptMaxTrackSize.x = fixed_w_;
+                mmi->ptMaxTrackSize.y = fixed_h_;
+                // A maximized window is sized from ptMaxSize/ptMaxPosition, so pin
+                // those too (centered on the work area) instead of the whole screen.
+                HMONITOR hMon = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+                MONITORINFO mi{};
+                mi.cbSize = sizeof(MONITORINFO);
+                if (GetMonitorInfoW(hMon, &mi)) {
+                    const LONG workW = mi.rcWork.right - mi.rcWork.left;
+                    const LONG workH = mi.rcWork.bottom - mi.rcWork.top;
+                    mmi->ptMaxSize.x = fixed_w_ > workW ? workW : fixed_w_;
+                    mmi->ptMaxSize.y = fixed_h_ > workH ? workH : fixed_h_;
+                    mmi->ptMaxPosition.x = mi.rcWork.left + (workW - mmi->ptMaxSize.x) / 2;
+                    mmi->ptMaxPosition.y = mi.rcWork.top + (workH - mmi->ptMaxSize.y) / 2;
+                }
+                return 0;
+            }
+            break;
+        }
+
+        case WM_SYSCOMMAND: {
+            // Without WS_MAXIMIZEBOX the caption can still be double-clicked and
+            // Win+Up can still ask for a maximize. Refuse it while windowed.
+            if (display_mode_ == WindowDisplayMode::Windowed &&
+                (wParam & 0xFFF0) == SC_MAXIMIZE) {
+                return 0;
+            }
+            break;
+        }
+
         case WM_SIZE: {
             UINT width = LOWORD(lParam);
             UINT height = HIWORD(lParam);
@@ -265,7 +334,16 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         case WM_DPICHANGED: {
             dpi_ = HIWORD(wParam);
             auto* prcNew = reinterpret_cast<RECT*>(lParam);
-            if (prcNew) {
+            if (display_mode_ == WindowDisplayMode::Windowed) {
+                // Keep the client area at the locked physical size (1:1 with the
+                // video) instead of the DPI-scaled rect the system suggests. Only
+                // the frame grows, so take the suggested position but our own size.
+                ComputeFixedSizeForDpi(dpi_);
+                LONG x = prcNew ? prcNew->left : 0;
+                LONG y = prcNew ? prcNew->top : 0;
+                SetWindowPos(hwnd, nullptr, x, y, fixed_w_, fixed_h_,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            } else if (prcNew) {
                 SetWindowPos(
                     hwnd,
                     nullptr,

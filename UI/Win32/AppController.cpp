@@ -61,6 +61,10 @@ Core::Common::Status AppController::Initialize(
     }
     window_.AttachRenderer(&renderer_);
 
+    // Inject the renderer's D3D11 device/context into the video decoder so its
+    // shared texture is created on the same device the renderer samples from.
+    app_api_->SetVideoSharedDevice(renderer_.GetDevice(), renderer_.GetContext());
+
     // 4. Initialize Direct2D Overlay Renderer
     (void)overlay_.Init(renderer_.GetSwapChain(), renderer_.GetBackBufferIndex());
     overlay_.UpdateSettings(settings_);
@@ -97,6 +101,13 @@ Core::Common::Status AppController::Initialize(
 
     app_api_->RegisterFrameConsumer([this](uintptr_t handle, uint32_t w, uint32_t h, uint64_t pts) {
         renderer_.ConsumeFrame(handle, w, h, pts);
+    });
+
+    // CPU frame path (MpvVideoPlayer): the decoder hands decoded BGRA pixels
+    // to the renderer, which uploads them to a local texture on its own
+    // immediate context (no D3D11 shared texture / keyed mutex).
+    app_api_->RegisterCpuFrameConsumer([this](Core::Media::CpuFrameBuffer* buffer) {
+        renderer_.ConsumeCpuFrame(buffer);
     });
 
     // 7. Show Window immediately so user gets instant visual feedback
@@ -157,11 +168,19 @@ bool AppController::Step() {
     // 2. Render Direct2D overlay HUD onto the backbuffer
     (void)overlay_.Draw(window_.GetClientWidth(), window_.GetClientHeight());
 
-    // 3. Present the combined frame to the screen
+    // 3. Present the combined frame to the screen.
+    //
+    // Present(1, 0) blocks until the next vertical blank, so it already paces
+    // this loop at the display refresh rate. An extra Sleep(1) here used to add
+    // up to a full timer tick (15.6 ms with the default system timer
+    // resolution) on top of that, which is directly visible as input-to-screen
+    // lag. Only idle when the window is minimized, where Present() returns
+    // immediately and the loop would otherwise spin.
     (void)renderer_.Present();
 
-    // 4. Yield to the OS to keep input responsive and avoid 100% CPU spin
-    ::Sleep(1);
+    if (::IsIconic(window_.GetHwnd())) {
+        ::Sleep(16);
+    }
 
     return true;
 }

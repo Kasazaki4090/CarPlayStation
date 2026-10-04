@@ -131,26 +131,36 @@ Common::Status MpvVideoPlayer::Init(const Common::VideoStreamSpec& spec) {
         return Common::MakeError(Common::StatusCode::MediaPipelineError, "mpv_create failed");
     }
 
-    // Configure mpv for low-latency software video decode.
+    // Configure mpv for low-latency software video decode. Every name/value
+    // below was verified against the linked libmpv build (v0.41.0-1092); the
+    // previous list silently lost four options (`fps`, `demuxer-cache-secs`,
+    // `no-audio`, `msg-level=demuxer=warn:...`), which left mpv running with
+    // stock demuxer read-ahead and display pacing.
     //  - vo=libmpv: render API requires vo=libmpv (vo=none disables video pipeline entirely!)
     //  - hwdec=no: software decode (mpv's FFmpeg H.264 decoder is fast and reliable)
     //  - demuxer-lavf-format: raw H.264 Annex-B (or HEVC) format
-    //  - fps=60: default framerate for raw streams without container timestamps
-    //  - untimed=yes: deliver frames as soon as decoded without synthetic delay
-    //  - cache=no & demuxer-cache-secs=0: minimum latency for live mirroring
+    //  - untimed=yes: the stream carries no usable container timestamps, so play
+    //    every frame as soon as it is decoded instead of pacing on guessed PTS
+    //  - video-timing-offset=0 + video-latency-hacks=yes: no display delay
+    //  - cache=no + tiny demuxer read-ahead: never hold frames in the demuxer
     const char* demuxFmt = (spec.codec == Common::VideoCodec::HEVC) ? "hevc" : "h264";
     const char* opts[] = {
         "vo", "libmpv",
         "hwdec", "no",
         "demuxer-lavf-format", demuxFmt,
-        "fps", "60",
         "untimed", "yes",
         "cache", "no",
-        "demuxer-cache-secs", "0",
+        "demuxer-max-bytes", "128KiB",
+        "demuxer-max-back-bytes", "0",
         "video-timing-offset", "0",
-        "no-audio", "yes",
-        "msg-level", "demuxer=warn:decoder=warn:core=warn",
+        "video-latency-hacks", "yes",
+        "audio", "no",
+        "sub", "no",
+        "deband", "no",
         "keep-open", "no",
+        "terminal", "no",
+        "load-stats-overlay", "no",
+        "msg-level", "all=no",
     };
     // mpv_set_option_string takes (name, value) pairs.
     for (size_t i = 0; i < sizeof(opts) / sizeof(opts[0]); i += 2) {
@@ -204,19 +214,43 @@ Common::Status MpvVideoPlayer::Init(const Common::VideoStreamSpec& spec) {
 }
 
 Common::Status MpvVideoPlayer::ConfigureD3D11SharedSurfaces() {
-    // Create a D3D11 device with DXGI shared-surface support.
-    D3D_FEATURE_LEVEL featureLevel;
-    HRESULT hr = D3D11CreateDevice(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-        nullptr, 0, D3D11_SDK_VERSION,
-        &d3d_device_, &featureLevel, &d3d_context_);
-    if (FAILED(hr)) {
-        return Common::MakeError(Common::StatusCode::MediaPipelineError,
-                                 "D3D11 device creation failed: 0x" + std::to_string(static_cast<unsigned long>(hr)));
+    // Use the renderer's injected D3D11 device when available so the shared
+    // texture lives on the SAME device the renderer samples from. Cross-device
+    // shared textures in the same process are not coherent, so the reader would
+    // never see the writer's UpdateSubresource updates (frozen first frame).
+    if (injected_device_) {
+        d3d_device_ = injected_device_;
+        owns_d3d_device_ = false; // do not release the injected device
+        // The renderer's immediate context is owned by the UI thread (Render/
+        // Present). Sharing it with the writer thread deadlocks the driver, so
+        // create a dedicated deferred context on the same device for the writer.
+        HRESULT dhr = d3d_device_->CreateDeferredContext(0, &d3d_deferred_context_);
+        if (SUCCEEDED(dhr) && d3d_deferred_context_) {
+            d3d_context_ = d3d_deferred_context_;
+            CPS_LOG_INFO("MpvVideoPlayer", "Using injected D3D11 device with deferred writer context");
+        } else {
+            // Fall back to the injected immediate context (legacy behavior).
+            d3d_context_ = injected_context_;
+            CPS_LOG_WARN("MpvVideoPlayer", "Deferred context creation failed (0x",
+                         std::to_string(static_cast<unsigned long>(dhr)),
+                         "); using injected immediate context");
+        }
+    } else {
+        // No injected device: create our own (legacy path).
+        owns_d3d_device_ = true;
+        D3D_FEATURE_LEVEL featureLevel;
+        HRESULT hr = D3D11CreateDevice(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            nullptr, 0, D3D11_SDK_VERSION,
+            &d3d_device_, &featureLevel, &d3d_context_);
+        if (FAILED(hr)) {
+            return Common::MakeError(Common::StatusCode::MediaPipelineError,
+                                     "D3D11 device creation failed: 0x" + std::to_string(static_cast<unsigned long>(hr)));
+        }
     }
 
-    hr = d3d_device_->QueryInterface(IID_PPV_ARGS(&dxgi_device_));
+    HRESULT hr = d3d_device_->QueryInterface(IID_PPV_ARGS(&dxgi_device_));
     if (FAILED(hr)) {
         return Common::MakeError(Common::StatusCode::MediaPipelineError,
                                  "DXGI device query failed: 0x" + std::to_string(static_cast<unsigned long>(hr)));
@@ -269,8 +303,19 @@ void MpvVideoPlayer::ReleaseD3D11SharedSurfaces() {
     if (shared_resource_) { shared_resource_->Release(); shared_resource_ = nullptr; }
     if (shared_texture_)  { shared_texture_->Release();  shared_texture_ = nullptr; }
     if (dxgi_device_)     { dxgi_device_->Release();     dxgi_device_ = nullptr; }
-    if (d3d_context_)     { d3d_context_->Release();     d3d_context_ = nullptr; }
-    if (d3d_device_)      { d3d_device_->Release();      d3d_device_ = nullptr; }
+    // Release the deferred writer context we created on the injected device.
+    if (d3d_deferred_context_) { d3d_deferred_context_->Release(); d3d_deferred_context_ = nullptr; }
+    // Only release the device/context we own. When the renderer's device was
+    // injected via SetSharedDevice, the UI layer owns it and must keep it.
+    if (owns_d3d_device_) {
+        if (d3d_context_) { d3d_context_->Release(); d3d_context_ = nullptr; }
+        if (d3d_device_)  { d3d_device_->Release();  d3d_device_ = nullptr; }
+    } else {
+        d3d_context_ = nullptr;
+        d3d_device_ = nullptr;
+    }
+    injected_device_ = nullptr;
+    injected_context_ = nullptr;
     shared_handle_ = 0;
 }
 
@@ -449,30 +494,56 @@ void MpvVideoPlayer::RenderThreadMain() {
             continue;
         }
 
-        // Upload the rendered frame to the shared D3D11 texture.
-        UploadFrameToSharedTexture(sw_buffer_.data(), spec_.width, spec_.height);
+        // Upload the rendered frame to the shared D3D11 texture. Only needed by
+        // the legacy shared-texture callback; when a CPU frame callback is
+        // registered the renderer never looks at that texture, and the keyed
+        // mutex + deferred-context command list costs several ms per frame.
+        bool haveCpuCallback = false;
+        {
+            std::lock_guard<std::mutex> lock(callback_mutex_);
+            haveCpuCallback = static_cast<bool>(cpu_frame_callback_);
+        }
+        if (!haveCpuCallback) {
+            UploadFrameToSharedTexture(sw_buffer_.data(), spec_.width, spec_.height);
+        }
+
+        // Write the decoded frame into the CPU shared frame buffer (the
+        // primary presentation path). The renderer copies the latest frame out
+        // and uploads it to a local texture on its own immediate context.
+        {
+            std::lock_guard<std::mutex> bufLock(cpu_frame_buffer_.mutex);
+            const size_t rowBytes = static_cast<size_t>(spec_.width) * 4;
+            if (cpu_frame_buffer_.data.size() != rowBytes * spec_.height) {
+                cpu_frame_buffer_.data.resize(rowBytes * spec_.height);
+            }
+            // sw_buffer_ rows are sw_stride_ bytes (64-byte aligned); the CPU
+            // frame buffer is tightly packed (width*4). Copy row by row.
+            uint8_t* dst = cpu_frame_buffer_.data.data();
+            const uint8_t* src = sw_buffer_.data();
+            for (uint32_t y = 0; y < spec_.height; ++y) {
+                std::memcpy(dst + y * rowBytes, src + y * sw_stride_, rowBytes);
+            }
+            cpu_frame_buffer_.width = spec_.width;
+            cpu_frame_buffer_.height = spec_.height;
+            ++cpu_frame_buffer_.frame_counter;
+        }
 
         // Report the swap (helps mpv with timing).
         api_.mpv_render_context_report_swap(render_ctx_);
 
-        // Fire the frame callback (presentation handoff).
-        VideoFrameCallback callback;
-        uintptr_t handle = 0;
-        uint32_t w = 0, h = 0;
+        // Fire the CPU frame callback (presentation handoff).
+        CpuFrameCallback cpuCallback;
         {
             std::lock_guard<std::mutex> lock(callback_mutex_);
-            callback = frame_callback_;
-            handle = shared_handle_;
-            w = spec_.width;
-            h = spec_.height;
+            cpuCallback = cpu_frame_callback_;
         }
-        if (callback && handle != 0) {
+        if (cpuCallback) {
             uint64_t total = decoded_frames_.fetch_add(1) + 1;
             if (total == 1) {
-                CPS_LOG_INFO("MpvVideoPlayer", "First frame rendered and uploaded to D3D11 shared texture (",
-                             w, "x", h, ")");
+                CPS_LOG_INFO("MpvVideoPlayer", "First frame rendered and written to CPU frame buffer (",
+                             spec_.width, "x", spec_.height, ")");
             }
-            callback(handle, w, h, 0);
+            cpuCallback(&cpu_frame_buffer_);
         }
     }
 
@@ -499,6 +570,15 @@ void MpvVideoPlayer::UploadFrameToSharedTexture(const uint8_t* bgraData, uint32_
     box.back = 1;
     d3d_context_->UpdateSubresource(shared_texture_, 0, &box, bgraData,
                                     static_cast<UINT>(sw_stride_), 0);
+    // A deferred context does not execute commands on Flush(); it only
+    // enqueues them. FinishCommandList() executes the queued commands so the
+    // shared texture is actually updated and visible to the renderer's
+    // immediate context. (For an immediate context this is a no-op.)
+    if (d3d_deferred_context_) {
+        d3d_context_->FinishCommandList(false, nullptr);
+    } else {
+        d3d_context_->Flush();
+    }
     if (shared_keyed_mutex_) {
         shared_keyed_mutex_->ReleaseSync(0);
     }
@@ -569,6 +649,26 @@ Common::Status MpvVideoPlayer::DecodeAccessUnit(Common::ByteSpan nalData, uint64
 void MpvVideoPlayer::SetFrameCallback(VideoFrameCallback callback) {
     std::lock_guard<std::mutex> lock(callback_mutex_);
     frame_callback_ = std::move(callback);
+}
+
+void MpvVideoPlayer::SetCpuFrameCallback(CpuFrameCallback callback) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    cpu_frame_callback_ = std::move(callback);
+}
+
+void MpvVideoPlayer::SetSharedDevice(void* device, void* context) {
+#ifdef _WIN32
+    // Inject the renderer's D3D11 device so the shared texture is created on
+    // the SAME device the renderer samples from (cross-device shared textures
+    // in the same process are not coherent). Must be called before Init().
+    injected_device_ = static_cast<ID3D11Device*>(device);
+    injected_context_ = static_cast<ID3D11DeviceContext*>(context);
+    if (injected_device_) {
+        CPS_LOG_INFO("MpvVideoPlayer", "Shared D3D11 device injected from renderer");
+    }
+#else
+    (void)device; (void)context;
+#endif
 }
 
 VideoCapabilities MpvVideoPlayer::QueryCapabilities() const {
@@ -669,6 +769,11 @@ Common::Status MpvVideoPlayer::DecodeAccessUnit(Common::ByteSpan nalData, uint64
 void MpvVideoPlayer::SetFrameCallback(VideoFrameCallback callback) {
     std::lock_guard<std::mutex> lock(callback_mutex_);
     frame_callback_ = std::move(callback);
+}
+
+void MpvVideoPlayer::SetCpuFrameCallback(CpuFrameCallback callback) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    cpu_frame_callback_ = std::move(callback);
 }
 
 VideoCapabilities MpvVideoPlayer::QueryCapabilities() const {

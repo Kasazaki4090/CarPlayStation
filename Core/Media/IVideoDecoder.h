@@ -3,7 +3,9 @@
 #include "Core/Common/Types.h"
 #include "Core/Common/Result.h"
 #include "Core/Common/Config.h"
+#include <cstdint>
 #include <functional>
+#include <mutex>
 #include <vector>
 #include <string_view>
 
@@ -58,6 +60,25 @@ struct VideoCapabilities {
 // Texture delivery callback: delivers D3D11 shared surface handle (or platform texture pointer) without coupling to HWND
 using VideoFrameCallback = std::function<void(uintptr_t textureHandle, uint32_t width, uint32_t height, uint64_t ptsUs)>;
 
+// CPU shared frame buffer: the decoder's render thread writes decoded BGRA
+// pixels into this buffer (guarded by its mutex) and bumps a frame counter;
+// the presentation thread (renderer) copies the latest frame out and uploads
+// it to a local D3D11 texture on its own immediate context. This avoids all
+// cross-context / cross-device GPU synchronization (keyed mutex, deferred
+// contexts, shared textures) that is fragile and driver-dependent.
+struct CpuFrameBuffer {
+    std::mutex mutex;
+    std::vector<uint8_t> data;   // BGRA (B8G8R8A8), tightly packed (stride == width*4)
+    uint32_t width{0};
+    uint32_t height{0};
+    uint64_t frame_counter{0};   // bumped on every new frame
+};
+
+// CPU frame delivery callback: hands the shared CPU frame buffer to the
+// presentation layer. The renderer copies the latest frame under the buffer's
+// mutex and uploads it to a local texture.
+using CpuFrameCallback = std::function<void(CpuFrameBuffer* buffer)>;
+
 class IVideoDecoder {
 public:
     virtual ~IVideoDecoder() = default;
@@ -74,6 +95,11 @@ public:
     // Set callback to receive decoded hardware texture frames (D3D11 shared handle)
     virtual void SetFrameCallback(VideoFrameCallback callback) = 0;
 
+    // Optional: set a callback that receives the shared CPU frame buffer.
+    // Decoders that present via a CPU shared buffer (e.g. MpvVideoPlayer)
+    // override this; the default is a no-op.
+    virtual void SetCpuFrameCallback(CpuFrameCallback callback) { (void)callback; }
+
     // Query physical decoder capabilities (supported codecs, max resolution/fps, HW acceleration)
     [[nodiscard]] virtual VideoCapabilities QueryCapabilities() const = 0;
 
@@ -85,6 +111,19 @@ public:
 
     // Release decoder resources
     virtual void Shutdown() = 0;
+
+    // Optional: register a callback invoked when the decoder detects a stall
+    // (e.g. its input buffer stays full) and needs the upstream demuxer to drop
+    // to the next IDR keyframe. Default is a no-op; decoders that support
+    // self-recovery override this.
+    virtual void SetResyncCallback(std::function<void()> callback) { (void)callback; }
+
+    // Optional: inject the presentation device so the decoder's shared texture is
+    // created on the SAME D3D11 device the renderer samples from. Cross-device
+    // shared textures in the same process are not coherent, so the reader would
+    // never see the writer's updates. Must be called before Init(). Default is a
+    // no-op; decoders that create their own D3D11 device override this.
+    virtual void SetSharedDevice(void* device, void* context) { (void)device; (void)context; }
 };
 
 } // namespace CarPlayStation::Core::Media

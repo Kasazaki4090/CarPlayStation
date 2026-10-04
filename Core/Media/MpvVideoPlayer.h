@@ -71,6 +71,8 @@ public:
     [[nodiscard]] Common::Status Reconfigure(const Common::VideoStreamSpec& spec) override;
     [[nodiscard]] Common::Status DecodeAccessUnit(Common::ByteSpan nalData, uint64_t ptsUs) override;
     void SetFrameCallback(VideoFrameCallback callback) override;
+    void SetCpuFrameCallback(CpuFrameCallback callback) override;
+    void SetSharedDevice(void* device, void* context) override;
     [[nodiscard]] VideoCapabilities QueryCapabilities() const override;
     [[nodiscard]] uint64_t GetDecodedFrameCount() const noexcept override;
     void Flush() override;
@@ -169,15 +171,32 @@ private:
     ID3D11Texture2D* shared_texture_{nullptr};
     IDXGIKeyedMutex* shared_keyed_mutex_{nullptr};
     uintptr_t shared_handle_{0};
+    // When true, d3d_device_/d3d_context_ were injected by the UI layer via
+    // SetSharedDevice (the renderer's device) and must NOT be released here.
+    bool owns_d3d_device_{false};
+    // Injected presentation device (set before Init via SetSharedDevice).
+    ID3D11Device* injected_device_{nullptr};
+    ID3D11DeviceContext* injected_context_{nullptr};
+    // Deferred context created on the injected device for the writer thread.
+    // The renderer's immediate context is owned by the UI thread (Render/Present);
+    // sharing it across threads deadlocks the driver, so the writer uses its own
+    // deferred context on the same device.
+    ID3D11DeviceContext* d3d_deferred_context_{nullptr};
 #endif
 
     // Software render buffer (64-byte aligned, B8G8R8A8)
     std::vector<uint8_t> sw_buffer_;
     size_t sw_stride_{0};
 
+    // CPU shared frame buffer (the presentation path). The render thread
+    // writes decoded BGRA pixels here (under cpu_frame_buffer_.mutex) and the
+    // renderer copies the latest frame out and uploads it to a local texture.
+    CpuFrameBuffer cpu_frame_buffer_;
+
     // Frame callback
     std::mutex callback_mutex_;
     VideoFrameCallback frame_callback_;
+    CpuFrameCallback cpu_frame_callback_;
 
     // Stats
     std::atomic<uint64_t> decoded_frames_{0};

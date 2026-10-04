@@ -414,17 +414,28 @@ inline void ChaCha20Block(const uint8_t key[32], const uint8_t nonce[12], uint32
     }
 }
 
+// Cached ChaCha20-Poly1305 algorithm provider. Every AEAD call used to open and
+// close the provider, which costs more than the decryption itself for a video
+// frame; the handle is process-wide and safe to share.
+inline BCRYPT_ALG_HANDLE ChaCha20Poly1305Alg() {
+    static BCRYPT_ALG_HANDLE hAlg = [] {
+        BCRYPT_ALG_HANDLE h = nullptr;
+        BCryptOpenAlgorithmProvider(&h, BCRYPT_CHACHA20_POLY1305_ALGORITHM, nullptr, 0);
+        return h;
+    }();
+    return hAlg;
+}
+
 // AEAD-encrypt `plaintext` with `key` and the pairing 8-byte nonce (left-padded with four zero
 // bytes to the 12-byte IETF nonce). Returns ciphertext ‖ 16-byte Poly1305 tag.
 inline std::vector<uint8_t> ChaCha20Poly1305Seal(const uint8_t key[32], const uint8_t nonce8[8],
                                                   const uint8_t* plaintext, size_t len) {
-    BCRYPT_ALG_HANDLE hAlg = nullptr;
-    if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_CHACHA20_POLY1305_ALGORITHM, nullptr, 0) != 0) {
+    BCRYPT_ALG_HANDLE hAlg = ChaCha20Poly1305Alg();
+    if (!hAlg) {
         return {};
     }
     BCRYPT_KEY_HANDLE hKey = nullptr;
     if (BCryptGenerateSymmetricKey(hAlg, &hKey, nullptr, 0, const_cast<PUCHAR>(key), 32, 0) != 0) {
-        BCryptCloseAlgorithmProvider(hAlg, 0);
         return {};
     }
 
@@ -444,7 +455,6 @@ inline std::vector<uint8_t> ChaCha20Poly1305Seal(const uint8_t key[32], const ui
     NTSTATUS status = BCryptEncrypt(hKey, const_cast<PUCHAR>(plaintext), static_cast<ULONG>(len),
                                     &authInfo, nullptr, 0, ct.data(), static_cast<ULONG>(ct.size()), &cbResult, 0);
     BCryptDestroyKey(hKey);
-    BCryptCloseAlgorithmProvider(hAlg, 0);
 
     if (status != 0) {
         return {};
@@ -462,13 +472,12 @@ inline bool ChaCha20Poly1305Open(const uint8_t key[32], const uint8_t nonce8[8],
     size_t ctLen = len - 16;
     const uint8_t* tag = ciphertext + ctLen;
 
-    BCRYPT_ALG_HANDLE hAlg = nullptr;
-    if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_CHACHA20_POLY1305_ALGORITHM, nullptr, 0) != 0) {
+    BCRYPT_ALG_HANDLE hAlg = ChaCha20Poly1305Alg();
+    if (!hAlg) {
         return false;
     }
     BCRYPT_KEY_HANDLE hKey = nullptr;
     if (BCryptGenerateSymmetricKey(hAlg, &hKey, nullptr, 0, const_cast<PUCHAR>(key), 32, 0) != 0) {
-        BCryptCloseAlgorithmProvider(hAlg, 0);
         return false;
     }
 
@@ -489,7 +498,6 @@ inline bool ChaCha20Poly1305Open(const uint8_t key[32], const uint8_t nonce8[8],
     NTSTATUS status = BCryptDecrypt(hKey, const_cast<PUCHAR>(ciphertext), static_cast<ULONG>(ctLen),
                                     &authInfo, nullptr, 0, outPlaintext.data(), static_cast<ULONG>(ctLen), &cbResult, 0);
     BCryptDestroyKey(hKey);
-    BCryptCloseAlgorithmProvider(hAlg, 0);
 
     return (status == 0);
 }
@@ -577,13 +585,12 @@ inline std::vector<uint8_t> ChaCha20Poly1305SealWithAad(
     const uint8_t key[32], const uint8_t nonce12[12],
     const uint8_t* aad, size_t aadLen,
     const uint8_t* plaintext, size_t len) {
-    BCRYPT_ALG_HANDLE hAlg = nullptr;
-    if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_CHACHA20_POLY1305_ALGORITHM, nullptr, 0) != 0) {
+    BCRYPT_ALG_HANDLE hAlg = ChaCha20Poly1305Alg();
+    if (!hAlg) {
         return {};
     }
     BCRYPT_KEY_HANDLE hKey = nullptr;
     if (BCryptGenerateSymmetricKey(hAlg, &hKey, nullptr, 0, const_cast<PUCHAR>(key), 32, 0) != 0) {
-        BCryptCloseAlgorithmProvider(hAlg, 0);
         return {};
     }
 
@@ -607,7 +614,6 @@ inline std::vector<uint8_t> ChaCha20Poly1305SealWithAad(
     NTSTATUS status = BCryptEncrypt(hKey, const_cast<PUCHAR>(plaintext), static_cast<ULONG>(len),
                                     &authInfo, nullptr, 0, ct.data(), static_cast<ULONG>(ct.size()), &cbResult, 0);
     BCryptDestroyKey(hKey);
-    BCryptCloseAlgorithmProvider(hAlg, 0);
 
     if (status != 0) {
         return {};
@@ -625,13 +631,12 @@ inline bool ChaCha20Poly1305OpenWithAad(
     size_t ctLen = len - 16;
     const uint8_t* tag = ciphertext + ctLen;
 
-    BCRYPT_ALG_HANDLE hAlg = nullptr;
-    if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_CHACHA20_POLY1305_ALGORITHM, nullptr, 0) != 0) {
+    BCRYPT_ALG_HANDLE hAlg = ChaCha20Poly1305Alg();
+    if (!hAlg) {
         return false;
     }
     BCRYPT_KEY_HANDLE hKey = nullptr;
     if (BCryptGenerateSymmetricKey(hAlg, &hKey, nullptr, 0, const_cast<PUCHAR>(key), 32, 0) != 0) {
-        BCryptCloseAlgorithmProvider(hAlg, 0);
         return false;
     }
 
@@ -656,7 +661,6 @@ inline bool ChaCha20Poly1305OpenWithAad(
     NTSTATUS status = BCryptDecrypt(hKey, const_cast<PUCHAR>(ciphertext), static_cast<ULONG>(ctLen),
                                     &authInfo, nullptr, 0, outPlaintext.data(), static_cast<ULONG>(ctLen), &cbResult, 0);
     BCryptDestroyKey(hKey);
-    BCryptCloseAlgorithmProvider(hAlg, 0);
 
     return (status == 0);
 }

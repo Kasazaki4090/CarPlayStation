@@ -323,6 +323,33 @@ void D3D11Renderer::ConsumeFrame(uintptr_t textureHandle, uint32_t width, uint32
     }
 }
 
+void D3D11Renderer::ConsumeCpuFrame(Core::Media::CpuFrameBuffer* buffer) {
+    if (!buffer) {
+        return;
+    }
+    // Only the pointer and the dimensions are recorded here. The pixel upload
+    // happens on the UI thread in Render(), which reads the shared buffer under
+    // its own mutex. This callback therefore costs a few nanoseconds on the
+    // decoder's render thread.
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    cpu_frame_buffer_ = buffer;
+    if (buffer->data.empty()) {
+        return;
+    }
+    last_cpu_frame_counter_ = buffer->frame_counter;
+    cpu_frame_width_ = buffer->width;
+    cpu_frame_height_ = buffer->height;
+
+    if (buffer->width > 0 && buffer->height > 0) {
+        if (buffer->width != video_width_ || buffer->height != video_height_) {
+            video_width_ = buffer->width;
+            video_height_ = buffer->height;
+            current_viewport_ = CalculateLetterbox(client_width_, client_height_, video_width_, video_height_);
+        }
+    }
+    active_frame_available_ = true;
+}
+
 void D3D11Renderer::UpdateSharedTexture(uintptr_t handle, uint32_t width, uint32_t height) {
     (void)width;
     (void)height;
@@ -414,9 +441,65 @@ Core::Common::Status D3D11Renderer::Render(bool autoPresent) {
     // 2. Render active video quad if texture available
     {
         std::lock_guard<std::mutex> lock(frame_mutex_);
-        if (active_frame_available_ && current_srv_) {
-            // Acquire keyed mutex if present
-            if (current_keyed_mutex_) {
+
+        // Select the SRV to draw from. The CPU frame path (MpvVideoPlayer)
+        // uploads the latest decoded frame into a local texture on this
+        // (immediate) context; the legacy shared-texture path uses the
+        // OpenSharedResource SRV.
+        ID3D11ShaderResourceView* srvToDraw = nullptr;
+        bool isCpuPath = false;
+
+        if (cpu_frame_buffer_ && cpu_frame_width_ > 0 && cpu_frame_height_ > 0) {
+            // Upload the latest decoded frame into a local D3D11 texture.
+            if (!cpu_texture_ || cpu_frame_width_ != video_width_ || cpu_frame_height_ != video_height_) {
+                cpu_texture_.Reset();
+                cpu_srv_.Reset();
+                D3D11_TEXTURE2D_DESC texDesc{};
+                texDesc.Width = cpu_frame_width_;
+                texDesc.Height = cpu_frame_height_;
+                texDesc.MipLevels = 1;
+                texDesc.ArraySize = 1;
+                texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                texDesc.SampleDesc.Count = 1;
+                texDesc.Usage = D3D11_USAGE_DEFAULT;
+                texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                texDesc.CPUAccessFlags = 0;
+                HRESULT thr = device_->CreateTexture2D(&texDesc, nullptr, &cpu_texture_);
+                if (SUCCEEDED(thr)) {
+                    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+                    srvDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                    srvDesc.Texture2D.MostDetailedMip = 0;
+                    srvDesc.Texture2D.MipLevels = 1;
+                    device_->CreateShaderResourceView(cpu_texture_.Get(), &srvDesc, &cpu_srv_);
+                }
+            }
+            if (cpu_texture_ && cpu_srv_) {
+                // Read the shared buffer in place. Lock order note: the decoder
+                // takes the buffer's mutex and frame_mutex_ strictly one after
+                // the other (never nested), so nesting them here is safe.
+                std::lock_guard<std::mutex> bufLock(cpu_frame_buffer_->mutex);
+                if (!cpu_frame_buffer_->data.empty()) {
+                    D3D11_BOX box{};
+                    box.right = cpu_frame_width_;
+                    box.bottom = cpu_frame_height_;
+                    box.back = 1;
+                    context_->UpdateSubresource(cpu_texture_.Get(), 0, &box,
+                                                 cpu_frame_buffer_->data.data(),
+                                                 static_cast<UINT>(cpu_frame_width_ * 4), 0);
+                    srvToDraw = cpu_srv_.Get();
+                    isCpuPath = true;
+                }
+            }
+        }
+
+        if (!srvToDraw && current_srv_) {
+            srvToDraw = current_srv_.Get();
+        }
+
+        if (srvToDraw) {
+            // Acquire keyed mutex if present (shared-texture path only)
+            if (!isCpuPath && current_keyed_mutex_) {
                 current_keyed_mutex_->AcquireSync(0, 10);
             }
 
@@ -439,8 +522,7 @@ Core::Common::Status D3D11Renderer::Render(bool autoPresent) {
             context_->VSSetShader(vertex_shader_.Get(), nullptr, 0);
             context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
 
-            ID3D11ShaderResourceView* srv = current_srv_.Get();
-            context_->PSSetShaderResources(0, 1, &srv);
+            context_->PSSetShaderResources(0, 1, &srvToDraw);
 
             ID3D11SamplerState* sampler = sampler_state_.Get();
             context_->PSSetSamplers(0, 1, &sampler);
@@ -453,7 +535,7 @@ Core::Common::Status D3D11Renderer::Render(bool autoPresent) {
             context_->PSSetShaderResources(0, 1, &nullSrv);
 
             // Release keyed mutex
-            if (current_keyed_mutex_) {
+            if (!isCpuPath && current_keyed_mutex_) {
                 current_keyed_mutex_->ReleaseSync(0);
             }
         }

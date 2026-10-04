@@ -17,6 +17,8 @@ enum class WindowDisplayMode : uint8_t {
 
 struct WindowConfig {
     std::wstring title{L"CarPlayStation"};
+    // Windowed mode is locked to this client size: the window cannot be dragged
+    // or maximized, so the picture can never be stretched away from its aspect.
     uint32_t client_width{1280};
     uint32_t client_height{720};
     bool allow_single_instance_only{true};
@@ -88,6 +90,9 @@ private:
     static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
+    // Compute the outer window size that yields the locked client area at a given DPI.
+    void ComputeFixedSizeForDpi(UINT dpi);
+
     HWND hwnd_{nullptr};
     HINSTANCE hinstance_{nullptr};
     HANDLE single_instance_mutex_{nullptr};
@@ -96,6 +101,13 @@ private:
     uint32_t client_width_{1280};
     uint32_t client_height_{720};
     uint32_t dpi_{96};
+
+    // Windowed mode is locked to one outer size so the client aspect can never
+    // drift away from the negotiated video aspect.
+    uint32_t locked_client_w_{1280};
+    uint32_t locked_client_h_{720};
+    LONG fixed_w_{0};
+    LONG fixed_h_{0};
 
     WindowDisplayMode display_mode_{WindowDisplayMode::Windowed};
     WINDOWPLACEMENT prev_placement_{ sizeof(WINDOWPLACEMENT) };

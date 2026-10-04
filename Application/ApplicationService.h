@@ -40,6 +40,8 @@ public:
 
     void RegisterUiStateCallback(UiStateChangeCallback callback) override;
     void RegisterFrameConsumer(Core::Media::VideoFrameCallback callback) override;
+    void RegisterCpuFrameConsumer(Core::Media::CpuFrameCallback callback) override;
+    void SetVideoSharedDevice(void* device, void* context) override;
 
     [[nodiscard]] Core::Common::Status ForwardTouchEvent(
         Core::Input::TouchAction action,
@@ -74,6 +76,12 @@ private:
     // UI state callbacks (invoked outside the lock).
     std::vector<UiStateChangeCallback> ui_state_callbacks_;
     Core::Media::VideoFrameCallback frame_consumer_;
+    Core::Media::CpuFrameCallback cpu_frame_consumer_;
+
+    // UI's D3D11 device/context, injected into the video decoder so its shared
+    // texture is created on the same device the renderer samples from.
+    void* video_shared_device_{nullptr};
+    void* video_shared_context_{nullptr};
 
     // Core event subscription token.
     uint64_t core_event_token_{0};

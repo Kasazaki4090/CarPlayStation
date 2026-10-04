@@ -45,6 +45,18 @@ public:
     // Register Direct3D 11 video surface frame consumer
     virtual void RegisterFrameConsumer(Core::Media::VideoFrameCallback callback) = 0;
 
+    // Register a CPU frame-buffer consumer (used by CPU-based decoders such as
+    // MpvVideoPlayer, which hand decoded BGRA pixels to the renderer instead of
+    // a D3D11 shared texture).
+    virtual void RegisterCpuFrameConsumer(Core::Media::CpuFrameCallback callback) = 0;
+
+    // Inject the UI's D3D11 device/context into the video decoder so the decoder's
+    // shared texture is created on the SAME device the renderer samples from.
+    // Cross-device shared textures in the same process are not coherent, so the
+    // reader would otherwise never see the writer's updates (frozen first frame).
+    // Must be called before StartCarPlay().
+    virtual void SetVideoSharedDevice(void* device, void* context) = 0;
+
     // Forward UI input to input subsystem
     [[nodiscard]] virtual Core::Common::Status ForwardTouchEvent(Core::Input::TouchAction action, const Core::Input::TouchPoint& point) = 0;
     [[nodiscard]] virtual Core::Common::Status ForwardKnobEvent(Core::Input::KnobAction action, uint32_t stepCount = 1) = 0;
