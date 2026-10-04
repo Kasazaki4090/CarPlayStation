@@ -13,7 +13,7 @@
 //     our renderer's D3D11 device, so no GPU contention with our swapchain).
 //   - Decoded frames are rendered into a software buffer via the libmpv SW render
 //     API (MPV_RENDER_API_TYPE_SW, format "bgr0" = B8G8R8A8), then uploaded into
-//     a shared D3D11 texture (mirroring MfVideoDecoder::ConfigureD3D11SharedSurfaces).
+//     a shared D3D11 texture owned by this class.
 //   - The shared texture's HANDLE is passed to the frame callback, which the
 //     D3D11Renderer opens via OpenSharedResource and draws into the swapchain.
 //     The D2D overlay (HUD) composites on top, unchanged.
@@ -104,7 +104,7 @@ private:
     // Render thread main loop.
     void RenderThreadMain();
 
-    // D3D11 shared texture setup (mirrors MfVideoDecoder::ConfigureD3D11SharedSurfaces).
+    // D3D11 shared texture setup for handing decoded frames to the renderer.
     [[nodiscard]] Common::Status ConfigureD3D11SharedSurfaces();
     void ReleaseD3D11SharedSurfaces();
 

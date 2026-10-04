@@ -126,8 +126,8 @@ Derived from live run logs (`carplaystation.log`) and real-device testing issues
 
 Project-wide review completed on 2026-10-01:
 - **Phase 1 基本目标已全面达成**：全栈 8 个分区（Core/Hardware, Core/Transport, Core/Protocol, Core/Session, Core/Media, Core/Input, Core/Service + Application, UI/Win32）已 100% 研发完成并通过自动化单元测试与端到端无头集成测试。
-- **全量测试通过率 100%**：9/9 测试套件（Common, Hardware, Transport, Protocol, Session, Media, Input, Service, Ui）全部通过验证（耗时 ~3.32s）。
-- **缺漏与进阶待办已归档至 [`TODO_missing.md`](file:///d:/CarPlayStation/TODO_missing.md)**，涵盖协议规约文档、CI 流水线、麦克风上行编码、PIP 悬浮窗、日夜模式等后续演进项。
+- **全量测试通过率 100%**：10/10 测试套件（Common, Hardware, Transport, Protocol, Session, Media, Input, ProtocolReplay, Service, Ui）全部通过验证（耗时 ~3.4s）。
+- **缺漏与进阶待办**：见本文件各分区的 P1/P2 条目，涵盖协议规约文档、CI 流水线、麦克风上行编码、PIP 悬浮窗、日夜模式等后续演进项。
 
 ### 历史规划状态记录：
 - Platform & Transport Strategy (`DEC-003`): Native PC wired USB device mode is constrained by Intel xDCI
@@ -194,9 +194,9 @@ Tasks below reflect the initial master planning. Remaining items have been conso
 
 ### 7. Media: video
 
-- [x] P0 [Concluded: DEC-008] Architecture decision concluded: forward-compatible codec discovery (H264/HEVC/AV1/VP9/VVC), Direct3D 11 shared texture handles (EVR/madVR rejected), and automated FFmpeg `d3d11va`/CPU fallback.
-- [x] P0 [Concluded: Partition 5] Implement H.264 depacketization and Media Foundation decoding with Direct3D11 presentation. (`AirPlayVideoDemuxer` + `MfVideoDecoder`)
-- [x] P1 [Concluded: Partition 5] Implement HEVC decoding and dynamic FFmpeg fallback with automated build sync. (`FFmpegVideoDecoder` + `FindOrDownloadFFmpeg.cmake`)
+- [x] P0 [Concluded: DEC-008, superseded for decoding by DEC-009] Architecture decision concluded: forward-compatible codec discovery (H264/HEVC/AV1/VP9/VVC), Direct3D 11 shared texture handles (EVR/madVR rejected), and a decoder fallback strategy.
+- [x] P0 [Concluded: Partition 5] Implement H.264 depacketization with Direct3D11 presentation. (`AirPlayVideoDemuxer`)
+- [x] P1 [Concluded: DEC-009] Video decoding runs on libmpv only; the Media Foundation and FFmpeg decoders and the FFmpeg build sync were removed. (`MpvVideoPlayer`)
 - [ ] P1 Implement codec capability negotiation and runtime selection between H.264 and HEVC.
 - [ ] P1 Implement the display-mode selector described in `PROJECT.md`.
 - [ ] P2 Measure decode and presentation latency and define the frame-drop policy under load.
@@ -207,6 +207,7 @@ Tasks below reflect the initial master planning. Remaining items have been conso
 - [x] P0 [Concluded: Partition 5] Implement audio rendering over WASAPI (Shared Mode) with device selection, format negotiation and hot-plug recovery. (`WasapiAudioPipeline` 3-lane mixer + soft-limiter + multi-rate resampler)
 - [x] P1 [Concluded: Partition 5] Implement ducking and lane swapping so navigation and calls behave correctly against media playback. (`AudioDuckingManager` attack/release gain curve)
 - [ ] P1 Implement microphone capture, resampling and encoding for the uplink path (carplayd doc 16), including Siri and call activation. (`WasapiMicrophoneUplink` resample to 16/24kHz mono + packet dispatch; encoding/Siri/call activation still pending)
+- [ ] P1 Negotiate the microphone uplink stream in RTSP SETUP (`streamType=100`): fill `NegotiatedParams::mic_audio_data_port` / `mic_audio_control_port` and answer with `server_port`/`control_port`. Until this lands, the Voice SETUP half of `TestRtspAnnounceAndSetupWireReplay` stays commented out (`Tests/ProtocolReplayTests.cpp`).
 - [ ] P2 Implement multichannel audio and automatic volume control, listed as limited in Phase 1.
 
 ### 9. Input

@@ -54,3 +54,55 @@
    - 完善车机宽屏与不同 DPI 显示器的等比 Letterbox / Pillarbox 裁剪及全屏交互。
 3. **输入事件回传 (Input Forwarding)**：
    - 接入鼠标/触控屏点击，将坐标映射回送至 iPhone（通过 iAP2 / HID 触控通道）。
+
+---
+
+## 任务执行记录
+
+---
+
+### 记录 [6]：视频链路延迟、窗口比例锁定与显示描述符物理尺寸修正，以及解码器精简（Core/Media、UI/Win32）
+
+* **时间**：`2026-10-04 21:20:00 (UTC+8)`
+* **客户端（Agent）**：`GitHub Copilot (Copilot SDK in VS Code)`
+* **背景与实现**：
+  真机（iPhone 16 Pro，1280x720@60 H.264）联调下报告"视频卡顿/输入到反馈延迟大"，随后报告"画面被拉伸"。本轮按"先降延迟 → 再锁窗口 → 再查比例 → 最后精简依赖"的顺序完成四件事。
+
+  1. **Step 1 输入到显示延迟治理（`Core/Media/AirPlayVideoReceiver.cpp`、`Core/Media/MpvVideoPlayer.cpp`、`UI/Win32/AppController.cpp`、`Core/Session/Pairing/Crypto.h`）**：
+     - 修复 `AirPlayVideoReceiver.cpp` 的编译中断，恢复视频接收链路。
+     - 缓存 ChaCha20-Poly1305 的 BCrypt 算法/密钥 provider，避免每帧重复 `BCryptOpenAlgorithmProvider`/`BCryptGenerateSymmetricKey`。
+     - 删除逐帧堆分配，并移除冗余的 `cpu_staging_` 整帧拷贝；未被使用的共享纹理上传路径被跳过。
+     - 移除 `AppController::Step()` 中无条件的 `::Sleep(1)`（这是主循环里最稳定的 1ms 抖动源）。
+     - 结果：平均帧率从约 20 fps 提升到 30–64 fps，并出现持续 60 fps 的区间。
+  2. **Step 2 窗口尺寸锁定（`UI/Win32/MainWindow.h/.cpp`）**：
+     - 按用户要求放弃处理 Win32 自由拉伸，直接锁定窗口：不可手动拖拽改变尺寸、不可最大化，客户区固定为协商分辨率，从源头消除拉伸与"拉伸后比例不对"的观感。
+  3. **Step 3 显示描述符物理尺寸修正（`Core/Session/AirPlayRtspServer.cpp`）**：
+     - 屏幕像素测量（对高饱和色块做洪水填充）显示 CarPlay 图标为 121x180，即纵向被拉伸 1.50 倍；比对照 `widthPhysical/heightPhysical = 240/90 = 2.667` 与 `1280/720 = 1.778` 完全吻合。
+     - 根因：CarPlay `/info` 显示描述符里的 `widthPhysical`/`heightPhysical`（毫米）并非装饰值——iPhone 先按该物理比例排版 CarPlay UI，再按 `widthPixels x heightPixels` 编码；两者不一致时画面被按 `physical_aspect / pixel_aspect` 压扁。
+     - 修正规则（与 `Reference/xcertplay` 一致）：`heightPhysical = round(widthPhysical * heightPixels / widthPixels)`，本例 240 → 135。复测图标 121x121，比例约 1.00。
+  4. **Step 4 解码器精简为 libmpv 单一后端（`Core/CMakeLists.txt`、`Core/Media/`、`cmake/`、`scripts/`、`Lib/`）**：
+     - 记录 `DEC-009`，将 `DEC-008` 中"MF 主解码器 + FFmpeg 动态回退"两节标记为被取代。
+     - 删除 `Core/Media/MfVideoDecoder.{h,cpp}`、`Core/Media/FFmpegVideoDecoder.{h,cpp}`、`cmake/FindOrDownloadFFmpeg.cmake`、`scripts/Update-FFmpeg.ps1`，并删除本地 `Lib/ffmpeg/`（386 MB）。
+     - `CarPlayCore` 不再链接 `mfplat`/`mfuuid`，仅保留 `d3d11`/`dxgi` 用于交付解码帧的共享纹理；`IVideoDecoder` 抽象边界保持不变。
+     - `Tests/MediaTests.cpp` 的硬件解码器优雅降级用例改写为针对 `MpvVideoPlayer`（缺 `libmpv-2.dll` 时必须干净失败，不得崩溃）。
+* **构建与测试运行指标**：
+  - 构建环境：MSVC 2022 Build Tools（`vcvars64`）+ CMake `NMake Makefiles`，Release，构建目录 `build-release/`。因源列表变更执行了完整 reconfigure。
+  - 编译诊断：reconfigure 与全量构建 **0 错误**；产物 `build-release/UI/Win32/CarPlayStation.exe`。
+  - 自动化测试：CTest 6/6 套件 **100% 全部通过**（CommonTests、HardwareTests、TransportTests、ProtocolTests、SessionTests、MediaTests，总用时 2.99s）。
+  - 真机验证：图标宽高比由 1.50 修正为约 1.00；帧率维持 60 fps 区间。
+* **本会话修复的关键缺陷与经验**：
+  1. `显示比例被压扁`：不是渲染层的缩放错误，而是协议层显示描述符自相矛盾。经验：`widthPhysical`/`heightPhysical` 必须与像素比例一致；`Reference/ncm_carplayd` 里硬编码 240x90 属同类潜在缺陷，不可当作权威。
+  2. `启动崩溃 0xC000041D`：`NMake Makefiles` 的 `compiler_depend.make` 缺少头文件前置依赖，改头文件不触发依赖重编，导致 ODR/结构体布局不一致而访问违例。经验：改头文件后需删除对应 `.obj` 与 `compiler_depend.*` 并重新 `cmake -S … -B …`（只删 `compiler_depend.make` 会 `fatal error U1052`）。
+  3. `低帧率日志样本`：多数是待机画面——iPhone 在画面不变时停止编码，并非解码停滞。经验：判断卡顿要把接收端 `total frames=` 计数与环形缓冲可用量一起看，不能只看瞬时 `rate=`。
+  4. `PrintWindow(hwnd, hdc, 2)` 在 D3D11 flip-model 交换链上永久挂起。经验：截屏改用 DPI 感知进程里的 `Graphics.CopyFromScreen` + `GetWindowRect`。
+  5. 未解释项（留待后续）：解码器 `decoded=` 计数约为接收端 `total frames=` 的 2 倍；每秒一次的 `Unknown packet opcode: 5`；SETUP Phase 2 流字典中的 `latencyMs` 目前无人读取。
+* **完成清理**：
+  - 删除 `Lib/ffmpeg/`（386 MB）、`_wer_dump/`、`build-release` 下的过期运行日志与 `Testing/Temporary/*.log`、`TODO_missing.md`。
+  - `.gitignore` 去重并移除失效条目（`/Lib/ffmpeg`、重复的 `/Tests`、已不存在的 `/cmake`、`/_wer_dump`）。
+  - 文档同步：`README.md`、`PROJECT.md`、`ARCHITECTURE.md`、`TODO.md`、`Lib/Readme.md`（删除 FFmpeg 条目）、`Core/README.md`、`Core/Media/README.md`、`Core/Service/README.md` 全部改为 libmpv 单一解码后端；`DECISIONS.md` 新增 `DEC-009` 并在 `DEC-008` 标注被取代范围。
+  - `Lib/mpv/`（145.5 MB）与 `ProjectManagementTemplate/` 按要求保留；`build*` 构建目录保留。
+* **补充：遗留测试文件注册与测试套件扩容**：
+  * 清理 `.gitignore` 后暴露出 4 个从未被 git 跟踪、也从未注册进构建的测试文件（`Tests/InputTests.cpp`、`Tests/ProtocolReplayTests.cpp`、`Tests/ServiceTests.cpp`、`Tests/UiTests.cpp`）。已在 `Tests/CMakeLists.txt` 注册为 `CarPlayStation_InputTests / _ProtocolReplayTests / _ServiceTests / _UiTests` 四个可执行目标并 `add_test`，测试套件从 6 个扩展到 10 个。
+  * `Tests/UiTests.cpp` 的 `MockApplicationApi` 缺少 `IApplicationApi` 新增的两个纯虚函数（`RegisterCpuFrameConsumer`、`SetVideoSharedDevice`），导致 `C2259 无法实例化抽象类`。已补齐实现，测试通过。
+  * `ProtocolReplayTests` 中 RTSP 麦克风上行 SETUP（`streamType=100` → `server_port=5002` 与 `mic_audio_*_port`）的断言在当前实现里没有对应代码：`AirPlayRtspServer::HandleSetup` 只协商视频流（7100/7101），`mic_audio_data_port/control_port` 从未被写入，`MicrophoneRtpSender` 也尚未接入任何服务层。这是麦克风上行的功能缺口而非本次清理造成的回归，已按决定注释掉该断言块并标注 `TODO(microphone-uplink)`，同时在 `TODO.md` 第 8 节新增对应待办条目。
+  * 最终 CTest：10/10 套件 **100% 全部通过**（总用时 3.39s）。

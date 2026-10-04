@@ -7,8 +7,11 @@ This module is located at Layer 5 of Core. It manages real-time depacketization,
 - **Video Pipeline (`VideoPipeline`)**:
   - AirPlay video payload parsing, NAL unit assembly (SPS/PPS/IDR/P-Frames).
   - Decoder abstraction interface `IVideoDecoder`:
-    - Windows Media Foundation (MF) hardware decoder presenting directly to Direct3D 11 shared textures.
-    - FFmpeg software/hardware fallback decoder.
+    - libmpv decoder (`MpvVideoPlayer`): feeds decrypted H.264 Annex-B access
+      units to mpv over an in-process read-only stream protocol, decodes with
+      mpv's own D3D11 hardware VA path, renders through the libmpv SW render
+      API, and uploads the frame into a Direct3D 11 shared texture
+      (`DEC-009`).
   - Adaptive resolution re-negotiation, jitter buffer, and frame-drop policy under high load.
 - **Audio Pipeline (`AudioPipeline`)**:
   - Three-Lane Audio Architecture:
@@ -24,7 +27,7 @@ This module is located at Layer 5 of Core. It manages real-time depacketization,
 ---
 
 ## 2. Boundaries & Isolation
-- **Downward Dependencies**: Windows Media Foundation, WASAPI, Direct3D 11, or `Lib/FFmpeg`.
+- **Downward Dependencies**: WASAPI, Direct3D 11, and `Lib/mpv` (libmpv).
 - **Strictly No UI Thread / HWND Access**: Decoded video frames are delivered via D3D11 shared texture handles or lock-free frame queues to the Application layer; no UI rendering code is invoked here.
 - **Public Exported Interfaces**:
   - `IVideoStreamReceiver`: `SetRenderSurface(handle)`, `SetFrameCallback(fn)`, `GetStreamStats()`.

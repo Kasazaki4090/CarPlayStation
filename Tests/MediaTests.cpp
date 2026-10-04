@@ -7,8 +7,7 @@
 #include "Core/Media/MockAudioPipeline.h"
 #include "Core/Media/MockMicrophoneUplink.h"
 #include "Core/Media/AirPlayVideoDemuxer.h"
-#include "Core/Media/MfVideoDecoder.h"
-#include "Core/Media/FFmpegVideoDecoder.h"
+#include "Core/Media/MpvVideoPlayer.h"
 #include "Core/Media/AudioDuckingManager.h"
 #include "Core/Media/WasapiAudioPipeline.h"
 #include "Core/Media/WasapiMicrophoneUplink.h"
@@ -388,12 +387,12 @@ void TestAirPlayVideoDemuxerResync() {
     std::cout << "[PASS] TestAirPlayVideoDemuxerResync" << std::endl;
 }
 
-// Test 7: MfVideoDecoder and FFmpegVideoDecoder graceful degradation.
-// On a host without the hardware MFT / FFmpeg runtime, both decoders must
-// report NotSupported (or a clean capability) rather than crash, so the
-// pipeline can fall back to the CPU / mock path.
-void TestHardwareDecoderGracefulFallback() {
-    std::cout << "[RUN] TestHardwareDecoderGracefulFallback" << std::endl;
+// Test 7: MpvVideoPlayer graceful degradation.
+// libmpv is loaded dynamically at runtime. When the DLL is absent, Init must
+// fail cleanly (no crash) and QueryCapabilities must stay safe to call, so the
+// pipeline can fall back to the mock decoder path.
+void TestVideoDecoderGracefulFallback() {
+    std::cout << "[RUN] TestVideoDecoderGracefulFallback" << std::endl;
 
     Common::VideoStreamSpec spec{
         .codec = Common::VideoCodec::H264,
@@ -402,30 +401,18 @@ void TestHardwareDecoderGracefulFallback() {
         .fps = 60
     };
 
-    // FFmpeg decoder: dynamic binding. If the runtime is absent, Init must
-    // return NotSupported (not crash) and QueryCapabilities must be safe.
-    FFmpegVideoDecoder ffmpeg;
-    auto caps = ffmpeg.QueryCapabilities();
+    MpvVideoPlayer mpv;
+    auto caps = mpv.QueryCapabilities();
     ASSERT_TRUE(caps.supported_codecs.size() >= 2U);
-    auto ffStatus = ffmpeg.Init(spec);
-    if (ffStatus.IsError()) {
-        // Expected on a host without the FFmpeg runtime DLLs.
-        ASSERT_EQ(ffStatus.Code(), Common::StatusCode::NotSupported);
+    auto status = mpv.Init(spec);
+    if (status.IsError()) {
+        // Expected on a host without libmpv-2.dll next to the test binary.
+        ASSERT_TRUE(status.Code() == Common::StatusCode::NotSupported ||
+                    status.Code() == Common::StatusCode::MediaPipelineError);
     }
-    ffmpeg.Shutdown();
+    mpv.Shutdown();
 
-    // Media Foundation decoder: on non-Windows (or without a GPU MFT) Init
-    // must return NotSupported rather than crash.
-    MfVideoDecoder mf;
-    auto mfCaps = mf.QueryCapabilities();
-    ASSERT_TRUE(mfCaps.supported_codecs.size() >= 2U);
-    auto mfStatus = mf.Init(spec);
-    if (mfStatus.IsError()) {
-        ASSERT_EQ(mfStatus.Code(), Common::StatusCode::NotSupported);
-    }
-    mf.Shutdown();
-
-    std::cout << "[PASS] TestHardwareDecoderGracefulFallback" << std::endl;
+    std::cout << "[PASS] TestVideoDecoderGracefulFallback" << std::endl;
 }
 
 // ---------------------------------------------------------------------------
@@ -666,7 +653,7 @@ int main() {
     // Step 2: video demuxer + hardware decoder fallback.
     TestAirPlayVideoDemuxer();
     TestAirPlayVideoDemuxerResync();
-    TestHardwareDecoderGracefulFallback();
+    TestVideoDecoderGracefulFallback();
 
     // Step 3: 3-lane audio mixer, ducking manager & microphone uplink.
     TestAudioDuckingManager();

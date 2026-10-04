@@ -32,8 +32,8 @@ CarPlayStation is divided into five major parts:
 ┌───────────────────────────────────────────────┐
 │                    Lib                        │
 │                                               │
-│  System APIs / Media Foundation / WASAPI      │
-│  FFmpeg / Other third-party libraries         │
+│  System APIs / WASAPI (platform APIs)         │
+│  libmpv (third-party video decoding)          │
 └───────────────────────────────────────────────┘
 
 ┌───────────────────────────────────────────────┐
@@ -90,10 +90,9 @@ Prefer Windows native APIs when practical.
 Examples:
 
 * Direct3D
-* Media Foundation
 * WASAPI
 * USB APIs
-* FFmpeg
+* libmpv (video decoding, see `DEC-009`)
 
 Third-party libraries should not leak unnecessary implementation details into Core.
 

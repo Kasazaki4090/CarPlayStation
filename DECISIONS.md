@@ -665,6 +665,8 @@ Positive:
 
 ## DEC-008 — Media Streaming Pipeline Architecture: Extensible Video Decoders (MF + Dynamic FFmpeg Fallback), Direct3D 11 Shared Textures, and App-Internal 3-Lane WASAPI Shared Mode Audio Ducking
 
+**Status:** `Partially Superseded` — the video decoder strategy in section 1 and the FFmpeg package sync in section 2 were replaced by `DEC-009`. The Direct3D 11 shared-texture presentation, display scaling rules, and audio design remain in force.
+
 ### Context
 
 CarPlay video and audio pipelines on Windows face several platform-specific challenges and forward-compatibility considerations:
@@ -740,11 +742,67 @@ Positive:
 - `Core/Media/IAudioPipeline.h`
 - `Core/Media/IMicrophoneUplink.h`
 - `Core/Media/AirPlayVideoDemuxer.h`
-- `Core/Media/MfVideoDecoder.h`
-- `Core/Media/FFmpegVideoDecoder.h`
 - `Core/Media/AudioDuckingManager.h`
 - `Core/Media/WasapiAudioPipeline.h`
 
 
 
 
+
+
+---
+
+## DEC-009 — Video Decoding Strategy: libmpv Only (Media Foundation and FFmpeg Decoders Removed)
+
+**Status:** `Accepted`
+
+**Date:** 2026-10-04
+
+### Context
+
+`DEC-008` specified a Media Foundation (MFT) decoder as the primary path with a dynamic FFmpeg fallback. Both were implemented (`Core/Media/MfVideoDecoder.*`, `Core/Media/FFmpegVideoDecoder.*`) and later replaced in practice by `Core/Media/MpvVideoPlayer.*`, which drives libmpv in-process.
+
+Measured behaviour on the real device (iPhone 16 Pro, 1280x720@60 H.264):
+
+1. **In-process MFT decode deadlocks under GPU contention.** The hardware H.264 MFT blocks on the renderer's shared texture; the software MFT cannot sustain 720p60.
+2. **FFmpeg `d3d11va` had the same contention problem**, because it would have to share the decoder device with the presentation device.
+3. **libmpv decodes on its own D3D11 VA device**, independent of the renderer, and its own threading absorbs the jitter. After switching to it, the session holds 60 fps for long stretches.
+4. Maintaining three decoder backends costs build complexity (an FFmpeg download module, a maintenance script, ~386 MB of vendored binaries) and test surface, for code paths that are no longer used.
+
+### Decision
+
+1. Keep **libmpv (`MpvVideoPlayer`) as the only video decoder backend** behind `IVideoDecoder`.
+2. Delete `Core/Media/MfVideoDecoder.{h,cpp}` and `Core/Media/FFmpegVideoDecoder.{h,cpp}`, the FFmpeg acquisition module `cmake/FindOrDownloadFFmpeg.cmake`, the maintenance script `scripts/Update-FFmpeg.ps1`, and the vendored `Lib/ffmpeg/` tree.
+3. `Core` no longer links `mfplat` or `mfuuid`. It keeps `d3d11`/`dxgi` only for the shared-texture surface handed to the UI renderer.
+4. `IVideoDecoder` stays the abstraction boundary. A future backend (native MFT, NVDEC, etc.) can be re-added behind it without touching the session or UI layers.
+
+### Alternatives
+
+- **Keep MF as primary, libmpv as fallback:** rejected — the MF path is the one that deadlocked, and keeping it means keeping the failure mode in the shipping binary.
+- **Keep FFmpeg as a codec-coverage fallback (HEVC without the Store extension):** rejected for now — libmpv bundles its own decoders, so it already covers the codecs FFmpeg was added for. Re-adding a backend later is cheap because the interface is unchanged.
+- **Vendor FFmpeg but leave it unreferenced:** rejected — dead third-party weight with no code path to exercise it.
+
+### Reason
+
+One decoder that demonstrably holds 720p60 on the target hardware is worth more than three that do not. Removing the unused backends deletes a third-party dependency, its download/sync machinery, and its test surface, without weakening the abstraction that would let another backend return.
+
+### Consequences
+
+Positive:
+- No FFmpeg download step, no `Lib/ffmpeg` tree, no MF decoder code to maintain.
+- Smaller build graph and shorter configure step; fewer runtime DLLs next to the executable.
+- The single remaining path is the one that is actually tested against a real iPhone.
+
+Negative / limitations:
+- The HEVC-without-Store-extension argument no longer applies to a native path; codec coverage now follows whatever the vendored libmpv build supports.
+- Redistribution now follows libmpv's GPL terms for the shipped `libmpv-2.dll` (see `Lib/Readme.md`).
+- `Tests/MediaTests.cpp` now exercises graceful degradation of `MpvVideoPlayer` only (missing `libmpv-2.dll` must fail cleanly, not crash).
+
+### Related
+
+- `DEC-008` (superseded sections 1 and 2)
+- `Core/Media/IVideoDecoder.h`
+- `Core/Media/MpvVideoPlayer.h`
+- `Lib/Readme.md` (mpv library record)
+- `Tests/MediaTests.cpp`
+- Commits `ab9d3f0` (MpvVideoPlayer), and the cleanup commit that removed MF/FFmpeg

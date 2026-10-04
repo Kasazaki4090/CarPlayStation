@@ -29,7 +29,7 @@ Five layers, top to bottom:
 UI            Win32 window, D3D11/D2D rendering, input
 Application   Application API / state / commands / events (DEC-002)
 Core          CarPlay session, pairing/auth, iAP2, transport, audio/video/input
-Lib           System APIs, Media Foundation, WASAPI, FFmpeg, libmpv
+Lib           System APIs / WASAPI (platform APIs), libmpv
 Reference     xcertplay / carplayd / DiPlay (protocol reference only)
 ```
 
@@ -42,11 +42,9 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full layer responsibilities and
 Core/          CarPlayStation's own implementation (protocol, media, transport)
 Application/   Application layer between UI and Core
 UI/Win32/      Win32 window, D3D11/D2D renderer, input router
-Lib/           External libraries (FFmpeg, libmpv) — see Lib/Readme.md
+Lib/           External libraries (libmpv) — see Lib/Readme.md
 Reference/     Protocol reference projects (git submodules)
 Tests/         Unit / hardware tests
-cmake/         CMake helper modules (e.g. FindOrDownloadFFmpeg)
-scripts/       Maintenance scripts (e.g. Update-FFmpeg.ps1)
 ```
 
 ## Building
@@ -58,7 +56,7 @@ Prerequisites:
 - CMake 3.20+
 - A Bluetooth radio (for MFi pairing)
 
-The external libraries under `Lib/` (FFmpeg, libmpv) are vendored locally and
+The external library under `Lib/` (libmpv) is vendored locally and
 are not committed to git. Obtain them as described in [Lib/Readme.md](./Lib/Readme.md).
 
 Build (x64, Release):

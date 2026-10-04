@@ -51,18 +51,17 @@ The following features may be incomplete or have limited functionality in the in
 - Windows 10 / 11
 - C++
 - Direct3D
-- Media Foundation
 - WASAPI
 - USB
+- libmpv (video decoding, see `DEC-009`)
 
 ## Requirements
 
 - Keep the application footprint as small as possible.
 - Run on Windows 10 / 11 without requiring additional runtimes such as .NET.
-- Prefer native Windows H.264 / HEVC decoding.
-- Use FFmpeg as a fallback when native decoding is unavailable:
-  - Prefer hardware-accelerated decoding.
-  - Use software decoding when necessary.
+- Decode video with libmpv, which uses its own hardware-accelerated D3D11 VA
+  path. The earlier Media Foundation (MFT) decoder and FFmpeg fallback were
+  removed; see `DEC-009`.
 
 ## Reference Projects
 

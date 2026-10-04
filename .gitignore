@@ -1,22 +1,15 @@
-.vscode/settings.json
 build/
 build-msvc/
 build-release/
 
 # Project Management Template (Local template archive, not uploaded to git)
 ProjectManagementTemplate/
+
+.vscode/settings.json
 /.vscode
-/cmake
-/Lib/ffmpeg
+
+# Vendored external libraries (see Lib/Readme.md)
 /Lib/mpv
-/Tests
-/Tests
-/Tests
-Tests/HardwareTests.cpp
-Tests/CMakeLists.txt
-Tests/HardwareTests.cpp
-Tests/SessionTests.cpp
-Tests/TransportTests.cpp
+
 build.bat
-/_wer_dump
 carplay_pairings.json

@@ -29,7 +29,7 @@ Drawing inspiration from the OSI 7-layer model and real-world CarPlay receiver p
 ║         ▼                                                       ▼      ║
 ║  ┌─────────────────────────────┐         ┌──────────────────────────┐  ║
 ║  │ Layer 5: Media Streaming    │         │ Layer 6: Input           │  ║
-║  │ - Video: MF/FFmpeg D3D11    │         │ - Mouse -> Touch/Drag    │  ║
+║  │ - Video: libmpv D3D11       │         │ - Mouse -> Touch/Drag    │  ║
 ║  │ - Audio: 3-Lane WASAPI Duck │         │ - Keyboard -> Knob/Nav   │  ║
 ║  │ - Mic: WASAPI AAC/PCM       │         │ - Multi-Touch Injection  │  ║
 ║  └──────────────┬──────────────┘         └────────────┬─────────────┘  ║
@@ -55,7 +55,7 @@ Drawing inspiration from the OSI 7-layer model and real-world CarPlay receiver p
                                     │
 ┌───────────────────────────────────▼────────────────────────────────────┐
 │                    Platform / System APIs / Libraries                  │
-│       (Windows SDK, Direct3D 11, Media Foundation, WASAPI, WinSock)     │
+│       (Windows SDK, Direct3D 11, WASAPI, WinSock, libmpv)                │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -69,7 +69,7 @@ Drawing inspiration from the OSI 7-layer model and real-world CarPlay receiver p
 | **Layer 2** | [`Transport/`](file:///d:/CarPlayStation/Core/Transport/README.md) | Link Layer & Wireless Channels | `BtRfcommTransport`, `WifiSoftApManager`, `MdnsAdvertiser` |
 | **Layer 3** | [`Protocol/`](file:///d:/CarPlayStation/Core/Protocol/README.md) | iAP2 Framing & Message Codecs | `Iap2LinkEngine` (`0xFF 0x5A`), `Iap2SessionManager`, Message Catalog |
 | **Layer 4** | [`Session/`](file:///d:/CarPlayStation/Core/Session/README.md) | CarPlay & AirPlay Orchestration | `CarPlaySessionStateMachine`, `AirPlayRtspServer`, `PairingStore` |
-| **Layer 5** | [`Media/`](file:///d:/CarPlayStation/Core/Media/README.md) | Low-latency Audio/Video Pipelines | `IVideoDecoder` (MF/FFmpeg D3D11), 3-Lane WASAPI Ducking, Mic Uplink |
+| **Layer 5** | [`Media/`](file:///d:/CarPlayStation/Core/Media/README.md) | Low-latency Audio/Video Pipelines | `IVideoDecoder` (libmpv + D3D11), 3-Lane WASAPI Ducking, Mic Uplink |
 | **Layer 6** | [`Input/`](file:///d:/CarPlayStation/Core/Input/README.md) | Input Translation & Gesture Mapping | `MouseTouchTranslator` (Tap/Drag/Back), `KeyboardKnobTranslator` |
 | **Layer 7** | [`Service/`](file:///d:/CarPlayStation/Core/Service/README.md) | Core Facade & Public C++ Contracts | `CarPlayCoreService`, `CoreEventBus`, `ICarPlayCoreApi.h` |
 

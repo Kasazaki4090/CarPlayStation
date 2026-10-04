@@ -29,8 +29,6 @@ add_library(CarPlayCore STATIC
     Session/Pairing/ed25519/sha512.c
     Media/AirPlayVideoDemuxer.cpp
     Media/AirPlayVideoReceiver.cpp
-    Media/MfVideoDecoder.cpp
-    Media/FFmpegVideoDecoder.cpp
     Media/MpvVideoPlayer.cpp
     Media/AudioDuckingManager.cpp
     Media/WasapiAudioPipeline.cpp
@@ -66,11 +64,8 @@ target_compile_features(CarPlayCore PUBLIC cxx_std_20)
 
 if(WIN32)
     target_link_libraries(CarPlayCore PUBLIC ws2_32 bcrypt windowsapp)
-    # Media Foundation hardware video decoder + D3D11 shared surfaces (DEC-008).
-    target_link_libraries(CarPlayCore PUBLIC mfplat mfuuid d3d11 dxgi)
+    # D3D11 shared surface used to hand decoded frames to the renderer (DEC-009).
+    target_link_libraries(CarPlayCore PUBLIC d3d11 dxgi)
     # WASAPI shared-mode audio pipeline + microphone uplink (DEC-008).
     target_link_libraries(CarPlayCore PUBLIC ole32 oleaut32 mmdevapi ksuser)
 endif()
-
-# Automated FFmpeg sync (x64 / ARM64) - zero-dependency fallback when absent.
-include(${CMAKE_SOURCE_DIR}/cmake/FindOrDownloadFFmpeg.cmake)

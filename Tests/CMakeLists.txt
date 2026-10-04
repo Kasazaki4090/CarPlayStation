@@ -97,3 +97,71 @@ target_compile_features(CarPlayStation_MediaTests PRIVATE cxx_std_20)
 
 add_test(NAME MediaTests COMMAND CarPlayStation_MediaTests)
 
+# Input layer tests (mouse/keyboard/multi-touch translation)
+add_executable(CarPlayStation_InputTests
+    InputTests.cpp
+)
+
+target_include_directories(CarPlayStation_InputTests PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_link_libraries(CarPlayStation_InputTests PRIVATE
+    CarPlayCore
+)
+
+target_compile_features(CarPlayStation_InputTests PRIVATE cxx_std_20)
+
+add_test(NAME InputTests COMMAND CarPlayStation_InputTests)
+
+# Protocol wire-replay tests (iAP2 byte-exact framing, RTSP replay, mic RTP)
+add_executable(CarPlayStation_ProtocolReplayTests
+    ProtocolReplayTests.cpp
+)
+
+target_include_directories(CarPlayStation_ProtocolReplayTests PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_link_libraries(CarPlayStation_ProtocolReplayTests PRIVATE
+    CarPlayCore
+)
+
+target_compile_features(CarPlayStation_ProtocolReplayTests PRIVATE cxx_std_20)
+
+add_test(NAME ProtocolReplayTests COMMAND CarPlayStation_ProtocolReplayTests)
+
+# Service & application layer tests (event bus, core/application service lifecycle)
+add_executable(CarPlayStation_ServiceTests
+    ServiceTests.cpp
+)
+
+target_include_directories(CarPlayStation_ServiceTests PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_link_libraries(CarPlayStation_ServiceTests PRIVATE
+    CarPlayApp
+)
+
+target_compile_features(CarPlayStation_ServiceTests PRIVATE cxx_std_20)
+
+add_test(NAME ServiceTests COMMAND CarPlayStation_ServiceTests)
+
+# UI layer tests (adaptation geometry, renderer geometry, input router, controller)
+add_executable(CarPlayStation_UiTests
+    UiTests.cpp
+)
+
+target_include_directories(CarPlayStation_UiTests PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_link_libraries(CarPlayStation_UiTests PRIVATE
+    CarPlayUI
+)
+
+target_compile_features(CarPlayStation_UiTests PRIVATE cxx_std_20)
+
+add_test(NAME UiTests COMMAND CarPlayStation_UiTests)
+
