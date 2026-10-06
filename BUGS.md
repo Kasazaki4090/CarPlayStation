@@ -372,6 +372,80 @@ Built and compiled cleanly with MSVC 14.44; test suite 100% passed (6/6). Ready 
 
 ---
 
+## BUG-008 — CH341 I2C reads return 0xFF / MFi certificate read fails
+
+**Status:** `Fixed`
+
+**Date:** 2026-10-06
+
+### Symptom
+
+"现在341的读取有问题": with a WCH CH341 (or CH347) bridge attached to an MFi
+coprocessor, register reads returned all `0xFF` / garbage, `FetchCertificate()`
+failed or produced a corrupt certificate, and the CH347 adapter never loaded its
+driver at all.
+
+### Reproduction
+
+1. Install the WCH driver, plug in a CH341 (or CH347) with an MFi coprocessor on
+   I2C, and select the hardware I2C signer.
+2. Start `CarPlayStation.exe` and watch the certificate read in the log.
+3. Reads of any register (0x30 length, 0x31 certificate, 0x12 signature) come
+   back as `0xFF` padding.
+
+### Root Cause
+
+1. **Address byte dropped on pure reads.** `Ch341I2cAdapter::Transaction()` set
+   `write_len = 0` whenever `writeData` was empty, so `CH341StreamI2C` emitted a
+   START with no address byte and the coprocessor was never selected.
+2. **No STOP→START bus idle gap.** The CH341A revision 2.0C NACKs a read address
+   when a START follows a STOP sooner than ~3 ms, then answers the read with
+   `0xFF`. The reference transports sleep 5 ms before a write-free read.
+3. **Certificate read as one oversized transaction.** `I2cMfiSigner` read the
+   whole certificate (`ReadRegister(0x31, cert_len)`, ~607 bytes). The
+   coprocessor exposes the blob as sequential 128-byte register windows
+   (0x31, 0x32, ...), so everything past the first window was garbage.
+4. **Register select and read retried independently.** Retrying only the read
+   half re-read whatever register was previously selected.
+5. **CH347 driver never found.** `LoadLibraryA("CH347DLL.DLL")` with no path
+   probing and no `*A64` variant, so it cannot load in a 64-bit process. The
+   DriverStore folder is not on the DLL search path.
+6. **CH347 self-deadlock.** `Open()` held `mutex_` and called `SetSpeed()`,
+   which locked `mutex_` again.
+
+### Fix
+
+1. `Ch341I2cAdapter` / `Ch347I2cAdapter` now send the read address byte
+   `(addr << 1) | 1` as a one-byte write for write-free reads, and hold the bus
+   idle 5 ms before such reads.
+2. `I2cMfiSigner` selects a register with a write-only transaction and reads with
+   a separate pure read, retrying the whole pair; `ReadRegisterWindows()` walks
+   the 128-byte windows for the certificate body. The signature stays a single
+   read, matching the reference client.
+3. New `Core/Hardware/DriverDllLookup.h` shared helper probes the default search
+   path, the executable directory, `System32`, and
+   `DriverStore\FileRepository\ch341wdm.inf.*` / `ch347wdm.inf.*` /
+   `ftdigp22.inf.*`, preferring the 64-bit DLL, and logs the path that loaded.
+4. `Ch347I2cAdapter` gained `ApplySpeedLocked()` so `Open()` no longer re-enters
+   the mutex.
+5. Vendor driver DLLs are now committed under `Lib/wch-ch341` and
+   `Lib/ftdi-d2xx` and copied next to the executable by `Core/CMakeLists.txt`
+   (see `Lib/Readme.md`).
+
+### Verification
+
+1. `MockI2cAdapter` now models 128-byte register windows; `TestI2cMfiSigner()`
+   checks every byte of the 945-byte mock certificate, which fails if the windows
+   are stitched in the wrong order or read as one transaction.
+2. All 10 test suites pass (`ctest`), including `HardwareTests`.
+3. The build copies `CH341DLLA64.DLL`, `CH341DLL.DLL`, `CH347DLLA64.DLL`,
+   `CH347DLL.DLL`, `libmpsse.dll` and `ftd2xx.dll` next to `CarPlayStation.exe`,
+   and the CH341 contract test logs the DLL it loaded.
+
+---
+
+---
+
 ## Bug Template
 
 Copy the following template when adding a new bug:

@@ -1,4 +1,6 @@
 #include "Core/Hardware/FtdiI2cAdapter.h"
+#include "Core/Hardware/DriverDllLookup.h"
+#include "Core/Common/Logging.h"
 #include <vector>
 
 #ifdef _WIN32
@@ -33,20 +35,40 @@ constexpr ULONG I2C_TRANSFER_OPTIONS_STOP_BIT        = 0x00000002;
 constexpr ULONG I2C_TRANSFER_OPTIONS_NACK_LAST_BYTE  = 0x00000008;
 #endif
 
+// libMPSSE ships as libmpsse.dll in the official 1.0.7 Windows package; the
+// older FTDI samples named it libMPSSE-I2C.dll. libmpsse.dll itself links
+// against ftd2xx.dll, so both are copied next to the executable by the build
+// (see Core/CMakeLists.txt) and found through the default search path.
+static std::vector<std::string> BuildFtdiDllCandidates() {
+    const std::vector<std::string> names = {"libmpsse.dll", "libMPSSE-I2C.dll", "libMPSSE.dll"};
+    return BuildDriverDllCandidates(names, {"ftdigp22.inf", "ftd2xx.inf"});
+}
+
 class FtdiI2cAdapter::DriverBinding {
 public:
     DriverBinding() {
 #ifdef _WIN32
-        h_dll_ = LoadLibraryA("libMPSSE.dll");
-        if (!h_dll_) {
-            h_dll_ = LoadLibraryA("libMPSSE-I2C.dll");
-        }
-        if (h_dll_) {
+        for (const auto& candidate : BuildFtdiDllCandidates()) {
+            h_dll_ = LoadLibraryA(candidate.c_str());
+            if (!h_dll_) continue;
             fn_open_  = reinterpret_cast<PFN_I2C_OpenChannel>(GetProcAddress(h_dll_, "I2C_OpenChannel"));
             fn_close_ = reinterpret_cast<PFN_I2C_CloseChannel>(GetProcAddress(h_dll_, "I2C_CloseChannel"));
             fn_init_  = reinterpret_cast<PFN_I2C_InitChannel>(GetProcAddress(h_dll_, "I2C_InitChannel"));
             fn_read_  = reinterpret_cast<PFN_I2C_DeviceRead>(GetProcAddress(h_dll_, "I2C_DeviceRead"));
             fn_write_ = reinterpret_cast<PFN_I2C_DeviceWrite>(GetProcAddress(h_dll_, "I2C_DeviceWrite"));
+            if (fn_open_ && fn_close_ && fn_read_ && fn_write_) {
+                loaded_path_ = candidate;
+                break;
+            }
+            FreeLibrary(h_dll_);
+            h_dll_ = nullptr;
+        }
+        if (IsValid()) {
+            CPS_LOG_INFO("FtdiI2c", "libMPSSE loaded from: ", loaded_path_);
+        } else {
+            CPS_LOG_WARN("FtdiI2c", "libMPSSE not found in any candidate location "
+                "(exe dir, System32, DriverStore). Copy Lib/ftdi-d2xx/<arch>/libmpsse.dll "
+                "and ftd2xx.dll next to the executable, or install the FTDI D2XX driver.");
         }
 #endif
     }
@@ -70,6 +92,7 @@ public:
 
 #ifdef _WIN32
     HMODULE h_dll_{nullptr};
+    std::string loaded_path_;
     PFN_I2C_OpenChannel  fn_open_{nullptr};
     PFN_I2C_CloseChannel fn_close_{nullptr};
     PFN_I2C_InitChannel  fn_init_{nullptr};

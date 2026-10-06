@@ -1,4 +1,5 @@
 #include "Core/Hardware/Ch341I2cAdapter.h"
+#include "Core/Hardware/DriverDllLookup.h"
 #include "Core/Common/Logging.h"
 #include <thread>
 #include <vector>
@@ -21,81 +22,22 @@ using PFN_CH341StreamI2C    = BOOL(WINAPI*)(ULONG iIndex, ULONG iWriteLength, PV
 using PFN_CH341SetOutput    = BOOL(WINAPI*)(ULONG iIndex, ULONG iEnable, ULONG iSetDirOut, ULONG iSetDataOut);
 #endif
 
+// Bus idle gap held before a pure read. See the comment in Transaction().
+static constexpr std::chrono::milliseconds kSelectToReadGap{5};
+
 // Build the ordered list of candidate CH341 DLL locations to try.
 // The WCH driver installer registers the device but leaves the DLL in
 // DriverStore\FileRepository\ch341wdm.inf_*, which is NOT in the default
-// DLL search path, so a bare LoadLibraryA("CH341DLL.DLL") fails. We therefore
-// probe the exe directory, System32, and the DriverStore ch341wdm.inf_* folder.
-// On x64 we prefer the A64 build (CH341DLLA64.DLL) since a 32-bit DLL cannot
-// be loaded into a 64-bit process.
+// DLL search path, so a bare LoadLibraryA("CH341DLL.DLL") fails. On x64 we
+// prefer the A64 build (CH341DLLA64.DLL) since a 32-bit DLL cannot be loaded
+// into a 64-bit process.
 static std::vector<std::string> BuildCh341DllCandidates() {
-    std::vector<std::string> names;
 #ifdef _WIN64
-    names.push_back("CH341DLLA64.DLL");
-    names.push_back("CH341DLL.DLL");
+    const std::vector<std::string> names = {"CH341DLLA64.DLL", "CH341DLL.DLL"};
 #else
-    names.push_back("CH341DLL.DLL");
-    names.push_back("CH341DLLA64.DLL");
+    const std::vector<std::string> names = {"CH341DLL.DLL", "CH341DLLA64.DLL"};
 #endif
-
-    std::vector<std::string> dirs;
-    dirs.push_back(""); // bare name -> default search path (exe dir, System32, ...)
-
-    auto wideToUtf8 = [](const wchar_t* w) {
-        if (!w || !*w) return std::string();
-        int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
-        if (len <= 0) return std::string();
-        std::string out(static_cast<size_t>(len - 1), '\0');
-        WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), len, nullptr, nullptr);
-        return out;
-    };
-
-    // Directory of the running executable.
-    {
-        wchar_t exePath[MAX_PATH]{};
-        if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) > 0) {
-            std::string full = wideToUtf8(exePath);
-            auto pos = full.find_last_of("/\\");
-            if (pos != std::string::npos) {
-                dirs.push_back(full.substr(0, pos));
-            }
-        }
-    }
-
-    // System32.
-    {
-        wchar_t sysPath[MAX_PATH]{};
-        if (GetSystemDirectoryW(sysPath, MAX_PATH) > 0) {
-            dirs.push_back(wideToUtf8(sysPath));
-        }
-    }
-
-    // DriverStore ch341wdm.inf_* folder (where the WCH installer puts the DLL).
-    {
-        std::string base = "C:\\Windows\\System32\\DriverStore\\FileRepository";
-        WIN32_FIND_DATAA fd{};
-        HANDLE h = FindFirstFileA((base + "\\ch341wdm.inf_*").c_str(), &fd);
-        if (h != INVALID_HANDLE_VALUE) {
-            do {
-                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-                if (fd.cFileName[0] == '.') continue;
-                dirs.push_back(base + "\\" + fd.cFileName);
-            } while (FindNextFileA(h, &fd));
-            FindClose(h);
-        }
-    }
-
-    std::vector<std::string> candidates;
-    for (const auto& dir : dirs) {
-        for (const auto& name : names) {
-            if (dir.empty()) {
-                candidates.push_back(name);
-            } else {
-                candidates.push_back(dir + "\\" + name);
-            }
-        }
-    }
-    return candidates;
+    return BuildDriverDllCandidates(names, {"ch341wdm.inf"});
 }
 
 class Ch341I2cAdapter::DriverBinding {
@@ -276,16 +218,35 @@ Common::Result<Common::ByteBuffer> Ch341I2cAdapter::Transaction(uint8_t address7
         return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "CH341 driver unavailable.");
     }
 
-    // Prepare write payload (Address + writeData)
+    // Prepare write payload (Address + writeData).
+    //
+    // A pure read still needs an address byte on the wire: CH341StreamI2C
+    // emits START + the bytes we hand it, so passing no write data at all
+    // produces a START with no address and the slave never answers (the
+    // driver returns 0xFF padding). The reference driver sends the read
+    // address byte, (addr << 1) | 1, as a one byte write for that case.
     Common::ByteBuffer write_buf;
-    write_buf.reserve(1 + writeData.size());
-    write_buf.push_back(Ch341Protocol::MakeAddressByte(address7Bit, false));
-    write_buf.insert(write_buf.end(), writeData.begin(), writeData.end());
+    if (writeData.empty() && readLength > 0) {
+        write_buf.reserve(1);
+        write_buf.push_back(Ch341Protocol::MakeAddressByte(address7Bit, true));
+    } else {
+        write_buf.reserve(1 + writeData.size());
+        write_buf.push_back(Ch341Protocol::MakeAddressByte(address7Bit, false));
+        write_buf.insert(write_buf.end(), writeData.begin(), writeData.end());
+    }
 
     Common::ByteBuffer read_buf(readLength, 0);
 
+    // The 2.0C revision of the CH341A NACKs the read address when a START
+    // follows a STOP sooner than about 3 ms, and then answers the read with
+    // 0xFF padding. Hold the bus idle across the STOP/START boundary of a
+    // register read (same 5 ms gap the reference transports use).
+    if (writeData.empty() && readLength > 0) {
+        std::this_thread::sleep_for(kSelectToReadGap);
+    }
+
     // Call vendor driver StreamI2C
-    ULONG write_len = static_cast<ULONG>(writeData.empty() && readLength > 0 ? 0 : write_buf.size());
+    ULONG write_len = static_cast<ULONG>(write_buf.size());
     ULONG read_len = static_cast<ULONG>(readLength);
 
     // If it's a pure read or write+read transaction

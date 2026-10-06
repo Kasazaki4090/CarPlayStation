@@ -483,6 +483,12 @@ void TestI2cMfiSigner() {
     auto cert_res = signer.FetchCertificate();
     assert(cert_res.IsOk());
     assert(cert_res.Value().size() == 945);
+    // The mock fills the coprocessor certificate with (i * 17 + 33) & 0xFF.
+    // Checking every byte proves the 128-byte register windows were stitched in
+    // order rather than read as one oversized transaction.
+    for (size_t i = 0; i < cert_res.Value().size(); ++i) {
+        assert(cert_res.Value()[i] == static_cast<uint8_t>((i * 17 + 33) & 0xFF));
+    }
 
     // 3. Challenge Signing (verifies 0x20 len, 0x21 payload, 0x10 auth trigger, 0x11 sig len, 0x12 sig data)
     uint8_t challenge[20] = {

@@ -142,6 +142,105 @@ D3D11 shared texture consumed by the UI renderer.
   `MPV_RENDER_API_TYPE_SW` (no native D3D11), so the SW render path is used and
   the frame is uploaded to a D3D11 shared texture by CarPlayStation.
 
+### WCH CH341 / CH347 USB-to-I2C driver package (wch-ch341)
+
+**Purpose:**
+User-mode driver DLLs for the WCH CH341 and CH347 USB-to-I2C/SPI/UART bridges,
+used by `Core/Hardware/Ch341I2cAdapter.cpp` and `Core/Hardware/Ch347I2cAdapter.cpp`
+to talk to the Apple MFi authentication coprocessor.
+
+**Version:**
+Taken from the installed Windows driver package
+`ch341wdm.inf_amd64_ad95b9e9450660c1` (`DriverVer = 04/14/2025, 2.6.2025.04`).
+`CH341DLLA64.DLL` / `CH341DLL.DLL` report file version 1.10;
+`CH347DLLA64.DLL` / `CH347DLL.DLL` report file version 1.50.
+
+**Source:**
+WCH (Nanjing Qinheng Microelectronics) official driver package, as installed by
+WCH's driver installer into
+`C:\Windows\System32\DriverStore\FileRepository\ch341wdm.inf_amd64_*`. The same
+DLLs are distributed from `https://www.wch-ic.com/downloads/CH341PAR_HTML.html`
+(CH341) and `https://www.wch-ic.com/downloads/CH347PAR_HTML.html` (CH347).
+
+**License:**
+WCH's freeware driver/EVAL distribution terms. Unmodified binary redistribution
+is permitted; no source is shipped and no source is modified.
+
+**Reason:**
+The adapters call the vendor API (`CH341OpenDevice`, `CH341SetStream`,
+`CH341WriteI2CData`, `CH347I2C_Init`, `CH347I2C_Write` / `CH347I2C_Read`, ...)
+through `LoadLibrary`. The DriverStore folder that holds these DLLs is not on
+the default DLL search path, and a machine with only the kernel driver installed
+still has no import library to link against, so the DLLs are vendored and copied
+next to the executable.
+
+**Integration:**
+`Core/CMakeLists.txt` copies `CH341DLLA64.DLL`, `CH341DLL.DLL`,
+`CH347DLLA64.DLL` and `CH347DLLA64.DLL` next to `CarPlayStation` at build time.
+The adapters resolve them through `Core/Hardware/DriverDllLookup.h`, which probes
+the default search path, the executable directory, `System32`, and any
+`DriverStore\FileRepository\ch341wdm.inf.*` / `ch347wdm.inf.*` folder, preferring
+the `*A64` build on x64 (a 32-bit DLL cannot be loaded into a 64-bit process).
+No header is needed: the functions are resolved with `GetProcAddress`.
+
+**Notes:**
+- `CH341W64.SYS`, `CH341WDM.CAT` and `ch341wdm.inf` are kept only so the exact
+  driver package this build was validated against is recorded; they are not used
+  at runtime (the kernel driver is installed by WCH's installer).
+- The 32-bit and 64-bit DLLs have different names (`CH341DLL.DLL` vs
+  `CH341DLLA64.DLL`), so both are copied and the adapter picks the loadable one.
+
+### FTDI D2XX + libMPSSE (ftdi-d2xx)
+
+**Purpose:**
+User-mode driver and MPSSE bit-bang library used by
+`Core/Hardware/FtdiI2cAdapter.cpp` to drive an FTDI AM-series part
+(FT232H/FT2232H/FT4232H) as an I2C master for the MFi coprocessor.
+
+**Version:**
+libMPSSE `v1.0.7` (official Windows package `LibMPSSE_1.0.7.zip`, released
+2024-08). `ftd2xx.dll` `3.2.21.1` (product 2.12.36.20), taken from the D2XX
+driver already installed on this machine (`System32` / `SysWOW64`).
+
+**Source:**
+FTDI. `https://www.ftdichip.cn/Support/SoftwareExamples/MPSSE/LibMPSSE_1.0.7.zip`
+(the nested `Windows/libmpsse-windows-1.0.7.zip` inside it holds the Windows
+binaries and headers). Driver pages:
+`https://www.ftdichip.cn/Drivers/D2XX.htm` (D2XX) and
+`https://www.ftdichip.cn/Drivers/VCP.htm` (VCP).
+
+**License:**
+FTDI's binary-only driver/library licence (see `ReadMe.txt` from the libMPSSE
+package). Binaries are unmodified.
+
+**Reason:**
+**D2XX was chosen over VCP.** VCP (`ftcserco.dll` / `ftser2k.dll`) re-presents
+the FTDI channel as a virtual COM port; it exposes no MPSSE GPIO or I2C API, so
+it cannot bit-bang SCL/SDA. D2XX ships `ftd2xx.dll`, which is what libMPSSE's
+`I2C_GetNumDevices` / `I2C_OpenPort` / `I2C_Read` / `I2C_Write` are built on,
+so D2XX + libMPSSE is the only option that supports the `II2cAdapter` contract.
+
+**Integration:**
+`libmpsse.dll` is loaded dynamically by `FtdiI2cAdapter` through
+`Core/Hardware/DriverDllLookup.h` (probing the executable directory, `System32`,
+and `DriverStore\FileRepository\ftdigp22.inf.*` / `ftd2xx.inf.*`).
+`Core/CMakeLists.txt` copies the architecture-matched `libmpsse.dll` and
+`ftd2xx.dll` (`x64` or `Win32`) next to `CarPlayStation`. `include/` is kept for
+reference only; nothing in `Core` includes an FTDI header (rule 9).
+
+**Notes:**
+- `libmpsse.dll` links against `ftd2xx.dll` at runtime, so **both** must sit next
+  to the executable; the adapter logs a warning naming the two files when loading
+  fails.
+- libMPSSE 1.0.7 fixed the very slow `I2C_DeviceRead` / `I2C_DeviceWrite` path
+  (it now uses `FAST_TRANSFER_BITS`); older 1.0.x releases are unusable for MFi
+  certificate reads.
+- The package ships `libmpsse.dll`, not the `libMPSSE-I2C.dll` name used by some
+  Linux/older builds; the adapter accepts either.
+- The D2XX *driver installer* was not vendored (the download 404s from this
+  network); install FTDI's CDM driver normally, or rely on the vendored runtime
+  DLLs for a machine that already has the kernel driver.
+
 ## Dependency Policy
 
 `Core/` contains CarPlayStation's own implementation.

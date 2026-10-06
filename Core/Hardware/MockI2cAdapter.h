@@ -126,6 +126,8 @@ public:
     }
 
 private:
+    static constexpr size_t kRegisterWindowBytes = 128;
+
     void ResetRegisters() {
         selected_register_ = 0x00;
         protocol_major_ = 0x02; // MFi 2.0C / 3.0
@@ -183,9 +185,15 @@ private:
                 buf[0] = static_cast<uint8_t>((cert_len >> 8) & 0xFF);
                 buf[1] = static_cast<uint8_t>(cert_len & 0xFF);
             }
-        } else if (reg == 0x31) { // CERTIFICATE_DATA stream
-            size_t copy_len = std::min(length, certificate_.size());
-            std::memcpy(buf.data(), certificate_.data(), copy_len);
+        } else if (reg == 0x31) { // CERTIFICATE_DATA windows
+            // The coprocessor exposes the certificate as sequential 128-byte
+            // register windows: 0x31 is bytes 0..127, 0x32 bytes 128..255, ...
+            size_t offset = static_cast<size_t>(reg - 0x31) * kRegisterWindowBytes;
+            if (offset >= certificate_.size()) {
+                return buf;
+            }
+            size_t copy_len = std::min(length, certificate_.size() - offset);
+            std::memcpy(buf.data(), certificate_.data() + offset, copy_len);
         }
 
         return buf;

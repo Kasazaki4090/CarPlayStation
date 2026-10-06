@@ -37,6 +37,9 @@ public:
 
 private:
     class DriverBinding;
+    // Applies speed_ to the hardware. Callers must already hold mutex_.
+    void ApplySpeedLocked();
+
     std::unique_ptr<DriverBinding> driver_;
     mutable std::mutex mutex_;
     uint32_t device_index_{0};

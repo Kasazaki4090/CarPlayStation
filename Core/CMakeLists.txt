@@ -62,6 +62,33 @@ if(WIN32)
             $<TARGET_FILE_DIR:CarPlayStation>
         COMMENT "Copying libmpv-2.dll to output directory"
     )
+
+    # Vendor driver DLLs (Lib/Readme.md: wch-ch341, ftdi-d2xx). The I2C adapters
+    # load these with LoadLibrary; DriverStore folders are not on the default DLL
+    # search path, so the copies next to the executable are what get picked up.
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(CPS_DRIVER_ARCH "x64")
+    else()
+        set(CPS_DRIVER_ARCH "Win32")
+    endif()
+
+    foreach(_cps_dll CH341DLLA64.DLL CH341DLL.DLL CH347DLLA64.DLL CH347DLL.DLL)
+        add_custom_command(TARGET CarPlayCore POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_SOURCE_DIR}/Lib/wch-ch341/${_cps_dll}
+                $<TARGET_FILE_DIR:CarPlayStation>
+            COMMENT "Copying ${_cps_dll} to output directory"
+        )
+    endforeach()
+
+    foreach(_cps_dll libmpsse.dll ftd2xx.dll)
+        add_custom_command(TARGET CarPlayCore POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_SOURCE_DIR}/Lib/ftdi-d2xx/${CPS_DRIVER_ARCH}/${_cps_dll}
+                $<TARGET_FILE_DIR:CarPlayStation>
+            COMMENT "Copying ${_cps_dll} (${CPS_DRIVER_ARCH}) to output directory"
+        )
+    endforeach()
 endif()
 
 target_compile_features(CarPlayCore PUBLIC cxx_std_20)

@@ -1,5 +1,7 @@
 #include "Core/Hardware/Ch347I2cAdapter.h"
 #include "Core/Hardware/Ch341Protocol.h"
+#include "Core/Hardware/DriverDllLookup.h"
+#include "Core/Common/Logging.h"
 #include <thread>
 #include <vector>
 
@@ -20,17 +22,47 @@ using PFN_CH347StreamI2C    = BOOL(WINAPI*)(ULONG iIndex, ULONG iWriteLength, PV
 using PFN_CH347GPIO_Set     = BOOL(WINAPI*)(ULONG iIndex, UCHAR iEnable, UCHAR iSetDirOut, UCHAR iSetDataOut);
 #endif
 
+// Bus idle gap held before a pure read. See the comment in Transaction().
+static constexpr std::chrono::milliseconds kSelectToReadGap{5};
+
+// The WCH CH347 driver ships in DriverStore\FileRepository\ch341wdm.inf_* (the
+// same INF covers the CH347), which is not on the default DLL search path, and
+// the 32-bit CH347DLL.DLL cannot be loaded into a 64-bit process. Probe the
+// exe directory, System32 and the DriverStore, preferring the A64 build on x64.
+static std::vector<std::string> BuildCh347DllCandidates() {
+#ifdef _WIN64
+    const std::vector<std::string> names = {"CH347DLLA64.DLL", "CH347DLL.DLL"};
+#else
+    const std::vector<std::string> names = {"CH347DLL.DLL", "CH347DLLA64.DLL"};
+#endif
+    return BuildDriverDllCandidates(names, {"ch341wdm.inf", "ch347wdm.inf"});
+}
+
 class Ch347I2cAdapter::DriverBinding {
 public:
     DriverBinding() {
 #ifdef _WIN32
-        h_dll_ = LoadLibraryA("CH347DLL.DLL");
-        if (h_dll_) {
+        for (const auto& candidate : BuildCh347DllCandidates()) {
+            h_dll_ = LoadLibraryA(candidate.c_str());
+            if (!h_dll_) continue;
             fn_open_device_  = reinterpret_cast<PFN_CH347OpenDevice>(GetProcAddress(h_dll_, "CH347OpenDevice"));
             fn_close_device_ = reinterpret_cast<PFN_CH347CloseDevice>(GetProcAddress(h_dll_, "CH347CloseDevice"));
             fn_i2c_init_     = reinterpret_cast<PFN_CH347I2C_Init>(GetProcAddress(h_dll_, "CH347I2C_Init"));
             fn_stream_i2c_   = reinterpret_cast<PFN_CH347StreamI2C>(GetProcAddress(h_dll_, "CH347StreamI2C"));
             fn_gpio_set_     = reinterpret_cast<PFN_CH347GPIO_Set>(GetProcAddress(h_dll_, "CH347GPIO_Set"));
+            if (fn_open_device_ && fn_close_device_ && fn_stream_i2c_) {
+                loaded_path_ = candidate;
+                break;
+            }
+            FreeLibrary(h_dll_);
+            h_dll_ = nullptr;
+        }
+        if (IsValid()) {
+            CPS_LOG_INFO("Ch347I2c", "CH347 driver loaded from: ", loaded_path_);
+        } else {
+            CPS_LOG_WARN("Ch347I2c", "CH347 driver DLL not found in any candidate location "
+                "(exe dir, System32, DriverStore ch341wdm.inf_*). Install the WCH CH347 driver "
+                "or place CH347DLLA64.DLL next to the executable.");
         }
 #endif
     }
@@ -54,6 +86,7 @@ public:
 
 #ifdef _WIN32
     HMODULE h_dll_{nullptr};
+    std::string loaded_path_;
     PFN_CH347OpenDevice  fn_open_device_{nullptr};
     PFN_CH347CloseDevice fn_close_device_{nullptr};
     PFN_CH347I2C_Init    fn_i2c_init_{nullptr};
@@ -95,7 +128,7 @@ Common::Result<void> Ch347I2cAdapter::Open(uint32_t device_index) {
     device_index_ = device_index;
     is_open_ = true;
 
-    SetSpeed(speed_);
+    ApplySpeedLocked();
     return Common::Result<void>::Ok();
 #else
     return Common::Status::Error(Common::StatusCode::NotImplemented, "CH347 driver only supported on Windows.");
@@ -121,14 +154,20 @@ bool Ch347I2cAdapter::IsOpen() const noexcept {
 Common::Result<void> Ch347I2cAdapter::SetSpeed(I2cClockSpeed speed) {
     std::lock_guard<std::mutex> lock(mutex_);
     speed_ = speed;
+    ApplySpeedLocked();
+    return Common::Result<void>::Ok();
+}
 
-    if (!is_open_) return Common::Result<void>::Ok();
+// Open() already holds mutex_, so the hardware call lives in a separate
+// unlocked helper to avoid re-locking the non-recursive mutex.
+void Ch347I2cAdapter::ApplySpeedLocked() {
+    if (!is_open_) return;
 
 #ifdef _WIN32
     if (driver_->IsValid() && driver_->fn_i2c_init_) {
         // CH347 iClockFreq: 0=20KHz, 1=100KHz, 2=400KHz, 3=750KHz, 4=1MHz
         ULONG freq = 1;
-        switch (speed) {
+        switch (speed_) {
             case I2cClockSpeed::Khz20:   freq = 0; break;
             case I2cClockSpeed::Khz100:  freq = 1; break;
             case I2cClockSpeed::Khz400:  freq = 2; break;
@@ -138,7 +177,6 @@ Common::Result<void> Ch347I2cAdapter::SetSpeed(I2cClockSpeed speed) {
         driver_->fn_i2c_init_(device_index_, freq);
     }
 #endif
-    return Common::Result<void>::Ok();
 }
 
 Common::Result<void> Ch347I2cAdapter::Write(uint8_t address7Bit, Common::ByteSpan data) {
@@ -166,14 +204,28 @@ Common::Result<Common::ByteBuffer> Ch347I2cAdapter::Transaction(uint8_t address7
         return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "CH347 driver unavailable.");
     }
 
+    // See the comment in Ch341I2cAdapter::Transaction(): a pure read still
+    // needs an address byte on the wire, so send the read address byte when
+    // there is no register write to precede it.
     Common::ByteBuffer write_buf;
-    write_buf.reserve(1 + writeData.size());
-    write_buf.push_back(Ch341Protocol::MakeAddressByte(address7Bit, false));
-    write_buf.insert(write_buf.end(), writeData.begin(), writeData.end());
+    if (writeData.empty() && readLength > 0) {
+        write_buf.reserve(1);
+        write_buf.push_back(Ch341Protocol::MakeAddressByte(address7Bit, true));
+    } else {
+        write_buf.reserve(1 + writeData.size());
+        write_buf.push_back(Ch341Protocol::MakeAddressByte(address7Bit, false));
+        write_buf.insert(write_buf.end(), writeData.begin(), writeData.end());
+    }
 
     Common::ByteBuffer read_buf(readLength, 0);
 
-    ULONG write_len = static_cast<ULONG>(writeData.empty() && readLength > 0 ? 0 : write_buf.size());
+    // Hold the bus idle across the STOP/START boundary of a register read so
+    // the coprocessor has time to prepare for the read address.
+    if (writeData.empty() && readLength > 0) {
+        std::this_thread::sleep_for(kSelectToReadGap);
+    }
+
+    ULONG write_len = static_cast<ULONG>(write_buf.size());
     ULONG read_len = static_cast<ULONG>(readLength);
 
     PVOID p_write = write_len > 0 ? write_buf.data() : nullptr;

@@ -19,6 +19,12 @@ constexpr uint8_t REG_CERT_DATA      = 0x31;
 
 constexpr uint8_t AUTH_CMD_START     = 0x01;
 constexpr uint8_t AUTH_STATUS_OK     = 0x10;
+
+// The coprocessor exposes its certificate and signature through sequential
+// 128-byte register windows: register 0x31 + w is the window starting at
+// offset w * 128 of the blob. A single over-long read past the first window
+// returns garbage, so blobs are read window by window.
+constexpr size_t kRegisterWindowBytes = 128;
 } // namespace
 
 I2cMfiSigner::I2cMfiSigner(std::shared_ptr<II2cAdapter> adapter,
@@ -87,6 +93,15 @@ Common::Result<void> I2cMfiSigner::WriteBigEndianShort(uint8_t reg, uint16_t val
     return WriteRegister(reg, Common::ByteSpan(data, 2));
 }
 
+Common::Result<void> I2cMfiSigner::SelectRegister(uint8_t reg) {
+    if (!adapter_ || !adapter_->IsOpen()) {
+        return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "I2C adapter is not open");
+    }
+
+    uint8_t reg_addr = reg;
+    return adapter_->Write(slave_address_, Common::ByteSpan(&reg_addr, 1));
+}
+
 Common::Result<Common::ByteBuffer> I2cMfiSigner::ReadRegister(uint8_t reg, size_t length) {
     if (!adapter_ || !adapter_->IsOpen()) {
         return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "I2C adapter is not open");
@@ -96,9 +111,18 @@ Common::Result<Common::ByteBuffer> I2cMfiSigner::ReadRegister(uint8_t reg, size_
     Common::Result<Common::ByteBuffer> last_res = Common::Status::Error(Common::StatusCode::Timeout, "I2C read timed out");
 
     while (std::chrono::steady_clock::now() < deadline) {
-        // Repeated-start transaction: write reg, read length
-        uint8_t reg_addr = reg;
-        auto res = adapter_->Transaction(slave_address_, Common::ByteSpan(&reg_addr, 1), length);
+        // The coprocessor can be asleep when the register-select write arrives,
+        // and the USB bridges do not surface that I2C NACK separately. Retry the
+        // complete select/read pair: retrying only the read half can otherwise
+        // keep reading whatever register was selected before.
+        auto sel = SelectRegister(reg);
+        if (sel.IsError()) {
+            last_res = sel.Error();
+            std::this_thread::sleep_for(options_.io_retry_delay);
+            continue;
+        }
+
+        auto res = adapter_->Read(slave_address_, length);
         if (res.IsOk() && res.Value().size() == length) {
             return res;
         }
@@ -107,6 +131,28 @@ Common::Result<Common::ByteBuffer> I2cMfiSigner::ReadRegister(uint8_t reg, size_
     }
 
     return last_res;
+}
+
+// Reads a blob exposed as sequential register windows (certificate 0x31,
+// signature 0x12). Each window is 128 bytes and starts at base_reg + w.
+Common::Result<Common::ByteBuffer> I2cMfiSigner::ReadRegisterWindows(uint8_t base_reg, size_t length) {
+    Common::ByteBuffer blob;
+    blob.reserve(length);
+
+    size_t offset = 0;
+    uint16_t reg = base_reg;
+    while (offset < length) {
+        size_t count = std::min(kRegisterWindowBytes, length - offset);
+        auto res = ReadRegister(static_cast<uint8_t>(reg), count);
+        if (res.IsError()) {
+            return res.Error();
+        }
+        blob.insert(blob.end(), res.Value().begin(), res.Value().end());
+        offset += count;
+        reg += 1;
+    }
+
+    return blob;
 }
 
 Common::Result<void> I2cMfiSigner::WriteRegister(uint8_t reg, Common::ByteSpan data) {
@@ -153,8 +199,9 @@ Common::Result<Common::ByteBuffer> I2cMfiSigner::FetchCertificate() {
             "Invalid MFi certificate length: " + std::to_string(cert_len));
     }
 
-    // Certificate bytes are exposed as one sequential read from the data register.
-    return ReadRegister(REG_CERT_DATA, cert_len);
+    // The certificate body is exposed as sequential 128-byte register windows
+    // starting at 0x31. One long read past the first window returns garbage.
+    return ReadRegisterWindows(REG_CERT_DATA, cert_len);
 }
 
 Common::Result<Common::ByteBuffer> I2cMfiSigner::SignChallenge(Common::ByteSpan challenge) {
