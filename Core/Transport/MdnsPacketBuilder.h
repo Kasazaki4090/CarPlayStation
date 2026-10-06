@@ -37,6 +37,12 @@ public:
     static Common::ByteBuffer BuildCarPlayControlQuery();
 
     /**
+     * @brief Builds the second half of a DNS-SD lookup: SRV + A queries for one
+     * _carplay-ctrl instance name learned from a PTR (browse) answer.
+     */
+    static Common::ByteBuffer BuildCarPlayControlLookup(const std::string& instanceName);
+
+    /**
      * @brief Parses and validates that a raw buffer has a valid mDNS response header.
      */
     static bool ValidateMdnsHeader(Common::ByteSpan packet, uint16_t expectedAnswers = 4);

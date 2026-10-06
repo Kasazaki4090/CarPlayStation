@@ -17,6 +17,7 @@
 namespace CarPlayStation::Core::Transport {
     class IWifiSoftApManager;
     class IMdnsAdvertiser;
+    struct MdnsServiceConfig;
 }
 namespace CarPlayStation::Core::Session {
     class AirPlayRtspServer;
@@ -103,6 +104,7 @@ private:
     // Bring up the Wi-Fi SoftAP + mDNS advertiser so the device is always
     // discoverable (continuous broadcasting), independent of an active session.
     void StartPersistentBroadcasting();
+    void ApplyAirPlayPublicKey(Transport::MdnsServiceConfig& cfg) const;
     // (Re)build the per-lane audio downlink receivers from an RTSP SETUP
     // phase-2 negotiation and hand each lane its stream decryption key.
     void ConfigureAudioReceivers(const Session::NegotiatedMediaParams& params);

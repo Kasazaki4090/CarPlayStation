@@ -415,6 +415,34 @@ void TestMdnsPacketBuilder() {
     std::cout << "[PASS] TestMdnsPacketBuilder\n";
 }
 
+void TestMdnsCarPlayControlQueries() {
+    // 1. Browse query: one PTR question for _carplay-ctrl._tcp.local.
+    auto browse = MdnsPacketBuilder::BuildCarPlayControlQuery();
+    assert(browse.size() > 12);
+    assert(((browse[4] << 8) | browse[5]) == 1);                 // QDCOUNT
+    assert(std::string(browse.begin(), browse.end()).find("_carplay-ctrl") != std::string::npos);
+
+    // 2. Two-step resolution: SRV + A for the instance learned from the PTR answer.
+    auto lookup = MdnsPacketBuilder::BuildCarPlayControlLookup("iPhone._carplay-ctrl._tcp.local.");
+    assert(((lookup[4] << 8) | lookup[5]) == 2);                 // QDCOUNT = SRV + A
+    assert(((lookup[6] << 8) | lookup[7]) == 0);                 // ANCOUNT = 0
+    {
+        std::string s(lookup.begin(), lookup.end());
+        assert(s.find("iPhone._carplay-ctrl") != std::string::npos);
+        const uint8_t srv[] = { 0x00, 0x21 };                    // QTYPE = SRV (33)
+        const uint8_t a[]   = { 0x00, 0x01 };                    // QTYPE = A (1)
+        assert(s.find(std::string(reinterpret_cast<const char*>(srv), 2)) != std::string::npos);
+        assert(s.find(std::string(reinterpret_cast<const char*>(a), 2)) != std::string::npos);
+    }
+
+    // 3. Empty instance falls back to a browse so we never send an empty question name.
+    auto fallback = MdnsPacketBuilder::BuildCarPlayControlLookup("");
+    assert(((fallback[4] << 8) | fallback[5]) == 1);
+    assert(std::string(fallback.begin(), fallback.end()).find("_carplay-ctrl") != std::string::npos);
+
+    std::cout << "[PASS] TestMdnsCarPlayControlQueries\n";
+}
+
 void TestMdnsAdvertiserLifecycle() {
     auto advertiser = std::make_shared<MdnsAdvertiser>();
     assert(!advertiser->IsRunning());
@@ -487,6 +515,7 @@ int main() {
 
     // Step 4 tests
     TestMdnsPacketBuilder();
+    TestMdnsCarPlayControlQueries();
     TestMdnsAdvertiserLifecycle();
     TestMockMdnsAdvertiser();
 

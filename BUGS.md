@@ -521,6 +521,96 @@ answering 0x5703 forever. The iPhone never advances to the CarPlay session.
 
 ---
 
+## BUG-010 — iPhone never opens RTSP after `0x4301 CarPlayStartSession` (mDNS discovery silent)
+
+**Status:** Investigating
+**Component:** Core/Transport (mDNS), Windows host configuration
+**Severity:** Critical
+**Found In:** `0184078`
+**Platform:** Windows 11, `netsh wlan hostednetwork`/Mobile Hotspot SoftAP at `192.168.137.1`
+
+### Symptoms
+
+The iAP2 wireless control plane completes end to end: Bluetooth RFCOMM accept,
+MFi authentication, `0x1D00-02` identify, the five subscriptions, `0x5700`/
+`0x5702`/`0x5703`, `0x4E0A`-`0x4E0D`, `0x5001`/`0x4155`, `0x4E0E`, `0x4300`
+and finally `0x4301 CarPlayStartSession port=5000 ip=192.168.137.1`. After that
+the log is silent: no `Discovered iPhone _carplay-ctrl service at ...`, no
+`Sent /ctrl-int/1/connect ...`, and `AirPlayRtsp` never reports an inbound
+connection on port 5000. The iPhone keeps showing the "checking" spinner.
+
+`carplaystation.log` (255 lines) contains zero lines from the mDNS receive path.
+
+### Reproduction
+
+1. Start the app; it brings up the SoftAP (`Z890 3197`, gateway `192.168.137.1`),
+   the RTSP server on 5000 and the mDNS advertiser (`bind() OK on 0.0.0.0:5353`,
+   `Joined mDNS multicast group 224.0.0.251 on 192.168.137.1`).
+2. Pair over Bluetooth and join the hotspot from the iPhone (`192.168.137.204`).
+3. Wait for the control plane to reach `0x4301`.
+4. Observe: outbound announcements and `_carplay-ctrl` PTR queries are logged,
+   but nothing is ever received.
+
+### Diagnostics performed
+
+1. **The receive path was unobservable.** `BroadcastWorkerLoop()` only logged when
+   it happened to find a `_carplay-ctrl` SRV port, so "the iPhone sends no mDNS"
+   and "our socket never receives it" were indistinguishable.
+2. **The parser could not resolve a DNS-SD browse.** `ParseCarPlayCtrlPort()`
+   matched SRV records only and required the *record name* to contain
+   `_carplay-ctrl`. A correct browse answer (a PTR pointing at the instance) was
+   discarded, so a two-step resolution could never happen.
+3. **Query matching was too narrow.** `IsAirPlayQuery()` required `QDCOUNT > 0`
+   and a literal `_airplay._tcp` name, so service-enumeration (`_services._dns-sd._tcp`)
+   and wildcard queries were ignored.
+4. **Socket sharing is not the problem.** A probe that binds a second
+   `SO_REUSEADDR` socket to `0.0.0.0:5353` while `Dnscache` (svchost) holds the
+   port, joins `224.0.0.251` on `192.168.137.1` and multicasts to itself
+   receives every datagram. Windows delivers 5353 to all wildcard binders.
+5. **Firewall profile scope is the leading host-side suspect.** The running
+   executable has inbound Allow rules with `Profile=Private` only, while the
+   hotspot access interface has no `Get-NetConnectionProfile` entry and is
+   therefore treated as Public. Inbound mDNS (UDP 5353) and the RTSP connection
+   (TCP 5000) would both be blocked.
+
+### Fix
+
+1. `MdnsAdvertiser.cpp`: replaced `ParseCarPlayCtrlPort()`/`IsAirPlayQuery()` with
+   a single `InspectMdnsPacket()` that walks QDCOUNT **and** ANCOUNT+NSCOUNT+ARCOUNT,
+   decodes PTR targets and SRV ports, and returns a decoded summary of every name,
+   type and port in the datagram.
+2. `MdnsAdvertiser.cpp`: the receive loop now logs every inbound datagram
+   (`mDNS inbound N bytes from ip:port [summary]`), and chases a browse answer with
+   one SRV/A query per newly seen instance (`SendCtrlLookup()`, deduplicated by
+   `m_ctrlInstance`) — RFC 6767 two-step resolution.
+3. `MdnsPacketBuilder`: added `BuildCarPlayControlLookup(instanceName)` which asks
+   SRV + A for an instance learned from a PTR, and falls back to a PTR browse when
+   no instance is known.
+4. Query matching now also accepts `local.`, `.`, and `_services._dns-sd` questions.
+5. `CarPlayCoreService::ApplyAirPlayPublicKey()` publishes the accessory Ed25519
+   public key as the `pk` TXT key of `_airplay._tcp` (hex, as xcertplay and
+   carplayd do). Without `pk` the iPhone refuses to open the RTSP control channel.
+6. Host configuration (requires an elevated shell, not yet applied):
+   `New-NetFirewallRule -Program 'D:\CarPlayStation\build-release\UI\Win32\CarPlayStation.exe' -Action Allow -Direction Inbound -Profile Any`
+   or set the hotspot interface category to Private.
+
+### Verification
+
+1. `TransportTests::TestMdnsCarPlayControlQueries` checks the browse, the SRV+A
+   lookup, and the empty-instance fallback.
+2. All 10 test suites pass (`ctest`).
+3. On hardware the log must now show either `mDNS inbound ...` lines (then the
+   decoded summary says what the iPhone is asking for) or their absence, which
+   proves the datagrams never reach the socket and points at the firewall.
+
+### Related
+
+- GitHub Issue:
+- Commit: pending
+- Related Bug: BUG-009 (stale object files), BUG-008 (CH341 register reads)
+
+---
+
 ## Bug Template
 
 Copy the following template when adding a new bug:

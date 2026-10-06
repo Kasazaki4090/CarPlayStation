@@ -1009,6 +1009,7 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
                             if (!device_id_.empty()) {
                                 mdns_cfg.deviceId = device_id_;
                             }
+                            ApplyAirPlayPublicKey(mdns_cfg);
                             (void)mdns_advertiser_->Start(mdns_cfg);
                         }
                         (void)mdns_advertiser_->AnnounceTo(station.ipAddress);
@@ -1483,6 +1484,19 @@ void CarPlayCoreService::ConfigureMicrophoneUplink(const Session::NegotiatedMedi
                  " encrypted=", cfg.encrypted ? 1 : 0);
 }
 
+void CarPlayCoreService::ApplyAirPlayPublicKey(Transport::MdnsServiceConfig& cfg) const
+{
+    // CarPlay requires the accessory Ed25519 public key in the _airplay._tcp TXT
+    // record ("pk", hex). Without it the iPhone refuses to open the RTSP control
+    // channel even though it resolves the _carplay-ctrl._tcp SRV record.
+    if (!accessory_identity_)
+        return;
+    const auto& identity = accessory_identity_->Identity();
+    if (identity.public_key.empty())
+        return;
+    cfg.customTxtProps["pk"] = Common::ToHexCompact(identity.public_key);
+}
+
 void CarPlayCoreService::StartPersistentBroadcasting() {
     // Bring up the Wi-Fi SoftAP (Mobile Hotspot) so the iPhone can always
     // find and join the network, and start the mDNS advertiser so the device
@@ -1522,6 +1536,7 @@ void CarPlayCoreService::StartPersistentBroadcasting() {
     if (!device_id_.empty()) {
         mdns_cfg.deviceId = device_id_;
     }
+    ApplyAirPlayPublicKey(mdns_cfg);
 
     if (mdns_advertiser_ && !mdns_advertiser_->IsRunning()) {
         auto mdns_st = mdns_advertiser_->Start(mdns_cfg);

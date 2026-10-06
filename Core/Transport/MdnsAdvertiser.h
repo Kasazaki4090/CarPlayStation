@@ -47,6 +47,9 @@ private:
     void BroadcastWorkerLoop();
     Common::Status SendRawMulticast(Common::ByteSpan packet);
     void DialCarPlayControl(const std::string& host, uint16_t port);
+    // Second half of the DNS-SD lookup: SRV/A query for an instance learned
+    // from a _carplay-ctrl PTR (browse) answer.
+    void SendCtrlLookup(const std::string& instanceName);
 
     mutable std::mutex m_mutex;
     std::atomic<bool> m_running{false};
@@ -56,6 +59,7 @@ private:
     size_t m_broadcastCount{0};
     Common::ByteBuffer m_lastPacket{};
     std::vector<std::string> m_dialedTargets{};
+    std::string m_ctrlInstance{};
 
 #ifdef _WIN32
     SOCKET m_socket{INVALID_SOCKET};

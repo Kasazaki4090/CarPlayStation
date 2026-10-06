@@ -155,6 +155,41 @@ Common::ByteBuffer MdnsPacketBuilder::BuildCarPlayControlQuery() {
     return packet;
 }
 
+Common::ByteBuffer MdnsPacketBuilder::BuildCarPlayControlLookup(const std::string& instanceName) {
+    Common::ByteBuffer packet;
+    packet.reserve(128);
+
+    const bool hasInstance = !instanceName.empty();
+
+    // DNS Header (12 bytes)
+    AppendU16(packet, 0x0000); // Transaction ID
+    AppendU16(packet, 0x0000); // Flags: Standard query
+    AppendU16(packet, hasInstance ? 2 : 1); // QDCOUNT
+    AppendU16(packet, 0);      // ANCOUNT: 0
+    AppendU16(packet, 0);      // NSCOUNT: 0
+    AppendU16(packet, 0);      // ARCOUNT: 0
+
+    if (hasInstance) {
+        // SRV + A for the instance learned from the PTR answer.
+        auto qName = EncodeDnsName(instanceName);
+        packet.insert(packet.end(), qName.begin(), qName.end());
+        AppendU16(packet, kDnsTypeSrv);
+        AppendU16(packet, kDnsClassIn);
+
+        packet.insert(packet.end(), qName.begin(), qName.end());
+        AppendU16(packet, kDnsTypeA);
+        AppendU16(packet, kDnsClassIn);
+    } else {
+        // No instance known yet: fall back to a browse.
+        auto qName = EncodeDnsName("_carplay-ctrl._tcp.local.");
+        packet.insert(packet.end(), qName.begin(), qName.end());
+        AppendU16(packet, kDnsTypePtr);
+        AppendU16(packet, kDnsClassIn);
+    }
+
+    return packet;
+}
+
 bool MdnsPacketBuilder::ValidateMdnsHeader(Common::ByteSpan packet, uint16_t expectedAnswers) {
     if (packet.size() < 12) {
         return false;

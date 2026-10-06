@@ -6,6 +6,8 @@
 
 namespace {
 
+using CarPlayStation::Core::Transport::MdnsPacketBuilder;
+
 // Decode a DNS name (with RFC 1035 compression) starting at offset `start` in `buf`.
 // On success, sets `outName` (dotted, e.g. "foo._carplay-ctrl._tcp.local.") and
 // `outEnd` (offset just past the name, i.e. where the next field begins) and returns true.
@@ -48,77 +50,111 @@ bool DecodeDnsName(const uint8_t* buf, size_t len, size_t start, std::string& ou
     return true;
 }
 
-// Parse an mDNS/DNS response and extract the _carplay-ctrl SRV port.
-// Properly walks the DNS packet: header -> questions -> answers (with name compression).
-// Returns the port, or 0 if no matching SRV record is found.
-uint16_t ParseCarPlayCtrlPort(const uint8_t* buf, size_t len) {
-    if (len < 12) return 0;
+// What we care about in an inbound mDNS datagram.
+struct MdnsInspection {
+    uint16_t port = 0;             // _carplay-ctrl SRV port (0 when absent)
+    std::string ctrlInstance;      // _carplay-ctrl instance from a PTR answer
+    bool airplayQuery = false;     // somebody is looking for our AirPlay service
+    std::string summary;           // decoded names, for logging
+};
+
+// Inspect an inbound mDNS/DNS datagram.
+//
+// The old parser only recognised an SRV record whose own name contained
+// "_carplay-ctrl", so a perfectly correct DNS-SD *browse* answer (a PTR record
+// pointing at the instance name) was thrown away and the port stayed 0. This
+// walks the whole packet and reports both halves of the lookup, plus whether the
+// datagram is a query for our _airplay._tcp service. It also builds a decoded
+// summary so the receive path is observable in the log.
+MdnsInspection InspectMdnsPacket(const uint8_t* buf, size_t len) {
+    MdnsInspection out;
+    if (len < 12) return out;
 
     // 12-byte header: ID(2) FLAGS(2) QDCOUNT(2) ANCOUNT(2) NSCOUNT(2) ARCOUNT(2)
+    const bool isResponse = (buf[2] & 0x80) != 0;
     uint16_t qdCount = (static_cast<uint16_t>(buf[4]) << 8) | buf[5];
     uint16_t anCount = (static_cast<uint16_t>(buf[6]) << 8) | buf[7];
+    uint16_t nsCount = (static_cast<uint16_t>(buf[8]) << 8) | buf[9];
+    uint16_t arCount = (static_cast<uint16_t>(buf[10]) << 8) | buf[11];
+
+    auto typeName = [](uint16_t t) -> const char* {
+        switch (t) {
+            case MdnsPacketBuilder::kDnsTypeA: return "A";
+            case MdnsPacketBuilder::kDnsTypePtr: return "PTR";
+            case MdnsPacketBuilder::kDnsTypeTxt: return "TXT";
+            case MdnsPacketBuilder::kDnsTypeAaaa: return "AAAA";
+            case MdnsPacketBuilder::kDnsTypeSrv: return "SRV";
+            default: return "OTHER";
+        }
+    };
+
+    std::string summary;
+    summary = isResponse ? "response" : "query";
+    summary += " qd=" + std::to_string(qdCount) + " an=" + std::to_string(anCount)
+            + " ns=" + std::to_string(nsCount) + " ar=" + std::to_string(arCount);
 
     size_t cursor = 12;
 
-    // Skip QDCOUNT questions: each is NAME + QTYPE(2) + QCLASS(2)
+    // QDCOUNT questions: NAME + QTYPE(2) + QCLASS(2)
     for (uint16_t i = 0; i < qdCount; ++i) {
         std::string qname;
         size_t qend = 0;
-        if (!DecodeDnsName(buf, len, cursor, qname, qend)) return 0;
+        if (!DecodeDnsName(buf, len, cursor, qname, qend)) return out;
         cursor = qend;
-        if (cursor + 4 > len) return 0; // QTYPE(2) + QCLASS(2)
+        if (cursor + 4 > len) return out;
+        uint16_t qtype = (static_cast<uint16_t>(buf[cursor]) << 8) | buf[cursor + 1];
         cursor += 4;
+
+        summary += " | q:" + qname + "/" + typeName(qtype);
+
+        // The iPhone browses _airplay._tcp (or the service enumeration / any
+        // record) before it will talk to us; answer all of those forms.
+        if (qname.find("_airplay._tcp") != std::string::npos ||
+            qname == "local." || qname == "." ||
+            qname.find("_services._dns-sd") != std::string::npos) {
+            out.airplayQuery = true;
+        }
     }
 
-    // Walk ANCOUNT answers: each is NAME + TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) + RDATA
-    for (uint16_t i = 0; i < anCount; ++i) {
-        std::string aname;
-        size_t aend = 0;
-        if (!DecodeDnsName(buf, len, cursor, aname, aend)) return 0;
-        cursor = aend;
-        if (cursor + 10 > len) return 0; // TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2)
+    // ANSWER/AUTHORITY/ADDITIONAL records: NAME + TYPE + CLASS + TTL + RDLENGTH + RDATA
+    const uint16_t rrCount = static_cast<uint16_t>(anCount + nsCount + arCount);
+    for (uint16_t i = 0; i < rrCount; ++i) {
+        std::string rname;
+        size_t rend = 0;
+        if (!DecodeDnsName(buf, len, cursor, rname, rend)) return out;
+        cursor = rend;
+        if (cursor + 10 > len) return out;
         uint16_t type = (static_cast<uint16_t>(buf[cursor]) << 8) | buf[cursor + 1];
         uint16_t rdLength = (static_cast<uint16_t>(buf[cursor + 8]) << 8) | buf[cursor + 9];
         cursor += 10;
-        if (cursor + rdLength > len) return 0;
+        if (cursor + rdLength > len) return out;
 
-        if (type == CarPlayStation::Core::Transport::MdnsPacketBuilder::kDnsTypeSrv && rdLength >= 6) {
-            // SRV RDATA: PRIORITY(2) + WEIGHT(2) + PORT(2) + TARGET(name)
+        if (type == MdnsPacketBuilder::kDnsTypeSrv && rdLength >= 6) {
+            // SRV RDATA: PRIORITY(2) WEIGHT(2) PORT(2) TARGET(name)
             uint16_t port = (static_cast<uint16_t>(buf[cursor + 4]) << 8) | buf[cursor + 5];
-            if (aname.find("_carplay-ctrl") != std::string::npos && port > 0) {
-                return port;
+            summary += " | srv:" + rname + ":" + std::to_string(port);
+            if (rname.find("_carplay-ctrl") != std::string::npos && port > 0) {
+                out.port = port;
+                if (out.ctrlInstance.empty()) out.ctrlInstance = rname;
             }
+        } else if (type == MdnsPacketBuilder::kDnsTypePtr && rdLength >= 2) {
+            // PTR RDATA is a single (possibly compressed) target name.
+            std::string target;
+            size_t tend = 0;
+            if (DecodeDnsName(buf, len, cursor, target, tend)) {
+                summary += " | ptr:" + rname + "->" + target;
+                if (rname.find("_carplay-ctrl") != std::string::npos && !target.empty()) {
+                    if (out.ctrlInstance.empty()) out.ctrlInstance = target;
+                }
+            }
+        } else {
+            summary += " | rr:" + rname + "/" + typeName(type);
         }
+
         cursor += rdLength;
     }
 
-    return 0;
-}
-
-// Detect whether an incoming mDNS/DNS packet is a query for our AirPlay
-// service (_airplay._tcp.local.). The iPhone issues such a query to discover
-// the receiver's AirPlay service (SRV -> RTSP port 5000). We must answer it
-// with our PTR/SRV/TXT/A records, otherwise the iPhone never learns the RTSP
-// endpoint and will not connect back.
-bool IsAirPlayQuery(const uint8_t* buf, size_t len) {
-    if (len < 12) return false;
-
-    uint16_t qdCount = (static_cast<uint16_t>(buf[4]) << 8) | buf[5];
-    if (qdCount == 0) return false;
-
-    size_t cursor = 12;
-    for (uint16_t i = 0; i < qdCount; ++i) {
-        std::string qname;
-        size_t qend = 0;
-        if (!DecodeDnsName(buf, len, cursor, qname, qend)) return false;
-        cursor = qend;
-        if (cursor + 4 > len) return false; // QTYPE(2) + QCLASS(2)
-        cursor += 4;
-        if (qname.find("_airplay._tcp") != std::string::npos) {
-            return true;
-        }
-    }
-    return false;
+    return out;
 }
 
 } // namespace
@@ -352,6 +388,29 @@ Common::Status MdnsAdvertiser::SendRawMulticast(Common::ByteSpan packet) {
 void MdnsAdvertiser::ClearDialedTargets() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_dialedTargets.clear();
+    m_ctrlInstance.clear();
+}
+
+void MdnsAdvertiser::SendCtrlLookup(const std::string& instanceName) {
+#ifdef _WIN32
+    if (m_socket == INVALID_SOCKET) return;
+    auto query = MdnsPacketBuilder::BuildCarPlayControlLookup(instanceName);
+    sockaddr_in dst{};
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(5353);
+    inet_pton(AF_INET, "224.0.0.251", &dst.sin_addr);
+    int sent = sendto(m_socket, reinterpret_cast<const char*>(query.data()),
+                      static_cast<int>(query.size()), 0,
+                      reinterpret_cast<const sockaddr*>(&dst), sizeof(dst));
+    if (sent == SOCKET_ERROR) {
+        CPS_LOG_WARN("MdnsAdvertiser", "SRV/A query for ", instanceName,
+                     " failed (WSA error ", std::to_string(WSAGetLastError()), ")");
+    } else {
+        CPS_LOG_INFO("MdnsAdvertiser", "Sent SRV/A query for _carplay-ctrl instance ", instanceName);
+    }
+#else
+    (void)instanceName;
+#endif
 }
 
 void MdnsAdvertiser::DialCarPlayControl(const std::string& host, uint16_t port) {
@@ -467,17 +526,39 @@ void MdnsAdvertiser::BroadcastWorkerLoop() {
                     char ipStr[INET_ADDRSTRLEN] = {0};
                     inet_ntop(AF_INET, &fromAddr.sin_addr, ipStr, sizeof(ipStr));
 
-                    uint16_t port = ParseCarPlayCtrlPort(rxBuf, static_cast<size_t>(bytesRead));
-                    if (port > 0) {
+                    // Everything we receive is logged: without this there is no way
+                    // to tell "the iPhone sends no mDNS" from "our socket never gets it".
+                    MdnsInspection rx = InspectMdnsPacket(rxBuf, static_cast<size_t>(bytesRead));
+                    CPS_LOG_INFO("MdnsAdvertiser", "mDNS inbound ", bytesRead, " bytes from ", ipStr, ":",
+                                 std::to_string(ntohs(fromAddr.sin_port)), " [", rx.summary, "]");
+
+                    // A browse answer gives us the instance name but not the port;
+                    // chase it with an SRV/A query (RFC 6767 two-step resolution).
+                    if (rx.port == 0 && !rx.ctrlInstance.empty()) {
+                        std::string known;
+                        {
+                            std::lock_guard<std::mutex> lock(m_mutex);
+                            known = m_ctrlInstance;
+                        }
+                        if (known != rx.ctrlInstance) {
+                            {
+                                std::lock_guard<std::mutex> lock(m_mutex);
+                                m_ctrlInstance = rx.ctrlInstance;
+                            }
+                            SendCtrlLookup(rx.ctrlInstance);
+                        }
+                    }
+
+                    if (rx.port > 0) {
                         bool already_dialed = false;
                         {
                             std::lock_guard<std::mutex> lock(m_mutex);
-                            std::string key = std::string(ipStr) + ":" + std::to_string(port);
+                            std::string key = std::string(ipStr) + ":" + std::to_string(rx.port);
                             already_dialed = (std::find(m_dialedTargets.begin(), m_dialedTargets.end(), key) != m_dialedTargets.end());
                         }
                         if (!already_dialed) {
-                            CPS_LOG_INFO("MdnsAdvertiser", "Discovered iPhone _carplay-ctrl service at ", ipStr, ":", std::to_string(port));
-                            DialCarPlayControl(ipStr, port);
+                            CPS_LOG_INFO("MdnsAdvertiser", "Discovered iPhone _carplay-ctrl service at ", ipStr, ":", std::to_string(rx.port));
+                            DialCarPlayControl(ipStr, rx.port);
                         }
                     }
 
@@ -485,8 +566,8 @@ void MdnsAdvertiser::BroadcastWorkerLoop() {
                     // The iPhone queries _airplay._tcp.local. to discover our
                     // RTSP endpoint (SRV -> port 5000). Without a response the
                     // iPhone never learns where to connect for video.
-                    if (IsAirPlayQuery(rxBuf, static_cast<size_t>(bytesRead))) {
-                        CPS_LOG_INFO("MdnsAdvertiser", "Received _airplay._tcp query from ", ipStr, " — responding with SRV/TXT/A records");
+                    if (rx.airplayQuery) {
+                        CPS_LOG_INFO("MdnsAdvertiser", "Received AirPlay service query from ", ipStr, " — responding with SRV/TXT/A records");
                         MdnsServiceConfig cfg;
                         {
                             std::lock_guard<std::mutex> lock(m_mutex);
