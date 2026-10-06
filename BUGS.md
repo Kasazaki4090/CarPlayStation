@@ -622,6 +622,94 @@ connection on port 5000. The iPhone keeps showing the "checking" spinner.
 
 ---
 
+## BUG-011 — Hardware signer reads `Invalid MFi certificate length: 65535` (coprocessor never answered)
+
+**Status:** `Fix applied, awaiting hardware retest`
+
+**Date:** 2026-10-07
+
+### Symptom
+
+"读取了，但没拉起来？" With `BackendType=2` the CH341 backend loads and is
+selected (`MFi signer active: HardwareI2C: driver=0 slave=0x11`), the Bluetooth
+link comes up, iAP2 reaches `0xAA00 MfiMsgReqAuthCert` — and 7 ms later the log
+says:
+
+```
+[WARN] MFi certificate fetch failed: Invalid MFi certificate length: 65535
+```
+
+No `0x4301`, no RTSP connection, no CarPlay session. The software signer
+(`BackendType=0`) still completes the session end to end.
+
+### Reproduction
+
+1. `carplaystation_ui.ini` → `[MFi] BackendType=2`, `I2cDriver=0`,
+   `I2cSlaveAddress=17`.
+2. Start `CarPlayStation.exe`, connect the iPhone over Bluetooth.
+3. `FetchCertificate()` fails immediately with a length of `0xFFFF`.
+
+### Root Cause
+
+1. **No wake-up read.** The coprocessor answers its first read only after
+   something has selected it; the proven reference transports (`iap2_auth.c`
+   `mfi_warmup()`, `mfi_oracle.c`) read register `0x00` (DeviceVersion) once at
+   startup specifically "so the first cert read succeeds". `I2cMfiSigner` went
+   straight for `0x30`.
+2. **The bridge's idle fill was treated as success.** `CH341StreamI2C` returns
+   TRUE when the slave NACKs the read address and fills the buffer with `0xFF`.
+   `ReadRegister()` only retried on `IsError()` or a short read, so `FF FF`
+   passed through as a valid length of 65535. That is also why the failure
+   appeared after 7 ms although `io_retry_timeout` is 2000 ms — the retry loop
+   never engaged.
+3. **Auth polling would have burned the whole I/O retry budget.** Once reads
+   start failing, `SignChallenge()` polled `REG_AUTH_STATUS` through
+   `ReadRegister()`, which spends a full `io_retry_timeout` (2 s) per poll, while
+   the reference notes NACKs during signing are expected for ~750 ms–1.6 s.
+
+### Fix
+
+1. `I2cMfiSigner::WarmUpLocked()`: up to 8 single-shot select/read pairs on
+   `REG_DEVICE_VERSION = 0x00` at 50 ms spacing, accepting only a non-empty,
+   non-`0xFF` response; after the fourth attempt it pulses the reset GPIO when
+   `auto_pulse_reset_on_failure` is set. Latched in `warmup_ok_`, cleared
+   whenever a later read fails so the next operation re-warms the chip. Called
+   from `FetchCertificate()`, `SignChallenge()` and `GetChipInfo()`.
+2. `IsBusIdleFill()` plus `ReadRegisterOnce()`: a read that comes back as all
+   `0xFF` is now `HardwareError` "I2C read returned bus-idle padding (slave not
+   answering)", so `ReadRegister()` retries the select/read pair and finally logs
+   the register, the retry budget and the message.
+3. `FetchCertificate()` is split: the public method does the open/warm-up and one
+   reset-and-retry, `FetchCertificateLocked()` does the length read and the
+   windowed body read, and success is logged reference-style (`MFi certificate
+   read: 945 bytes first16=...`).
+4. `SignChallenge()` polls the status register with `ReadRegisterOnce()` so a
+   NACK costs one transaction, not the I/O retry budget; only the `auth_timeout`
+   deadline can end the loop, and the number of NACKed polls is logged.
+
+### Verification
+
+1. Clean rebuild (`cmake --build . --target clean` then full build — the header
+   changed, see BUG-009) with no new warnings from these files.
+2. All 10 test suites pass (`ctest`), including `HardwareTests`:
+   `MockI2cAdapter` answers register `0x00` with `0x00`, so the warm-up succeeds
+   against the mock, and it never returns an idle fill, so the new check does not
+   change the expected certificate or signature flows.
+3. On hardware the log must show `MFi coprocessor awake: DeviceVersion=0x…`
+   followed by `MFi certificate read: <607..945> bytes first16=…`, then
+   `MFi-SAP M2 size=…` and the RTSP connection. If instead
+   `Coprocessor did not answer the warm-up read at address 0x11` appears, the
+   coprocessor is not on the bus (wiring, address, or power) and no amount of
+   retrying will help.
+
+### Related
+
+- GitHub Issue:
+- Commit: pending
+- Related Bug: BUG-008 (CH341 register reads, 128-byte windows)
+
+---
+
 ## Bug Template
 
 Copy the following template when adding a new bug:

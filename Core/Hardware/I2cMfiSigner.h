@@ -46,17 +46,29 @@ private:
     [[nodiscard]] Common::Result<void> WriteBigEndianShort(uint8_t reg, uint16_t value);
     [[nodiscard]] Common::Result<void> SelectRegister(uint8_t reg);
     [[nodiscard]] Common::Result<Common::ByteBuffer> ReadRegister(uint8_t reg, size_t length);
+    // One select/read pair, no retry loop. Used where the caller owns the retry
+    // deadline (e.g. polling the coprocessor while it computes a signature).
+    [[nodiscard]] Common::Result<Common::ByteBuffer> ReadRegisterOnce(uint8_t reg, size_t length);
     [[nodiscard]] Common::Result<Common::ByteBuffer> ReadRegisterWindows(uint8_t base_reg, size_t length);
     [[nodiscard]] Common::Result<void> WriteRegister(uint8_t reg, Common::ByteSpan data);
 
     // Lazily open the I2C adapter on first use. Must be called with mutex_ held.
     void EnsureOpen() const;
 
+    // Wake the coprocessor with a read of the DeviceVersion register. Must be
+    // called with mutex_ held. The chip answers its first read only after this.
+    bool WarmUpLocked() const;
+
+    // Certificate read without the warm-up / reset wrapper. Must be called with
+    // mutex_ held.
+    [[nodiscard]] Common::Result<Common::ByteBuffer> FetchCertificateLocked();
+
     std::shared_ptr<II2cAdapter> adapter_;
     uint8_t slave_address_{0x11};
     Options options_{};
     mutable std::mutex mutex_;
     bool is_shutdown_{false};
+    mutable bool warmup_ok_{false};
 };
 
 } // namespace CarPlayStation::Core::Hardware

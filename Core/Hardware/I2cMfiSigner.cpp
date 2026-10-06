@@ -7,6 +7,7 @@
 namespace CarPlayStation::Core::Hardware {
 
 namespace {
+constexpr uint8_t REG_DEVICE_VERSION = 0x00;
 constexpr uint8_t REG_PROTOCOL_MAJOR = 0x02;
 constexpr uint8_t REG_ERROR_CODE     = 0x05;
 constexpr uint8_t REG_AUTH_STATUS    = 0x10;
@@ -25,6 +26,23 @@ constexpr uint8_t AUTH_STATUS_OK     = 0x10;
 // offset w * 128 of the blob. A single over-long read past the first window
 // returns garbage, so blobs are read window by window.
 constexpr size_t kRegisterWindowBytes = 128;
+
+// A USB-I2C bridge reports success even when the coprocessor never answered
+// (it NACKed the read address, e.g. because the chip is still asleep), and
+// fills the read buffer with 0xFF. Treat that fill as a failed read so the
+// caller retries instead of handing back 0xFFFF as a length or 0xFF bytes as
+// certificate data.
+bool IsBusIdleFill(const Common::ByteBuffer& data) {
+    if (data.empty()) {
+        return false;
+    }
+    for (uint8_t byte : data) {
+        if (byte != 0xFF) {
+            return false;
+        }
+    }
+    return true;
+}
 } // namespace
 
 I2cMfiSigner::I2cMfiSigner(std::shared_ptr<II2cAdapter> adapter,
@@ -50,6 +68,45 @@ void I2cMfiSigner::EnsureOpen() const {
     if (res.IsError()) {
         CPS_LOG_WARN("I2cMfiSigner", "Failed to open I2C adapter: ", res.Error().Message());
     }
+}
+
+bool I2cMfiSigner::WarmUpLocked() const {
+    // Caller must hold mutex_.
+    if (warmup_ok_ || !adapter_ || !adapter_->IsOpen() || is_shutdown_) {
+        return warmup_ok_;
+    }
+
+    // The coprocessor powers up asleep on many boards and NACKs the first
+    // reads; the proven reference transports read register 0x00 (DeviceVersion)
+    // once at startup so the first certificate read succeeds. Each attempt is a
+    // single-shot transaction (no retry budget) so the warm-up stays bounded;
+    // after a few attempts fall back to a GPIO reset pulse if the adapter can
+    // generate one.
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        uint8_t reg = REG_DEVICE_VERSION;
+        auto sel = adapter_->Write(slave_address_, Common::ByteSpan(&reg, 1));
+        if (sel.IsOk()) {
+            auto res = adapter_->Read(slave_address_, 1);
+            if (res.IsOk() && !res.Value().empty() && !IsBusIdleFill(res.Value())) {
+                warmup_ok_ = true;
+                CPS_LOG_INFO("I2cMfiSigner", "MFi coprocessor awake: DeviceVersion=0x",
+                             static_cast<int>(res.Value()[0] & 0xFF));
+                return true;
+            }
+        }
+        if (attempt == 3 && options_.auto_pulse_reset_on_failure) {
+            auto pulse = adapter_->PulseReset(options_.reset_gpio_pin);
+            if (pulse.IsOk()) {
+                CPS_LOG_INFO("I2cMfiSigner", "Pulsed coprocessor reset line (GPIO",
+                             static_cast<int>(options_.reset_gpio_pin), ")");
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    CPS_LOG_WARN("I2cMfiSigner", "Coprocessor did not answer the warm-up read at address 0x",
+                 static_cast<int>(slave_address_), "; continuing anyway");
+    return false;
 }
 
 I2cMfiSigner::~I2cMfiSigner() {
@@ -102,6 +159,27 @@ Common::Result<void> I2cMfiSigner::SelectRegister(uint8_t reg) {
     return adapter_->Write(slave_address_, Common::ByteSpan(&reg_addr, 1));
 }
 
+Common::Result<Common::ByteBuffer> I2cMfiSigner::ReadRegisterOnce(uint8_t reg, size_t length) {
+    if (!adapter_ || !adapter_->IsOpen()) {
+        return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "I2C adapter is not open");
+    }
+
+    auto sel = SelectRegister(reg);
+    if (sel.IsError()) {
+        return sel.Error();
+    }
+
+    auto res = adapter_->Read(slave_address_, length);
+    if (res.IsError()) {
+        return res;
+    }
+    if (res.Value().size() != length || IsBusIdleFill(res.Value())) {
+        return Common::Status::Error(Common::StatusCode::HardwareError,
+            "I2C read returned bus-idle padding (slave not answering)");
+    }
+    return res;
+}
+
 Common::Result<Common::ByteBuffer> I2cMfiSigner::ReadRegister(uint8_t reg, size_t length) {
     if (!adapter_ || !adapter_->IsOpen()) {
         return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "I2C adapter is not open");
@@ -115,21 +193,18 @@ Common::Result<Common::ByteBuffer> I2cMfiSigner::ReadRegister(uint8_t reg, size_
         // and the USB bridges do not surface that I2C NACK separately. Retry the
         // complete select/read pair: retrying only the read half can otherwise
         // keep reading whatever register was selected before.
-        auto sel = SelectRegister(reg);
-        if (sel.IsError()) {
-            last_res = sel.Error();
-            std::this_thread::sleep_for(options_.io_retry_delay);
-            continue;
-        }
-
-        auto res = adapter_->Read(slave_address_, length);
-        if (res.IsOk() && res.Value().size() == length) {
+        auto res = ReadRegisterOnce(reg, length);
+        if (res.IsOk()) {
             return res;
         }
+        // The chip went quiet: allow the next operation to warm it up again.
+        warmup_ok_ = false;
         last_res = res;
         std::this_thread::sleep_for(options_.io_retry_delay);
     }
 
+    CPS_LOG_WARN("I2cMfiSigner", "Register 0x", static_cast<int>(reg), " read failed after ",
+                 options_.io_retry_timeout.count(), "ms: ", last_res.Error().Message());
     return last_res;
 }
 
@@ -186,6 +261,25 @@ Common::Result<Common::ByteBuffer> I2cMfiSigner::FetchCertificate() {
         return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "Signer is shut down");
     }
     EnsureOpen();
+    WarmUpLocked();
+
+    auto res = FetchCertificateLocked();
+    if (res.IsError() && !warmup_ok_) {
+        // The chip was never seen awake; one more wake attempt and retry.
+        WarmUpLocked();
+        res = FetchCertificateLocked();
+    }
+    if (res.IsOk()) {
+        const auto& cert = res.Value();
+        Common::ByteBuffer head(cert.begin(), cert.begin() + static_cast<long>(std::min<size_t>(16, cert.size())));
+        CPS_LOG_INFO("I2cMfiSigner", "MFi certificate read: ", cert.size(),
+                     " bytes first16=", Common::ToHexString(head));
+    }
+    return res;
+}
+
+Common::Result<Common::ByteBuffer> I2cMfiSigner::FetchCertificateLocked() {
+    // Caller must hold mutex_.
 
     // 1. Read certificate length from register 0x30
     auto len_res = ReadBigEndianShort(REG_CERT_LEN);
@@ -210,6 +304,7 @@ Common::Result<Common::ByteBuffer> I2cMfiSigner::SignChallenge(Common::ByteSpan 
         return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "Signer is shut down");
     }
     EnsureOpen();
+    WarmUpLocked();
 
     if (challenge.empty() || challenge.size() > 128) {
         return Common::Status::Error(Common::StatusCode::InvalidArgument, "Invalid challenge length");
@@ -228,18 +323,28 @@ Common::Result<Common::ByteBuffer> I2cMfiSigner::SignChallenge(Common::ByteSpan 
     auto w_start = WriteRegister(REG_AUTH_STATUS, Common::ByteSpan(&start_cmd, 1));
     if (w_start.IsError()) return w_start.Error();
 
-    // 4. Poll 0x10 until AUTH_STATUS_OK
+    // 4. Poll 0x10 until AUTH_STATUS_OK. The coprocessor NACKs the bus for
+    // hundreds of milliseconds while it computes the signature, so a failed
+    // poll is not an error; only the deadline is. ReadRegisterOnce is used
+    // here so a NACK costs one transaction instead of the full io_retry_timeout.
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     auto deadline = std::chrono::steady_clock::now() + options_.auth_timeout;
     bool completed = false;
+    int poll_failures = 0;
 
     while (std::chrono::steady_clock::now() < deadline) {
-        auto status_res = ReadByte(REG_AUTH_STATUS);
-        if (status_res.IsOk() && status_res.Value() == AUTH_STATUS_OK) {
+        auto status_res = ReadRegisterOnce(REG_AUTH_STATUS, 1);
+        if (status_res.IsOk() && status_res.Value().size() == 1 &&
+            status_res.Value()[0] == AUTH_STATUS_OK) {
             completed = true;
             break;
         }
+        if (status_res.IsError()) ++poll_failures;
         std::this_thread::sleep_for(options_.auth_poll_interval);
+    }
+    if (poll_failures > 0) {
+        CPS_LOG_INFO("I2cMfiSigner", "Auth status polling saw ", poll_failures,
+                     " NACK(s) before the chip reported success");
     }
 
     if (!completed) {
@@ -275,6 +380,7 @@ MFiChipInfo I2cMfiSigner::GetChipInfo() const noexcept {
     if (!adapter_->IsOpen()) {
         return info;
     }
+    WarmUpLocked();
 
     // Read major protocol version from 0x02
     uint8_t reg = REG_PROTOCOL_MAJOR;
