@@ -81,6 +81,12 @@ Core::Common::Status AppController::Initialize(
         return false;
     });
 
+    // Ask for raw pointer messages so a second finger is visible. Without this the
+    // window only ever receives the synthesized single-point WM_MOUSE* stream.
+    if (!RegisterTouchWindow(window_.GetHwnd(), 0)) {
+        CPS_LOG_WARN("AppController", "RegisterTouchWindow failed; multi-touch disabled");
+    }
+
     window_.SetCloseCallback([this]() {
         Shutdown();
     });

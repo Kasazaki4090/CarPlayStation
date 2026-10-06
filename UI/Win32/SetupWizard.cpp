@@ -236,6 +236,10 @@ void SetupWizard::SaveDeviceAddresses(const std::string& bluetooth_mac, const st
     WriteIniUtf8(ini, L"Device", L"WifiMac", wifi_mac);
 }
 
+// --- HID input capability ---------------------------------------------------
+// Not persisted: the number of touch contacts advertised in /info comes from
+// Core/Hardware/TouchscreenCapabilities, which reads the host's digitizer.
+
 bool SetupWizard::ShouldShowMFiWizard(const Application::AppSettings& settings) const noexcept {
     if (!preferences_.first_run_completed) {
         return true;

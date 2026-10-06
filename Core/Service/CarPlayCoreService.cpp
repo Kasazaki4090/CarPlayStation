@@ -5,6 +5,7 @@
 #include "Core/Transport/WifiSoftApManager.h"
 #include "Core/Transport/MdnsAdvertiser.h"
 #include "Core/Hardware/RadioAdapterHelper.h"
+#include "Core/Hardware/TouchscreenCapabilities.h"
 #include "Core/Protocol/Iap2LinkEngine.h"
 #include "Core/Protocol/Iap2MessageCatalog.h"
 #include "Core/Session/CarPlaySessionStateMachine.h"
@@ -22,8 +23,15 @@
 
 #include <algorithm>
 #include <array>
-#include <ctime>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
 #include <cstdio>
+#include <ctime>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <unordered_set>
 
 #ifdef _WIN32
@@ -40,10 +48,76 @@ namespace CarPlayStation::Core::Service {
 // ============================================================================
 namespace {
 
+// A knob action translated into a drag on the touchscreen: the endpoints of the drag as
+// fractions of the display.
+struct SyntheticGesture {
+    float x0 = 0.5f;
+    float y0 = 0.5f;
+    float x1 = 0.5f;
+    float y1 = 0.5f;
+};
+
+// This receiver advertises no knob HID device — adding a third hidDevices entry to /info
+// stopped the CarPlay session from coming up at all (see the same experiment documented in
+// Reference/carplayd/.../receiver/src/info.rs). Keyboard arrows and the mouse wheel are
+// therefore synthesized as touch drags on the touchscreen device that is already
+// negotiated. The drag direction matches what the user expects from the key: pressing
+// "down" scrolls the content up, which is a finger drag upwards.
+[[nodiscard]] bool SynthesizeKnobGesture(
+    Input::KnobAction action,
+    uint32_t stepCount,
+    SyntheticGesture& out) {
+    struct Direction { float dx; float dy; };
+    Direction dir{ 0.0f, 0.0f };
+    switch (action) {
+        case Input::KnobAction::PressUp:    dir = { 0.0f,  1.0f}; break;
+        case Input::KnobAction::PressDown:  dir = { 0.0f, -1.0f}; break;
+        case Input::KnobAction::PressLeft:  dir = { 1.0f,  0.0f}; break;
+        case Input::KnobAction::PressRight: dir = {-1.0f,  0.0f}; break;
+        case Input::KnobAction::RotateClockwise:       dir = { 0.0f, -1.0f}; break;
+        case Input::KnobAction::RotateCounterClockwise:dir = { 0.0f,  1.0f}; break;
+        case Input::KnobAction::PushDown:   dir = { 0.0f,  0.0f}; break;  // tap
+        case Input::KnobAction::PushUp:     return false;                  // release: no-op
+    }
+
+    if (dir.dx == 0.0f && dir.dy == 0.0f) {
+        out.x0 = out.x1 = 0.5f;
+        out.y0 = out.y1 = 0.5f;
+        return true;
+    }
+    // One knob step drags 45% of the display; more steps travel further but stay on screen.
+    const float steps = static_cast<float>(std::max<uint32_t>(stepCount, 1u));
+    const float half = std::min(0.225f * steps, 0.45f);
+    const float hx = dir.dx * half;
+    const float hy = dir.dy * half;
+    out.x0 = std::clamp(0.5f - hx, 0.0f, 1.0f);
+    out.y0 = std::clamp(0.5f - hy, 0.0f, 1.0f);
+    out.x1 = std::clamp(0.5f + hx, 0.0f, 1.0f);
+    out.y1 = std::clamp(0.5f + hy, 0.0f, 1.0f);
+    return true;
+}
+
 class AirPlayInputSink final : public Input::IInputEventSink {
 public:
+    // Must match kMaxTouchContacts in the RTSP server's two-contact descriptor.
+    static constexpr size_t kMaxContacts = 2;
+    static constexpr size_t kBytesPerContact = 6;
+    static constexpr size_t kReportBytes = kMaxContacts * kBytesPerContact;
+
     explicit AirPlayInputSink(std::weak_ptr<Session::AirPlayRtspServer> rtsp_server)
         : rtsp_server_(std::move(rtsp_server)) {}
+
+    ~AirPlayInputSink() override {
+        std::unique_ptr<std::thread> worker;
+        {
+            std::lock_guard<std::mutex> lock(gesture_mutex_);
+            gesture_stop_ = true;
+            gesture_queue_.clear();
+            gesture_cv_.notify_all();
+            worker.swap(gesture_worker_);
+        }
+        if (worker && worker->joinable()) worker->join();
+    }
 
     [[nodiscard]] Common::Status SendTouchEvent(
         Input::TouchAction action,
@@ -53,38 +127,55 @@ public:
             return Common::MakeError(Common::StatusCode::Unavailable,
                 "AirPlay RTSP server is unavailable");
         }
-
-        const auto params = server->GetNegotiatedParams();
-        const uint16_t width = static_cast<uint16_t>(
-            std::clamp(params.video_width, 1u, static_cast<uint32_t>(UINT16_MAX)));
-        const uint16_t height = static_cast<uint16_t>(
-            std::clamp(params.video_height, 1u, static_cast<uint32_t>(UINT16_MAX)));
-        const bool contact = action == Input::TouchAction::Down ||
-                             action == Input::TouchAction::Move;
-        const uint16_t x = static_cast<uint16_t>(
-            std::clamp(point.x_normalized, 0.0f, 1.0f) * width);
-        const uint16_t y = static_cast<uint16_t>(
-            std::clamp(point.y_normalized, 0.0f, 1.0f) * height);
-        const std::array<uint8_t, 5> report{
-            static_cast<uint8_t>(contact ? 1 : 0),
-            static_cast<uint8_t>(x & 0xFF),
-            static_cast<uint8_t>((x >> 8) & 0xFF),
-            static_cast<uint8_t>(y & 0xFF),
-            static_cast<uint8_t>((y >> 8) & 0xFF)
-        };
-        auto status = server->SendHidReport(1, report);
+        const Screen screen = GetScreen(*server);
+        Common::Status status;
+        if (server->hid_touch_contacts() >= 2) {
+            status = SendMultiContact(*server, screen, action, point);
+        } else {
+            const bool contact = action == Input::TouchAction::Down ||
+                                 action == Input::TouchAction::Move;
+            status = SendTouchReport(*server, screen, contact,
+                point.x_normalized, point.y_normalized);
+        }
         if (status.IsOk() && action != Input::TouchAction::Move) {
             CPS_LOG_INFO("InputSink", "Sent HID touch ",
                 action == Input::TouchAction::Down ? "down" :
                 action == Input::TouchAction::Up ? "up" : "cancel",
-                " at ", x, ",", y);
+                " at ", static_cast<uint32_t>(std::clamp(point.x_normalized, 0.0f, 1.0f) * screen.width),
+                ",", static_cast<uint32_t>(std::clamp(point.y_normalized, 0.0f, 1.0f) * screen.height));
         }
         return status;
     }
 
-    [[nodiscard]] Common::Status SendKnobEvent(Input::KnobAction, uint32_t) override {
-        return Common::MakeError(Common::StatusCode::NotSupported,
-            "This receiver does not advertise a CarPlay knob HID device");
+    // Queued and played back by the gesture worker: iOS only recognises a drag when the
+    // intermediate positions arrive over time, so the reports cannot be burst out.
+    [[nodiscard]] Common::Status SendKnobEvent(Input::KnobAction action, uint32_t stepCount) override {
+        SyntheticGesture gesture{};
+        if (!SynthesizeKnobGesture(action, stepCount, gesture)) {
+            return Common::MakeError(Common::StatusCode::NotSupported,
+                "This receiver does not advertise a CarPlay knob HID device");
+        }
+        if (!rtsp_server_.lock()) {
+            return Common::MakeError(Common::StatusCode::Unavailable,
+                "AirPlay RTSP server is unavailable");
+        }
+        {
+            std::lock_guard<std::mutex> lock(gesture_mutex_);
+            if (gesture_stop_) {
+                return Common::MakeError(Common::StatusCode::Unavailable,
+                    "Input gesture worker is stopped");
+            }
+            if (gesture_queue_.size() >= kMaxPendingGestures) {
+                gesture_queue_.pop_front();
+                ++gesture_dropped_;
+            }
+            gesture_queue_.push_back(gesture);
+            if (!gesture_worker_) {
+                gesture_worker_ = std::make_unique<std::thread>([this]() { GestureWorker(); });
+            }
+        }
+        gesture_cv_.notify_one();
+        return Common::Status::Ok();
     }
 
     [[nodiscard]] Common::Status SendButtonEvent(
@@ -111,7 +202,185 @@ public:
     }
 
 private:
+    struct Screen {
+        uint16_t width = 1280;
+        uint16_t height = 720;
+    };
+
+    static Screen GetScreen(const Session::AirPlayRtspServer& server) {
+        const auto params = server.GetNegotiatedParams();
+        Screen screen;
+        screen.width = static_cast<uint16_t>(
+            std::clamp(params.video_width, 1u, static_cast<uint32_t>(UINT16_MAX)));
+        screen.height = static_cast<uint16_t>(
+            std::clamp(params.video_height, 1u, static_cast<uint32_t>(UINT16_MAX)));
+        return screen;
+    }
+
+    // Touchscreen HID (uuid 1) report: [contact:u8][x:u16 LE][y:u16 LE] in display pixels.
+    [[nodiscard]] Common::Status SendTouchReport(
+        Session::AirPlayRtspServer& server,
+        const Screen& screen,
+        bool contact,
+        float x_normalized,
+        float y_normalized) {
+        const uint16_t x = static_cast<uint16_t>(std::clamp(x_normalized, 0.0f, 1.0f) * screen.width);
+        const uint16_t y = static_cast<uint16_t>(std::clamp(y_normalized, 0.0f, 1.0f) * screen.height);
+        const std::array<uint8_t, 5> report{
+            static_cast<uint8_t>(contact ? 1 : 0),
+            static_cast<uint8_t>(x & 0xFF),
+            static_cast<uint8_t>((x >> 8) & 0xFF),
+            static_cast<uint8_t>(y & 0xFF),
+            static_cast<uint8_t>((y >> 8) & 0xFF)
+        };
+        return server.SendHidReport(1, report);
+    }
+
+    // One contact of the two-contact report: [slot:u8][tipSwitch:0/1][x:u16 LE][y:u16 LE].
+    static void WriteContactSlot(std::array<uint8_t, kReportBytes>& report, size_t slot,
+        bool down, float x_normalized, float y_normalized, const Screen& screen) {
+        const uint16_t x = static_cast<uint16_t>(std::clamp(x_normalized, 0.0f, 1.0f) * screen.width);
+        const uint16_t y = static_cast<uint16_t>(std::clamp(y_normalized, 0.0f, 1.0f) * screen.height);
+        const size_t off = slot * kBytesPerContact;
+        report[off] = static_cast<uint8_t>(slot);
+        report[off + 1] = static_cast<uint8_t>(down ? 1 : 0);
+        report[off + 2] = static_cast<uint8_t>(x & 0xFF);
+        report[off + 3] = static_cast<uint8_t>((x >> 8) & 0xFF);
+        report[off + 4] = static_cast<uint8_t>(y & 0xFF);
+        report[off + 5] = static_cast<uint8_t>((y >> 8) & 0xFF);
+    }
+
+    // Multi-contact touchscreen HID (uuid 1) report. The descriptor declares two Finger
+    // collections, so every report carries both slots; an idle slot is all zero except its
+    // own index byte. That is why the whole frame is re-sent on every change rather than
+    // just the pointer that moved.
+    [[nodiscard]] Common::Status SendMultiContact(
+        Session::AirPlayRtspServer& server,
+        const Screen& screen,
+        Input::TouchAction action,
+        const Input::TouchPoint& point) {
+        size_t slot = point.id;
+        if (slot >= kMaxContacts) {
+            // More fingers than the descriptor declares: fold the extra ones onto the
+            // last slot so the report stays well formed.
+            slot = kMaxContacts - 1;
+        }
+        switch (action) {
+            case Input::TouchAction::Down:
+            case Input::TouchAction::Move:
+                slots_[slot] = Slot{ true, point.x_normalized, point.y_normalized };
+                break;
+            case Input::TouchAction::Up:
+                slots_[slot] = Slot{};
+                break;
+            case Input::TouchAction::Cancel:
+                slots_.fill(Slot{});
+                break;
+        }
+
+        std::array<uint8_t, kReportBytes> report{};
+        for (size_t i = 0; i < kMaxContacts; ++i) {
+            WriteContactSlot(report, i, slots_[i].down, slots_[i].x, slots_[i].y, screen);
+        }
+        return server.SendHidReport(1, report);
+    }
+
+    // A single contact on whichever touchscreen shape is advertised. Used by the synthetic
+    // gestures, which never need more than one finger.
+    [[nodiscard]] Common::Status SendSingleContact(
+        Session::AirPlayRtspServer& server,
+        const Screen& screen,
+        bool down,
+        float x_normalized,
+        float y_normalized) {
+        if (server.hid_touch_contacts() < 2) {
+            return SendTouchReport(server, screen, down, x_normalized, y_normalized);
+        }
+        // A local frame: the synthetic gestures run on the worker thread and must not
+        // disturb the live contact state the UI thread is maintaining.
+        std::array<uint8_t, kReportBytes> report{};
+        WriteContactSlot(report, 0, down, x_normalized, y_normalized, screen);
+        WriteContactSlot(report, 1, false, 0.0f, 0.0f, screen);
+        return server.SendHidReport(1, report);
+    }
+
+    void GestureWorker() {
+        std::deque<SyntheticGesture> queue;
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lock(gesture_mutex_);
+                gesture_cv_.wait(lock, [this]() {
+                    return gesture_stop_ || !gesture_queue_.empty();
+                });
+                if (gesture_stop_ && gesture_queue_.empty()) break;
+                queue.swap(gesture_queue_);
+            }
+            for (const auto& gesture : queue) {
+                PlayGesture(gesture);
+            }
+            queue.clear();
+        }
+        if (gesture_dropped_ != 0) {
+            CPS_LOG_INFO("InputSink", "Gesture worker dropped ",
+                std::to_string(gesture_dropped_), " queued gestures");
+        }
+    }
+
+    void PlayGesture(const SyntheticGesture& gesture) {
+        auto server = rtsp_server_.lock();
+        if (!server) return;
+        const Screen screen = GetScreen(*server);
+
+        // A tap: press and release in place.
+        if (gesture.x0 == gesture.x1 && gesture.y0 == gesture.y1) {
+            if (!SendSingleContact(*server, screen, true, gesture.x0, gesture.y0).IsOk()) return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(kGestureHoldMs));
+            (void)SendSingleContact(*server, screen, false, gesture.x1, gesture.y1);
+            CPS_LOG_INFO("InputSink", "Synthesized HID tap at centre for knob action");
+            return;
+        }
+
+        if (!SendSingleContact(*server, screen, true, gesture.x0, gesture.y0).IsOk()) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(kGestureHoldMs));
+        for (int step = 1; step <= kGestureSteps; ++step) {
+            const float t = static_cast<float>(step) / static_cast<float>(kGestureSteps);
+            const float x = gesture.x0 + (gesture.x1 - gesture.x0) * t;
+            const float y = gesture.y0 + (gesture.y1 - gesture.y0) * t;
+            if (!SendSingleContact(*server, screen, true, x, y).IsOk()) return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(kGestureStepMs));
+        }
+        (void)SendSingleContact(*server, screen, false, gesture.x1, gesture.y1);
+        CPS_LOG_INFO("InputSink", "Synthesized HID drag from ",
+            static_cast<uint32_t>(gesture.x0 * screen.width), ",",
+            static_cast<uint32_t>(gesture.y0 * screen.height), " to ",
+            static_cast<uint32_t>(gesture.x1 * screen.width), ",",
+            static_cast<uint32_t>(gesture.y1 * screen.height));
+    }
+
+    // A drag is played as: down, hold, kGestureSteps intermediate moves, up. ~120 ms total,
+    // which is long enough for iOS to treat it as a scroll rather than a fling or a tap.
+    static constexpr int kGestureHoldMs = 30;
+    static constexpr int kGestureSteps = 5;
+    static constexpr int kGestureStepMs = 18;
+    static constexpr size_t kMaxPendingGestures = 16;
+
+    struct Slot {
+        bool down = false;
+        float x = 0.0f;
+        float y = 0.0f;
+    };
+
+    // Live contacts for the multi-contact report. Only written from the UI thread through
+    // SendTouchEvent.
+    std::array<Slot, kMaxContacts> slots_{};
+
     std::weak_ptr<Session::AirPlayRtspServer> rtsp_server_;
+    std::mutex gesture_mutex_;
+    std::condition_variable gesture_cv_;
+    std::deque<SyntheticGesture> gesture_queue_;
+    std::unique_ptr<std::thread> gesture_worker_;
+    bool gesture_stop_ = false;
+    uint64_t gesture_dropped_ = 0;
 };
 
 // MFi authentication message IDs (iAP2 control session, session 1).
@@ -452,6 +721,28 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
 
         Session::AirPlayRtspServer::Options rtsp_opts{};
         rtsp_opts.port = session_config.rtsp_port;
+        // How many contacts the touchscreen HID report may carry is a property of
+        // this machine's hardware, not a setting: only hosts with a display
+        // digitizer can produce a second contact, and the descriptor advertised
+        // in /info has to match what will actually be sent.
+        {
+            const auto touch_caps = Hardware::DetectTouchscreenCapabilities();
+            rtsp_opts.hid_touch_contacts = touch_caps.max_contacts >= 2 ? 2 : 1;
+            if (rtsp_opts.hid_touch_contacts >= 2) {
+                Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+                    "HID: multi-touch enabled - touch screen '" +
+                    (touch_caps.device_description.empty() ? std::string("unnamed")
+                                                          : touch_caps.device_description) +
+                    "' reports up to " + std::to_string(touch_caps.max_contacts) +
+                    " contacts; advertising a 2-contact touchscreen");
+            } else if (touch_caps.has_touch_screen) {
+                Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+                    "HID: single-touch mode - touch screen supports one contact");
+            } else {
+                Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+                    "HID: single-touch mode - no touch screen detected");
+            }
+        }
         rtsp_server_ = std::make_shared<Session::AirPlayRtspServer>(rtsp_opts);
 
         // Persistent mDNS advertiser: owned by the service so it can keep

@@ -86,6 +86,36 @@ iPhone to connect.
 build-release\UI\Win32\CarPlayStation.exe
 ```
 
+## Input
+
+The CarPlay window forwards local input to the phone. Touch and mouse are sent
+as HID touch reports on the touchscreen device; the keyboard and wheel have no
+knob device on CarPlay, so they are turned into synthetic swipe gestures on the
+same touchscreen device.
+
+| Local input | Sent to the phone |
+| --- | --- |
+| Left mouse / touch drag | Touch / scroll |
+| Right mouse, `Esc`, `Backspace` | Back button |
+| `↑` `↓` `←` `→`, `W` `A` `S` `D` | Swipe up / down / left / right |
+| Mouse wheel | Swipe down / up (scroll) |
+| `Enter` | Tap at the centre of the screen |
+| `Space`, media keys | Play-pause / next / previous |
+| `F1`, `F3` / `F4` | Siri / call accept, reject |
+| `F2` | Settings drawer (local only) |
+
+### Multi-touch
+
+There is nothing to configure. At startup the app asks Windows what pointer
+devices exist: if a display digitizer reports two or more simultaneous contacts
+(Surface, all-in-one touch panels), the touchscreen HID descriptor advertised in
+`/info` declares two contacts and touch reports carry two slots. On a machine
+with only a mouse, touchpad or pen, the single-contact descriptor is used. The
+startup log records which mode was chosen and why.
+
+Two-finger input is read from `WM_POINTER*` messages, not from the synthesized
+mouse messages a touchpad produces, which is why a touchpad stays single-point.
+
 ## Documentation
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — layer responsibilities and data flow

@@ -17,6 +17,12 @@ Win32InputRouter::Win32InputRouter(
 
 bool Win32InputRouter::OnWindowMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+        case WM_POINTERDOWN:
+        case WM_POINTERUPDATE:
+        case WM_POINTERUP:
+        case WM_POINTERLEAVE:
+            return HandlePointer(hwnd, msg, wParam, lParam);
+
         case WM_LBUTTONDOWN:
         case WM_MOUSEMOVE:
         case WM_LBUTTONUP:
@@ -41,6 +47,23 @@ bool Win32InputRouter::OnWindowMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 void Win32InputRouter::Reset() {
     is_overlay_capturing_ = false;
+
+    // Cancel every live touch contact, not just the pointer the mouse path tracks.
+    for (size_t slot = 0; slot < pointer_count_; ++slot) {
+        if (!pointer_slots_[slot].down || pointer_slots_[slot].overlay || !app_api_) {
+            continue;
+        }
+        Core::Input::TouchPoint tp{ static_cast<uint32_t>(slot),
+            pointer_slots_[slot].x, pointer_slots_[slot].y };
+        auto status = app_api_->ForwardTouchEvent(Core::Input::TouchAction::Cancel, tp);
+        if (status.IsError()) {
+            CPS_LOG_WARN("InputRouter", "Failed to cancel forwarded touch: ", status.Message());
+        }
+    }
+    pointer_count_ = 0;
+    pointer_ids_.fill(0);
+    pointer_slots_.fill(PointerSlot{});
+
     if (is_mouse_down_ && app_api_) {
         is_mouse_down_ = false;
         Core::Input::TouchPoint tp{ 0, last_norm_x_, last_norm_y_ };
@@ -48,6 +71,158 @@ void Win32InputRouter::Reset() {
         if (status.IsError()) {
             CPS_LOG_WARN("InputRouter", "Failed to cancel forwarded touch: ", status.Message());
         }
+    }
+}
+
+size_t Win32InputRouter::FindPointerSlot(UINT pointerId) const noexcept {
+    for (size_t i = 0; i < pointer_count_; ++i) {
+        if (pointer_ids_[i] == pointerId) return i;
+    }
+    return kMaxPointers;
+}
+
+size_t Win32InputRouter::AddPointerSlot(UINT pointerId) noexcept {
+    if (const size_t existing = FindPointerSlot(pointerId); existing < kMaxPointers) {
+        return existing;
+    }
+    if (pointer_count_ >= kMaxPointers) return kMaxPointers;
+    const size_t slot = pointer_count_++;
+    pointer_ids_[slot] = pointerId;
+    pointer_slots_[slot] = PointerSlot{};
+    return slot;
+}
+
+void Win32InputRouter::RemovePointerSlot(size_t slot) noexcept {
+    if (slot >= pointer_count_) return;
+    // Compact the arrays so a later finger reuses the freed slot index.
+    for (size_t i = slot; i + 1 < pointer_count_; ++i) {
+        pointer_ids_[i] = pointer_ids_[i + 1];
+        pointer_slots_[i] = pointer_slots_[i + 1];
+    }
+    --pointer_count_;
+    pointer_ids_[pointer_count_] = 0;
+    pointer_slots_[pointer_count_] = PointerSlot{};
+}
+
+bool Win32InputRouter::HandlePointer(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    (void)lParam;
+    const UINT pointerId = LOWORD(wParam);
+
+    POINTER_INFO info{};
+    if (!GetPointerInfo(pointerId, &info)) {
+        return false;
+    }
+    // Only digitizer contact reaches CarPlay. Mouse-origin pointers keep going through
+    // the WM_MOUSE* path, which also carries the right-button Back and wheel gestures.
+    if (info.pointerType != PT_TOUCH) {
+        return false;
+    }
+
+    POINTER_TOUCH_INFO touch{};
+    if (!GetPointerTouchInfo(pointerId, &touch)) {
+        return false;
+    }
+
+    // Screen coordinates -> client coordinates, then the same letterbox mapping the
+    // mouse path uses.
+    POINT pt{ touch.pointerInfo.ptPixelLocation.x, touch.pointerInfo.ptPixelLocation.y };
+    if (!ScreenToClient(hwnd, &pt)) {
+        return false;
+    }
+    const float clientX = static_cast<float>(pt.x);
+    const float clientY = static_cast<float>(pt.y);
+
+    if (msg == WM_POINTERDOWN && overlay_) {
+        if (overlay_->OnMouseDown(clientX, clientY)) {
+            // The HUD owns this finger; keep the slot so its moves and release stay
+            // out of the CarPlay stream.
+            if (const size_t slot = AddPointerSlot(pointerId); slot < kMaxPointers) {
+                pointer_slots_[slot] = PointerSlot{ true, true, clientX, clientY };
+            }
+            is_overlay_capturing_ = true;
+            SetCapture(hwnd);
+            return true;
+        }
+    }
+
+    const size_t slot = FindPointerSlot(pointerId);
+    if (slot >= kMaxPointers) {
+        if (slot == kMaxPointers && msg != WM_POINTERUP && msg != WM_POINTERLEAVE) {
+            // A third finger: more contacts than the advertised descriptor declares.
+            CPS_LOG_DEBUG("InputRouter", "Ignoring pointer beyond the advertised contact count");
+        }
+        return false;
+    }
+    if (pointer_slots_[slot].overlay) {
+        if (msg == WM_POINTERUP || msg == WM_POINTERLEAVE) {
+            if (GetCapture() == hwnd) {
+                ReleaseCapture();
+            }
+            is_overlay_capturing_ = false;
+            if (overlay_) {
+                (void)overlay_->OnMouseUp(clientX, clientY);
+            }
+            RemovePointerSlot(slot);
+        } else if (overlay_) {
+            (void)overlay_->OnMouseMove(clientX, clientY);
+        }
+        return true;
+    }
+
+    if (!app_api_ || !renderer_) {
+        return false;
+    }
+
+    const NormalizedPoint normPt = renderer_->WindowToNormalized(clientX, clientY);
+    PointerSlot& ps = pointer_slots_[slot];
+    ps.x = normPt.x;
+    ps.y = normPt.y;
+    last_norm_x_ = normPt.x;
+    last_norm_y_ = normPt.y;
+
+    Core::Input::TouchPoint tp{ static_cast<uint32_t>(slot), normPt.x, normPt.y };
+    switch (msg) {
+        case WM_POINTERDOWN:
+            if (!normPt.inside_viewport) {
+                RemovePointerSlot(slot);
+                return false;
+            }
+            ps.down = true;
+            if (pointer_count_ == 1) {
+                // Keep the mouse bookkeeping consistent for a single finger.
+                is_mouse_down_ = true;
+                SetCapture(hwnd);
+            }
+            if (auto status = app_api_->ForwardTouchEvent(Core::Input::TouchAction::Down, tp);
+                status.IsError()) {
+                CPS_LOG_WARN("InputRouter", "Failed to forward touch down: ", status.Message());
+            }
+            return true;
+
+        case WM_POINTERUPDATE:
+            if (!ps.down) return false;
+            (void)app_api_->ForwardTouchEvent(Core::Input::TouchAction::Move, tp);
+            return true;
+
+        case WM_POINTERUP:
+        case WM_POINTERLEAVE: {
+            const bool last = pointer_count_ == 1;
+            (void)app_api_->ForwardTouchEvent(
+                msg == WM_POINTERLEAVE ? Core::Input::TouchAction::Cancel
+                                       : Core::Input::TouchAction::Up,
+                tp);
+            RemovePointerSlot(slot);
+            if (last) {
+                is_mouse_down_ = false;
+                if (GetCapture() == hwnd) {
+                    ReleaseCapture();
+                }
+            }
+            return true;
+        }
+
+        default:
+            return false;
     }
 }
 

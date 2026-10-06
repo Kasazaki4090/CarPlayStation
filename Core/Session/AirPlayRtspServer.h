@@ -75,6 +75,29 @@ public:
         // lane, and neither splits the MainAudio lane across per-`audioType`
         // entries the way the xcertplay set does.
         bool audio_advert_c_reference{true};
+        // How many contacts the uuid 1 touchscreen HID descriptor declares
+        // (default 1, may be set to 2).
+        //
+        // Set by CarPlayCoreService::Initialize() from
+        // Hardware::DetectTouchscreenCapabilities(): only a machine with a
+        // display digitizer can produce a second contact, so this is read from
+        // the hardware rather than offered as a user setting.
+        //
+        // Why this defaults to 1: the `hidDevices` list is the most fragile part
+        // of the /info advert. The Rust reference records an incident in
+        // info.rs (2026-07-06) where adding a third HID device — a knob —
+        // stopped both the CarPlay session and the separate iAP2 session from
+        // ever reconnecting, unrecoverable even by unplugging USB, and the only
+        // change left standing was that extra entry. So multi-touch here never
+        // adds a device; it rewrites the descriptor of the uuid 1 device that
+        // is already advertised, and the default keeps today's byte-for-byte
+        // single-contact advert untouched.
+        //
+        // 2 swaps in the two-Finger-collection descriptor (109 bytes) and makes
+        // every hidSendReport 12 bytes instead of 5 (see AirPlayInputSink in
+        // CarPlayCoreService.cpp). Both reference implementations ship the
+        // two-contact shape, which is why iOS is expected to accept it.
+        int hid_touch_contacts{1};
     };
 
     explicit AirPlayRtspServer(Options options = {});
@@ -158,6 +181,15 @@ public:
      * @brief Send a HID input report to the active AirPlay event channel.
      */
     [[nodiscard]] Common::Status SendHidReport(uint32_t deviceUid, Common::ByteSpan report);
+
+    /**
+     * @brief Contacts declared by the advertised uuid 1 touchscreen descriptor.
+     *
+     * The report length has to match the descriptor, so whoever builds a touch report
+     * needs this. It is the advert value, not a negotiated one: iOS never gets to
+     * change it.
+     */
+    int hid_touch_contacts() const noexcept;
 
     // --- Simulation & In-Memory Testing ---
 

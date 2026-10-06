@@ -5,6 +5,7 @@
 #include "Core/Session/IPairingStore.h"
 #include "Core/Session/MockPairingStore.h"
 #include "Core/Session/PairingStore.h"
+#include "Core/Session/Pairing/Bplist.h"
 #include <iostream>
 #include <filesystem>
 #include <chrono>
@@ -418,6 +419,100 @@ void TestRtspServerLifecycleAndSimulation() {
 }
 
 // ----------------------------------------------------------------------------
+// 4b. Touchscreen HID descriptor: single vs. two contacts
+// ----------------------------------------------------------------------------
+namespace {
+
+// Copies the hidDescriptor bytes of the given hidDevices uuid out of an /info body.
+bool FindHidDescriptor(const std::vector<uint8_t>& body, const std::string& uuid,
+                       std::vector<uint8_t>& out) {
+    auto root = Pairing::BplistDecoder::Decode(body.data(), body.size());
+    const auto* hids = root.Find("hidDevices");
+    if (!hids) return false;
+    const auto* arr = hids->AsArray();
+    if (!arr) return false;
+    for (const auto& dev : *arr) {
+        if (dev.Find("uuid") && dev.Find("uuid")->AsString() == uuid) {
+            const auto* desc = dev.Find("hidDescriptor");
+            if (!desc || desc->type != Pairing::BplistValue::Type::Data) return false;
+            out = desc->data_val;
+            return true;
+        }
+    }
+    return false;
+}
+
+// A HID logical maximum is the byte pair after a 0x26 (logical maximum, 2 bytes) item.
+uint16_t ReadLogicalMax(const std::vector<uint8_t>& desc, size_t token_offset) {
+    assert(token_offset + 2 < desc.size());
+    assert(desc[token_offset] == 0x26);
+    return static_cast<uint16_t>(desc[token_offset + 1] | (desc[token_offset + 2] << 8));
+}
+
+} // namespace
+
+void TestTouchscreenHidDescriptorContacts() {
+    std::cout << "[Test] Running touchscreen HID descriptor contact-count tests...\n";
+
+    RtspRequest info_req{};
+    info_req.method = RtspMethod::Get;
+    info_req.protocol = "RTSP/1.0";
+    info_req.uri = "/info";
+    info_req.headers["CSeq"] = "1";
+
+    // 1. Default advert: the byte-for-byte single-contact descriptor.
+    {
+        AirPlayRtspServer server;
+        assert(server.hid_touch_contacts() == 1);
+        auto resp = server.ProcessSimulatedRequest(info_req);
+        assert(resp.status_code == 200);
+        std::vector<uint8_t> desc;
+        assert(FindHidDescriptor(resp.body, "1", desc));
+        assert(desc.size() == 62);
+        assert(ReadLogicalMax(desc, 38) == 1280);
+        assert(ReadLogicalMax(desc, 51) == 720);
+    }
+
+    // 2. Two contacts: one top-level collection holding two Finger collections, with
+    //    both collections' X/Y logical maxima carrying the display size.
+    {
+        AirPlayRtspServer::Options opts;
+        opts.hid_touch_contacts = 2;
+        opts.default_video_width = 1920;
+        opts.default_video_height = 1080;
+        AirPlayRtspServer server(opts);
+        assert(server.hid_touch_contacts() == 2);
+
+        auto resp = server.ProcessSimulatedRequest(info_req);
+        assert(resp.status_code == 200);
+        std::vector<uint8_t> d;
+        assert(FindHidDescriptor(resp.body, "1", d));
+        assert(d.size() == 109);
+
+        // Top level: Digitizer/Touch Screen collection.
+        assert((d[0] == 0x05 && d[1] == 0x0D && d[2] == 0x09 &&
+                d[3] == 0x04 && d[4] == 0xA1 && d[5] == 0x01));
+        // Two Finger collections begin at offsets 6 and 57.
+        for (size_t base : { static_cast<size_t>(6), static_cast<size_t>(57) }) {
+            assert(d[base] == 0x05 && d[base + 1] == 0x0D && d[base + 2] == 0x09 &&
+                   d[base + 3] == 0x22 && d[base + 4] == 0xA1 && d[base + 5] == 0x02);
+        }
+        assert(ReadLogicalMax(d, 38) == 1920);
+        assert(ReadLogicalMax(d, 49) == 1080);
+        assert(ReadLogicalMax(d, 89) == 1920);
+        assert(ReadLogicalMax(d, 100) == 1080);
+        assert(d[108] == 0xC0);
+
+        // The media-button device must still be there: the advert must never grow.
+        std::vector<uint8_t> media;
+        assert(FindHidDescriptor(resp.body, "2", media));
+        assert(media.size() == 37);
+    }
+
+    std::cout << "  [PASS] TestTouchscreenHidDescriptorContacts\n";
+}
+
+// ----------------------------------------------------------------------------
 // 5. CarPlaySessionStateMachine End-to-End Orchestration & Handoff Tests
 // ----------------------------------------------------------------------------
 #include "Core/Session/CarPlaySessionStateMachine.h"
@@ -632,6 +727,7 @@ int main() {
     TestRtspCodecParsingAndFraming();
     TestRtspResponseSerialization();
     TestRtspServerLifecycleAndSimulation();
+    TestTouchscreenHidDescriptorContacts();
 
     // Step 3 & 4 tests
     TestCarPlayStateMachineLifecycleAndHandoff();

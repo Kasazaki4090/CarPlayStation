@@ -6,6 +6,7 @@ add_library(CarPlayCore STATIC
     Hardware/FtdiI2cAdapter.cpp
     Hardware/I2cMfiSigner.cpp
     Hardware/RadioAdapterHelper.cpp
+    Hardware/TouchscreenCapabilities.cpp
     Transport/MockTransportChannel.cpp
     Transport/BtSdpHelper.cpp
     Transport/BtRfcommTransport.cpp

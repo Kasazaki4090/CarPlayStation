@@ -6,6 +6,7 @@
 #include "UI/Win32/AppController.h"
 #include "Application/IApplicationApi.h"
 #include "Application/AppSettings.h"
+#include "Core/Hardware/TouchscreenCapabilities.h"
 #include <cassert>
 #include <iostream>
 #include <vector>
@@ -228,6 +229,27 @@ void TestSetupWizardPreferences() {
 }
 
 // ============================================================================
+// Test 4b: touchscreen capability probe
+// ============================================================================
+void TestTouchscreenCapabilities() {
+    std::cout << "[Test 4b] TouchscreenCapabilities: probe is safe and clamped... ";
+
+    const auto caps = Core::Hardware::DetectTouchscreenCapabilities();
+    // Whatever hardware this machine has, the probe must never claim contacts
+    // without a touch screen, and the value handed to the RTSP server must be
+    // one of the two descriptors we can build.
+    assert(!caps.has_touch_screen || caps.max_contacts >= 1);
+    if (!caps.has_touch_screen) {
+        assert(caps.max_contacts == 0);
+    }
+    const int contacts = Core::Hardware::DetectMaxTouchContacts();
+    assert(contacts == 1 || contacts == 2);
+    assert(contacts == (caps.max_contacts >= 2 ? 2 : 1));
+
+    std::cout << "PASSED (maxContacts=" << caps.max_contacts << ")\n";
+}
+
+// ============================================================================
 // Test 5: Win32InputRouter Mouse to Touch & Buttons
 // ============================================================================
 void TestWin32InputRouterMouse() {
@@ -360,6 +382,7 @@ int main() {
     TestD3D11RendererGeometry();
     TestSystemPermissionHelper();
     TestSetupWizardPreferences();
+    TestTouchscreenCapabilities();
     TestWin32InputRouterMouse();
     TestWin32InputRouterKeyboard();
     TestAppControllerHeadlessLifecycle();

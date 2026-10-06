@@ -7,6 +7,8 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <iostream>
 #include <sstream>
 #include <cstdio>
@@ -20,6 +22,9 @@ using socket_t = SOCKET;
 constexpr socket_t INVALID_SOCK = INVALID_SOCKET;
 constexpr int SOCK_ERR = SOCKET_ERROR;
 #define CLOSE_SOCK(s) closesocket(s)
+#ifndef CPS_SHUT_WR
+#define CPS_SHUT_WR SD_SEND
+#endif
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -29,6 +34,9 @@ using socket_t = int;
 constexpr socket_t INVALID_SOCK = -1;
 constexpr int SOCK_ERR = -1;
 #define CLOSE_SOCK(s) close(s)
+#ifndef CPS_SHUT_WR
+#define CPS_SHUT_WR SHUT_WR
+#endif
 #endif
 
 namespace CarPlayStation::Core::Session {
@@ -189,6 +197,23 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
     std::atomic<uint32_t> event_cseq{0};
     std::mutex event_send_mutex;
 
+    // Outbound event-channel commands are queued and written by a dedicated thread.
+    // Touch input arrives on the UI thread, and send() on the event socket blocks once
+    // the TCP send buffer fills; doing that inline makes the phone stop tracking the
+    // finger. HID reports are ordered, so they must all go through this one FIFO.
+    static constexpr size_t kMaxPendingEventCommands = 128;
+    std::deque<std::vector<uint8_t>> event_send_queue;
+    std::mutex event_queue_mutex;
+    std::condition_variable event_queue_cv;
+    std::thread event_send_thread;
+    std::atomic<uint64_t> event_send_failures{0};
+    std::atomic<uint64_t> event_dropped{0};
+    std::atomic<bool> event_channel_ready{false};
+    bool event_sender_stop{false};
+    // Guards the encryption context only. Kept separate from event_send_mutex so a caller
+    // building a command never waits behind a blocking send() on the sender thread.
+    std::mutex event_channel_mutex;
+
     socket_t keepalive_sock{INVALID_SOCK};
     uint16_t keepalive_port{0};
     std::thread keepalive_thread;
@@ -226,11 +251,30 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
             event_listen_sock = INVALID_SOCK;
         }
         {
+            std::lock_guard<std::mutex> lock(event_queue_mutex);
+            event_sender_stop = true;
+            event_channel_ready = false;
+        }
+        event_queue_cv.notify_all();
+        // Wake a sender blocked in send() before the socket goes away.
+        {
+            std::lock_guard<std::mutex> lock(event_send_mutex);
+            if (event_stream_sock != INVALID_SOCK) {
+                shutdown(event_stream_sock, CPS_SHUT_WR);
+            }
+        }
+        if (event_send_thread.joinable()) {
+            event_send_thread.join();
+        }
+        {
             std::lock_guard<std::mutex> lock(event_send_mutex);
             if (event_stream_sock != INVALID_SOCK) {
                 CLOSE_SOCK(event_stream_sock);
                 event_stream_sock = INVALID_SOCK;
             }
+        }
+        {
+            std::lock_guard<std::mutex> lock(event_channel_mutex);
             event_channel.reset();
         }
         if (event_drain_thread.joinable()) {
@@ -312,9 +356,69 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
         });
     }
 
+    // Writes an already framed/encrypted RTSP message. Only the sender thread calls this,
+    // so the blocking send() never runs on the UI thread. The socket stays valid for the
+    // life of that thread: shutdown() closes it only after joining the sender.
+    bool WriteEventFrame(const std::vector<uint8_t>& frame) {
+        socket_t send_sock = INVALID_SOCK;
+        {
+            std::lock_guard<std::mutex> lock(event_send_mutex);
+            send_sock = event_stream_sock;
+        }
+        if (send_sock == INVALID_SOCK) {
+            return false;
+        }
+        size_t total_sent = 0;
+        while (total_sent < frame.size()) {
+            int sent = send(send_sock, reinterpret_cast<const char*>(frame.data() + total_sent),
+                            static_cast<int>(frame.size() - total_sent), 0);
+            if (sent <= 0) return false;
+            total_sent += static_cast<size_t>(sent);
+        }
+        return true;
+    }
+
+    void StartEventSender() {
+        {
+            std::lock_guard<std::mutex> lock(event_queue_mutex);
+            if (event_sender_stop) return;
+            event_channel_ready.store(true);
+            event_send_queue.clear();
+            if (event_send_thread.joinable()) return;
+        }
+        CPS_LOG_INFO("AirPlayRtsp", "Event channel command sender started");
+        auto self = shared_from_this();
+        event_send_thread = std::thread([this, self]() {
+            std::deque<std::vector<uint8_t>> batch;
+            while (true) {
+                {
+                    std::unique_lock<std::mutex> lock(event_queue_mutex);
+                    event_queue_cv.wait(lock, [this]() {
+                        return event_sender_stop || !event_send_queue.empty();
+                    });
+                    if (event_sender_stop && event_send_queue.empty()) break;
+                    batch.swap(event_send_queue);
+                }
+                for (const auto& frame : batch) {
+                    if (!WriteEventFrame(frame)) {
+                        event_send_failures.fetch_add(1);
+                    }
+                }
+                batch.clear();
+            }
+            const uint64_t failures = event_send_failures.load();
+            const uint64_t dropped = event_dropped.load();
+            if (failures != 0 || dropped != 0) {
+                CPS_LOG_INFO("AirPlayRtsp", "Event channel command sender stopped: send failures=",
+                             std::to_string(failures), ", queue drops=", std::to_string(dropped));
+            }
+        });
+    }
+
+    // Builds the RTSP POST /command frame and hands it to the sender thread. Returns as soon
+    // as the frame is queued; a full queue means the event socket has fallen behind.
     bool SendEventCommand(const std::vector<uint8_t>& body_plist) {
-        std::lock_guard<std::mutex> lock(event_send_mutex);
-        if (event_stream_sock == INVALID_SOCK || !event_channel) {
+        if (!event_channel_ready.load()) {
             return false;
         }
         uint32_t cseq = ++event_cseq;
@@ -324,20 +428,34 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
         std::vector<uint8_t> msg(header.begin(), header.end());
         msg.insert(msg.end(), body_plist.begin(), body_plist.end());
 
-        auto frame = event_channel->EncryptMessage(msg.data(), msg.size());
-        size_t total_sent = 0;
-        while (total_sent < frame.size()) {
-            int sent = send(event_stream_sock, reinterpret_cast<const char*>(frame.data() + total_sent),
-                            static_cast<int>(frame.size() - total_sent), 0);
-            if (sent <= 0) return false;
-            total_sent += sent;
+        std::vector<uint8_t> frame;
+        {
+            std::lock_guard<std::mutex> lock(event_channel_mutex);
+            if (!event_channel) {
+                return false;
+            }
+            frame = event_channel->EncryptMessage(msg.data(), msg.size());
         }
+        {
+            std::lock_guard<std::mutex> lock(event_queue_mutex);
+            if (event_sender_stop || !event_channel_ready.load()) {
+                return false;
+            }
+            if (event_send_queue.size() >= kMaxPendingEventCommands) {
+                // Drop the oldest queued command: for touch input the newest state matters.
+                event_send_queue.pop_front();
+                event_dropped.fetch_add(1);
+            }
+            event_send_queue.push_back(std::move(frame));
+        }
+        event_queue_cv.notify_one();
         return true;
     }
 
     bool HasEventChannel() {
-        std::lock_guard<std::mutex> lock(event_send_mutex);
-        return event_stream_sock != INVALID_SOCK && event_channel != nullptr;
+        if (!event_channel_ready.load()) return false;
+        std::lock_guard<std::mutex> lock(event_channel_mutex);
+        return event_channel != nullptr;
     }
 
     bool SendHidReport(uint32_t device_uid, Common::ByteSpan report) {
@@ -578,8 +696,11 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
         }
         {
             std::lock_guard<std::mutex> lock(event_send_mutex);
-            if (event_stream_sock != INVALID_SOCK && event_channel) {
-                return true;
+            if (event_stream_sock != INVALID_SOCK) {
+                std::lock_guard<std::mutex> ch_lock(event_channel_mutex);
+                if (event_channel) {
+                    return true;
+                }
             }
         }
         fd_set rfds;
@@ -595,6 +716,9 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
                 {
                     std::lock_guard<std::mutex> lock(event_send_mutex);
                     event_stream_sock = accepted;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(event_channel_mutex);
                     auto ekeys = pairing::DeriveEventKeys(shared_secret);
                     event_channel = std::make_unique<pairing::ControlChannel>(ekeys);
                 }
@@ -604,6 +728,7 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
                 setsockopt(event_stream_sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
                 #endif
                 StartEventDrain();
+                StartEventSender();
                 SendRequestUI();
                 SendTakeScreen();
                 SendForceKeyFrame();
@@ -781,6 +906,10 @@ public:
     void SetNegotiatedParams(NegotiatedMediaParams params) {
         std::lock_guard<std::mutex> lock(mutex_);
         params_ = std::move(params);
+    }
+
+    int hid_touch_contacts() const noexcept {
+        return options_.hid_touch_contacts >= 2 ? 2 : 1;
     }
 
     Common::Status SendHidReport(uint32_t device_uid, Common::ByteSpan report) {
@@ -1488,27 +1617,65 @@ private:
         BplistArray hid_arr;
         {
             BplistDict hd;
+            const uint16_t w = static_cast<uint16_t>(options_.default_video_width);
+            const uint16_t h = static_cast<uint16_t>(options_.default_video_height);
             hd.emplace_back("uuid", BplistValue("1"));
             hd.emplace_back("name", BplistValue("CarPlay Touchscreen"));
             hd.emplace_back("displayUUID", BplistValue("E0CB6FB0-0000-0000-0000-0000C0FFEE01"));
             hd.emplace_back("hidProductID", BplistValue(1));
             hd.emplace_back("hidVendorID", BplistValue(0x05AC));
             hd.emplace_back("hidCountryCode", BplistValue(0));
-            std::vector<uint8_t> desc = {
-                0x05, 0x0D, 0x09, 0x04, 0xA1, 0x01,
-                0x05, 0x0D, 0x09, 0x22, 0xA1, 0x02,
-                0x05, 0x0D, 0x09, 0x33, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02,
-                0x75, 0x07, 0x95, 0x01, 0x81, 0x01,
-                0x05, 0x01, 0x09, 0x30, 0x15, 0x00, 0x26, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x01, 0x81, 0x02,
-                0x09, 0x31, 0x15, 0x00, 0x26, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x01, 0x81, 0x02,
-                0xC0, 0xC0
-            };
-            uint16_t w = static_cast<uint16_t>(options_.default_video_width);
-            uint16_t h = static_cast<uint16_t>(options_.default_video_height);
-            desc[39] = static_cast<uint8_t>(w & 0xFF);
-            desc[40] = static_cast<uint8_t>((w >> 8) & 0xFF);
-            desc[52] = static_cast<uint8_t>(h & 0xFF);
-            desc[53] = static_cast<uint8_t>((h >> 8) & 0xFF);
+            std::vector<uint8_t> desc;
+            if (options_.hid_touch_contacts >= 2) {
+                // Two Finger collections (51 B each) under one Digitizer/Touch Screen
+                // top-level collection = 109 B. Byte layout per collection:
+                //   Transducer Index u8 | Tip Switch bit + 7-bit pad | X u16 abs | Y u16 abs
+                // The two 0x26 (logical maximum) tokens sit at offsets 38 and 49 of the
+                // first collection and 89 and 100 of the second, so the value bytes that
+                // carry the display size are 39/40, 50/51, 90/91 and 101/102.
+                desc = {
+                    0x05, 0x0D, 0x09, 0x04, 0xA1, 0x01,
+                    // --- Finger 0 ---
+                    0x05, 0x0D, 0x09, 0x22, 0xA1, 0x02,
+                    0x09, 0x38, 0x75, 0x08, 0x95, 0x01, 0x81, 0x02,
+                    0x15, 0x00, 0x25, 0x01, 0x09, 0x33, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02,
+                    0x95, 0x07, 0x81, 0x03,
+                    0x05, 0x01, 0x26, 0xFF, 0x7F, 0x09, 0x30, 0x75, 0x10, 0x95, 0x01, 0x81, 0x02,
+                    0x26, 0xFF, 0x7F, 0x09, 0x31, 0x81, 0x02,
+                    0xC0,
+                    // --- Finger 1 ---
+                    0x05, 0x0D, 0x09, 0x22, 0xA1, 0x02,
+                    0x09, 0x38, 0x75, 0x08, 0x95, 0x01, 0x81, 0x02,
+                    0x15, 0x00, 0x25, 0x01, 0x09, 0x33, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02,
+                    0x95, 0x07, 0x81, 0x03,
+                    0x05, 0x01, 0x26, 0xFF, 0x7F, 0x09, 0x30, 0x75, 0x10, 0x95, 0x01, 0x81, 0x02,
+                    0x26, 0xFF, 0x7F, 0x09, 0x31, 0x81, 0x02,
+                    0xC0,
+                    0xC0
+                };
+                desc[39]  = static_cast<uint8_t>(w & 0xFF);
+                desc[40]  = static_cast<uint8_t>((w >> 8) & 0xFF);
+                desc[50]  = static_cast<uint8_t>(h & 0xFF);
+                desc[51]  = static_cast<uint8_t>((h >> 8) & 0xFF);
+                desc[90]  = static_cast<uint8_t>(w & 0xFF);
+                desc[91]  = static_cast<uint8_t>((w >> 8) & 0xFF);
+                desc[101] = static_cast<uint8_t>(h & 0xFF);
+                desc[102] = static_cast<uint8_t>((h >> 8) & 0xFF);
+            } else {
+                desc = {
+                    0x05, 0x0D, 0x09, 0x04, 0xA1, 0x01,
+                    0x05, 0x0D, 0x09, 0x22, 0xA1, 0x02,
+                    0x05, 0x0D, 0x09, 0x33, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02,
+                    0x75, 0x07, 0x95, 0x01, 0x81, 0x01,
+                    0x05, 0x01, 0x09, 0x30, 0x15, 0x00, 0x26, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x01, 0x81, 0x02,
+                    0x09, 0x31, 0x15, 0x00, 0x26, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x01, 0x81, 0x02,
+                    0xC0, 0xC0
+                };
+                desc[39] = static_cast<uint8_t>(w & 0xFF);
+                desc[40] = static_cast<uint8_t>((w >> 8) & 0xFF);
+                desc[52] = static_cast<uint8_t>(h & 0xFF);
+                desc[53] = static_cast<uint8_t>((h >> 8) & 0xFF);
+            }
             hd.emplace_back("hidDescriptor", BplistValue(desc));
             hid_arr.push_back(BplistValue(hd));
         }
@@ -2017,6 +2184,10 @@ void AirPlayRtspServer::SetNegotiatedParams(NegotiatedMediaParams params) {
 
 Common::Status AirPlayRtspServer::SendHidReport(uint32_t deviceUid, Common::ByteSpan report) {
     return impl_->SendHidReport(deviceUid, report);
+}
+
+int AirPlayRtspServer::hid_touch_contacts() const noexcept {
+    return impl_->hid_touch_contacts();
 }
 
 RtspResponse AirPlayRtspServer::ProcessSimulatedRequest(const RtspRequest& req) {

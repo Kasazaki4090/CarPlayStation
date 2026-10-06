@@ -143,6 +143,21 @@ Common::Status MpvVideoPlayer::Init(const Common::VideoStreamSpec& spec) {
     //    every frame as soon as it is decoded instead of pacing on guessed PTS
     //  - video-timing-offset=0 + video-latency-hacks=yes: no display delay
     //  - cache=no + tiny demuxer read-ahead: never hold frames in the demuxer
+    //
+    // The two options below exist because this is a *live* stream with no more
+    // input once the sender stops producing frames (end of an app-open animation
+    // or a card swipe). Anything held inside the pipeline then stays on screen
+    // until the next tap pushes it out, which is exactly the reported symptom.
+    //  - vd-lavc-threads=1: FFmpeg's default automatic threading uses H.264
+    //    frame threading, which deliberately holds the newest pictures back so
+    //    they can overlap with the next ones. With no follow-up input those
+    //    last frames are never released. One thread makes decode 1:1 in/out;
+    //    a single software thread decodes 720p/1080p far faster than CarPlay
+    //    produces frames, so throughput is not a concern.
+    //  - demuxer-lavf-o=raw_packet_size: FFmpeg's raw H.264/HEVC demuxer hands
+    //    the Annex-B parser 1024-byte slivers (RAW_PACKET_SIZE), so access-unit
+    //    boundaries are only recognised several reads late. Feed it whole
+    //    access units instead.
     const char* demuxFmt = (spec.codec == Common::VideoCodec::HEVC) ? "hevc" : "h264";
     const char* opts[] = {
         "vo", "libmpv",
@@ -152,6 +167,8 @@ Common::Status MpvVideoPlayer::Init(const Common::VideoStreamSpec& spec) {
         "cache", "no",
         "demuxer-max-bytes", "128KiB",
         "demuxer-max-back-bytes", "0",
+        "demuxer-lavf-o", "raw_packet_size=262144",
+        "vd-lavc-threads", "1",
         "video-timing-offset", "0",
         "video-latency-hacks", "yes",
         "audio", "no",
@@ -160,7 +177,10 @@ Common::Status MpvVideoPlayer::Init(const Common::VideoStreamSpec& spec) {
         "keep-open", "no",
         "terminal", "no",
         "load-stats-overlay", "no",
-        "msg-level", "all=no",
+        // Keep mpv's own stall warnings ("mpv_render_context_render() not being
+        // called or stuck." / "mpv_render_report_swap() not being called.") —
+        // they are the only in-band evidence of a display-handshake stall.
+        "msg-level", "all=no,vo=v",
     };
     // mpv_set_option_string takes (name, value) pairs.
     for (size_t i = 0; i < sizeof(opts) / sizeof(opts[0]); i += 2) {
@@ -482,8 +502,12 @@ void MpvVideoPlayer::RenderThreadMain() {
         const char* swFormat = "bgr0";
         size_t swStride = sw_stride_;
         void* swPointer = sw_buffer_.data();
+        // Never let mpv do its own display pacing inside render(). We drive the
+        // loop ourselves, and a blocking wait here would park this thread on
+        // mpv's VO thread (which in turn waits on our report_swap()).
+        int blockForTargetTime = 0;
 
-        mpv_render_param renderParams[5];
+        mpv_render_param renderParams[6];
         renderParams[0].type = MPV_RENDER_PARAM_SW_SIZE;
         renderParams[0].data = swSize;
         renderParams[1].type = MPV_RENDER_PARAM_SW_FORMAT;
@@ -492,11 +516,18 @@ void MpvVideoPlayer::RenderThreadMain() {
         renderParams[2].data = &swStride;
         renderParams[3].type = MPV_RENDER_PARAM_SW_POINTER;
         renderParams[3].data = swPointer;
-        renderParams[4].type = static_cast<mpv_render_param_type>(0); // terminator
+        renderParams[4].type = MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME;
+        renderParams[4].data = &blockForTargetTime;
+        renderParams[5].type = static_cast<mpv_render_param_type>(0); // terminator
 
         r = api_.mpv_render_context_render(render_ctx_, renderParams);
         if (r < 0) {
-            // Transient render errors (e.g. no frame yet) are not fatal.
+            // Transient render errors (e.g. no frame yet) are not fatal, but the
+            // frame was still consumed by the API, so report the swap anyway:
+            // vo_libmpv waits up to 200ms for report_swap() before it will hand
+            // us the next frame, and skipping it is what makes the picture
+            // freeze for a second at the end of an animation.
+            api_.mpv_render_context_report_swap(render_ctx_);
             continue;
         }
 
