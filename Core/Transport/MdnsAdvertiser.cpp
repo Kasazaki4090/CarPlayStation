@@ -88,7 +88,7 @@ MdnsInspection InspectMdnsPacket(const uint8_t* buf, size_t len) {
         }
     };
 
-    std::string summary;
+    std::string& summary = out.summary;
     summary = isResponse ? "response" : "query";
     summary += " qd=" + std::to_string(qdCount) + " an=" + std::to_string(anCount)
             + " ns=" + std::to_string(nsCount) + " ar=" + std::to_string(arCount);
