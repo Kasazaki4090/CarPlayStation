@@ -37,6 +37,44 @@ public:
         uint32_t default_video_width{1280};
         uint32_t default_video_height{720};
         uint32_t default_fps{60};
+        // The `features` bitmap advertised in /info. Defaults to the mask xcertplay
+        // (Reference/diplay) advertises: the one verified on hardware to make an iPhone
+        // hand audio over to a receiver.
+        uint64_t info_features{0x615653AEE2ULL};
+        // Reply to the phase-1 SETUP with `enabledFeatures`: the list of optional features
+        // the accessory is switching on. Both carplayd and xcertplay send it; the iPhone
+        // uses it to seed the negotiated feature set for the rest of the session.
+        bool phase1_enabled_features{true};
+        // Advertise `viewAreas`/`initialViewArea` on the display entry (and claim the matching
+        // `viewAreas` feature in the phase-1 SETUP). The two are always coupled: xcertplay's
+        // comment is "the session SETUP response enables viewAreas, so /info must always describe
+        // one". xcertplay sends it unconditionally and is the receiver verified working on this
+        // iPhone, so it is on by default; the C reference drops it on iOS 27, hence the switch.
+        bool display_view_areas{true};
+        // Advertise `bluetoothIDs`/`rightHandDrive`. xcertplay always sends both; iOS uses the
+        // list to hand the car's Bluetooth radio over for calls, and the audio-routing decision
+        // appears to depend on that being known.
+        bool advertise_bluetooth{true};
+        // Which `audioFormats`/`audioLatencies` shape the advert carries.
+        //
+        // true (default) = the C reference's set: eight entries, all AAC, no
+        // PCM, where every entry either has no `audioType` key at all or names
+        // one of compatibility/alert/default/telephony/speechRecognition/media —
+        // plus a single catch-all `audioLatencies` entry with no
+        // `type`/`audioType` keys. Proven on hardware over the same transport we
+        // use: every session in that reference's trace gets a
+        // streamType=100/101/102 SETUP.
+        // false = xcertplay's nine PCM-first entries plus nine typed latency
+        // entries.
+        //
+        // Why this is the switch to reach for when iOS borrows MainAudio but
+        // never SETs UP the audio stream: the Rust reference records exactly that
+        // failure and pins it on an `audioFormats` advert iOS cannot map the
+        // stream it wants onto ("iOS saw the advert, never borrowed MainAudio ->
+        // no audio"). Neither working reference advertises PCM for the media
+        // lane, and neither splits the MainAudio lane across per-`audioType`
+        // entries the way the xcertplay set does.
+        bool audio_advert_c_reference{true};
     };
 
     explicit AirPlayRtspServer(Options options = {});
@@ -76,6 +114,18 @@ public:
      * @brief Register a callback invoked when RTSP streaming starts (RECORD request).
      */
     void SetStreamingStartedCallback(StreamingStartedCallback callback);
+
+    /**
+     * @brief Register a callback invoked on duckAudio / unduckAudio commands.
+     */
+    using DuckAudioCallback = std::function<void(bool ducked)>;
+    void SetDuckAudioCallback(DuckAudioCallback callback);
+
+    /**
+     * @brief Register a callback invoked when a specific stream is torn down.
+     */
+    using StreamTeardownCallback = std::function<void(uint32_t stream_type)>;
+    void SetStreamTeardownCallback(StreamTeardownCallback callback);
 
     /**
      * @brief Enable the RTSP pair-setup handshake (POST /pair-setup) with the given

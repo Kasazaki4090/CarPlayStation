@@ -225,6 +225,77 @@ public:
     }
 };
 
+// Renders a decoded value as one compact line for the runtime log, e.g.
+// {type=modesChanged,params={resources=[{resourceID=2,entity=1}]}}. Used to see what
+// the iPhone actually put in a /command body (the MainAudio `entity` transition in
+// particular), which is otherwise invisible.
+class BplistDumper {
+public:
+    static std::string Dump(const BplistValue& v, int max_depth = 6, size_t max_items = 24) {
+        std::string out;
+        DumpValue(out, v, max_depth, max_items);
+        return out;
+    }
+
+private:
+    static void AppendHex(std::string& out, const std::vector<uint8_t>& d, size_t max_bytes) {
+        static const char kHex[] = "0123456789abcdef";
+        out += "<";
+        out += std::to_string(d.size());
+        out += "b ";
+        for (size_t i = 0; i < d.size() && i < max_bytes; ++i) {
+            out += kHex[d[i] >> 4];
+            out += kHex[d[i] & 0x0F];
+        }
+        if (d.size() > max_bytes) out += "..";
+        out += ">";
+    }
+
+    static void DumpValue(std::string& out, const BplistValue& v, int depth, size_t max_items) {
+        using Type = BplistValue::Type;
+        switch (v.type) {
+            case Type::Boolean:
+                out += v.bool_val ? "true" : "false";
+                break;
+            case Type::Integer:
+                out += std::to_string(v.int_val);
+                break;
+            case Type::String:
+                out += v.str_val;
+                break;
+            case Type::Data:
+                AppendHex(out, v.data_val, 16);
+                break;
+            case Type::Array: {
+                out += "[";
+                if (depth <= 0) { out += ".."; break; }
+                const auto& a = v.array_val;
+                for (size_t i = 0; i < a.size(); ++i) {
+                    if (i >= max_items) { out += ",.."; break; }
+                    if (i) out += ",";
+                    DumpValue(out, a[i], depth - 1, max_items);
+                }
+                out += "]";
+                break;
+            }
+            case Type::Dict: {
+                out += "{";
+                if (depth <= 0) { out += ".."; break; }
+                const auto& d = v.dict_val;
+                for (size_t i = 0; i < d.size(); ++i) {
+                    if (i >= max_items) { out += ",.."; break; }
+                    if (i) out += ",";
+                    out += d[i].first;
+                    out += "=";
+                    DumpValue(out, d[i].second, depth - 1, max_items);
+                }
+                out += "}";
+                break;
+            }
+        }
+    }
+};
+
 class BplistEncoder {
 public:
     static std::vector<uint8_t> Encode(const BplistValue& root) {

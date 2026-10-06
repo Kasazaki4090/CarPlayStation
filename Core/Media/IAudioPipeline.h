@@ -51,6 +51,12 @@ public:
     // Media volume multiplier applied while navigation / telephony prompts are active
     virtual void SetDuckingRatio(float ratio) = 0;
 
+    // Configures the target ducking ratio (from user settings) without forcibly activating ducking
+    virtual void SetTargetDuckingRatio(float ratio) { SetDuckingRatio(ratio); }
+
+    // Activates or deactivates ducking on the MainMedia lane
+    virtual void SetDuckingActive(bool active) = 0;
+
     // Query physical soundcard / WASAPI shared mode capabilities
     [[nodiscard]] virtual AudioCapabilities QueryCapabilities() const = 0;
 

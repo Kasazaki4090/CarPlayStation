@@ -35,11 +35,13 @@ public:
         decoder_ = std::move(decoder);
     }
 
+    // Deliberately does *not* reset the AEAD frame counter: the counter is per TCP connection
+    // (reset in TcpClientWorker) and must keep tracking the iPhone's counter. A later audio-only
+    // SETUP re-applies the key; resetting the counter there desynchronises every video frame.
     void SetDecryptionKey(const std::array<uint8_t, 32>& key) {
         std::lock_guard<std::mutex> lock(client_mutex_);
         decrypt_key_ = key;
         decrypt_key_set_ = true;
-        frame_counter_ = 0;
     }
 
 private:

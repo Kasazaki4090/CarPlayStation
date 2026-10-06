@@ -1,6 +1,7 @@
 #include "Core/Media/MicrophoneRtpSender.h"
 #include "Core/Common/Logging.h"
 #include "Core/Session/Pairing/Crypto.h"
+#include <chrono>
 #include <cstring>
 
 #ifdef _WIN32
@@ -42,6 +43,8 @@ Common::Status MicrophoneRtpSender::Start(const MicrophoneRtpConfig& config) {
     ts_ = 0;
     packets_sent_ = 0;
     nonce_counter_ = 0;
+    statsClockMs_ = 0;
+    lastPacketsSent_ = 0;
     sample_accumulator_.clear();
 
     if (config_.aac_eld) {
@@ -206,29 +209,55 @@ void MicrophoneRtpSender::WriteHeaderLocked(uint8_t* hdr) {
     Common::Endian::WriteBe32(hdr + 8, config_.ssrc);
 }
 
+// One PCM packet per chunk: [header][ciphertext][tag:16][nonce:8] when encrypted,
+// [header][pcm] otherwise. Same seal layout as the AAC path.
 void MicrophoneRtpSender::FlushPcmPacketLocked(const std::vector<int16_t>& chunk) {
     if (chunk.empty()) return;
 
-    std::vector<uint8_t> rtpPacket;
-    rtpPacket.resize(12 + chunk.size() * 2);
-
-    WriteHeaderLocked(rtpPacket.data());
-
     // Apple expects Big-Endian 16-bit PCM for the uplink stream payload
-    uint8_t* payloadPtr = rtpPacket.data() + 12;
+    std::vector<uint8_t> pcm(chunk.size() * 2);
     for (size_t i = 0; i < chunk.size(); ++i) {
-        Common::Endian::WriteBe16(payloadPtr + i * 2, static_cast<uint16_t>(chunk[i]));
+        Common::Endian::WriteBe16(pcm.data() + i * 2, static_cast<uint16_t>(chunk[i]));
+    }
+
+    uint8_t hdr[12];
+    WriteHeaderLocked(hdr);
+
+    send_buffer_.clear();
+    if (config_.encrypted) {
+        uint8_t nonce12[12] = {0};
+        for (int i = 0; i < 8; ++i) {
+            nonce12[4 + i] = static_cast<uint8_t>((nonce_counter_ >> (8 * i)) & 0xFF);
+        }
+        const uint8_t* nonce8 = nonce12 + 4;
+        std::vector<uint8_t> sealed = pairing::ChaCha20Poly1305SealWithAad(
+            config_.input_key.data(), nonce12, hdr + 4, 8, pcm.data(), pcm.size());
+        if (sealed.empty()) {
+            CPS_LOG_ERROR("MicrophoneRtpSender", "PCM uplink AEAD seal failed; packet dropped");
+            ts_ += static_cast<uint32_t>(chunk.size());
+            return;
+        }
+        send_buffer_.reserve(12 + sealed.size() + 8);
+        send_buffer_.insert(send_buffer_.end(), hdr, hdr + 12);
+        send_buffer_.insert(send_buffer_.end(), sealed.begin(), sealed.end());
+        send_buffer_.insert(send_buffer_.end(), nonce8, nonce8 + 8);
+        nonce_counter_++;
+    } else {
+        send_buffer_.reserve(12 + pcm.size());
+        send_buffer_.insert(send_buffer_.end(), hdr, hdr + 12);
+        send_buffer_.insert(send_buffer_.end(), pcm.begin(), pcm.end());
     }
 
     if (interceptor_) {
-        interceptor_(Common::ByteSpan(rtpPacket.data(), rtpPacket.size()));
+        interceptor_(Common::ByteSpan(send_buffer_.data(), send_buffer_.size()));
     }
 
-    SendLocked(rtpPacket.data(), rtpPacket.size());
+    SendLocked(send_buffer_.data(), send_buffer_.size());
 
     seq_ = static_cast<uint16_t>(seq_ + 1);
     ts_ += static_cast<uint32_t>(chunk.size());
     packets_sent_++;
+    MaybeLogStatsLocked();
 }
 
 // One AAC-ELD access unit per RTP packet: [header][ciphertext][tag:16][nonce:8].
@@ -285,6 +314,29 @@ void MicrophoneRtpSender::FlushAacFrameLocked(const int16_t* pcm) {
     seq_ = static_cast<uint16_t>(seq_ + 1);
     ts_ += advance;
     packets_sent_++;
+    MaybeLogStatsLocked();
+}
+
+// One line a second while the microphone is actually flowing, so a log can
+// distinguish "capture produced samples" from "the phone was sent packets".
+void MicrophoneRtpSender::MaybeLogStatsLocked() {
+    const uint64_t nowMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    if (statsClockMs_ == 0) {
+        statsClockMs_ = nowMs;
+        lastPacketsSent_ = packets_sent_.load();
+        return;
+    }
+    if (nowMs - statsClockMs_ < 1000) {
+        return;
+    }
+    const uint64_t total = packets_sent_.load();
+    CPS_LOG_INFO("MicrophoneRtpSender", "uplink: +", std::to_string(total - lastPacketsSent_),
+                 " packets/s (total=", std::to_string(total), "), seq=", std::to_string(seq_),
+                 ", ts=", std::to_string(ts_), ")");
+    statsClockMs_ = nowMs;
+    lastPacketsSent_ = total;
 }
 
 void MicrophoneRtpSender::SendLocked(const uint8_t* data, size_t len) {

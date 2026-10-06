@@ -7,6 +7,7 @@
 #include <mutex>
 #include <atomic>
 #include <cstdint>
+#include <thread>
 
 namespace CarPlayStation::Core::Media {
 
@@ -44,6 +45,16 @@ public:
                                 uint32_t srcRate, uint32_t dstRate,
                                 size_t packetSamples, uint64_t timestampUs);
 
+    // --- WASAPI capture backend ---
+    // Opens the default eCapture endpoint in shared mode at the device mix
+    // format and drains it on its own thread. When no capture device exists
+    // (headless / test runs) Start() falls back to the null capture path, so
+    // the uplink can still be driven by injected frames.
+    bool StartCaptureBackend();
+    void StopCaptureBackend();
+    void CaptureLoop();
+    void LogCaptureStats();
+
     // --- Inspection / test helpers ---
     [[nodiscard]] bool IsWasapiActive() const noexcept { return wasapiActive_.load(); }
     [[nodiscard]] uint32_t GetPacketDispatchCount() const noexcept { return packetDispatchCount_.load(); }
@@ -55,6 +66,10 @@ public:
 
 private:
     mutable std::mutex mutex_;
+    // Guards the capture backend handles separately from mutex_: the capture
+    // thread takes mutex_ briefly (to read the uplink callback), so Stop()
+    // must be able to join the thread without holding it.
+    std::mutex backendMutex_;
     bool capturing_{false};
     Common::AudioOutputFormat format_{};
     MicrophoneCapabilities capabilities_{};
@@ -65,7 +80,19 @@ private:
     std::atomic<uint32_t> callbackDispatchCount_{0};
     std::atomic<uint32_t> lastPacketSamples_{0};
     std::atomic<bool> wasapiActive_{false};
-    void* wasapiCapture_{nullptr}; // IAudioClient* (opaque; COM under _WIN32)
+    void* wasapiCapture_{nullptr};   // IAudioClient* (opaque; COM under _WIN32)
+    void* wasapiCaptureClient_{nullptr}; // IAudioCaptureClient*
+    void* wasapiEvent_{nullptr};     // HANDLE (capture event)
+    uint32_t captureRate_{0};        // device mix rate the endpoint was opened at
+    uint16_t captureChannels_{0};    // device mix channel count
+    bool captureIsFloat_{false};
+    uint16_t captureBits_{0};
+    size_t capturePacketSamples_{0}; // resampled samples per dispatched packet
+    std::thread captureThread_;
+    std::atomic<bool> captureStop_{false};
+    std::atomic<uint64_t> captureDrainCount_{0};
+    uint64_t statsClockMs_{0};
+    uint64_t lastCapturedSamples_{0};
 };
 
 } // namespace CarPlayStation::Core::Media

@@ -112,4 +112,18 @@ private:
 bool ParseAudioSpecificConfig(const uint8_t* asc, size_t asc_len,
                              uint32_t& sample_rate, uint8_t& channels) noexcept;
 
+// Build the AudioSpecificConfig that describes a negotiated stream.
+//
+// CarPlay sends raw (header-less) AAC access units, so a decoder opened with TT_MP4_RAW has no
+// way to learn the channel configuration from the bitstream: fdk-aac's CAacDecoder_DecodeFrame
+// starts with `if (self->aacChannels <= 0) return AAC_DEC_UNSUPPORTED_CHANNELCONFIG` (0x2007),
+// and aacChannels is only ever written by CAacDecoder_Init, which is only reachable through
+// aacDecoder_ConfigRaw.  Every downlink stream therefore needs an explicit config.
+//
+// AAC-LC uses the 2-byte CICP form (audioObjectType 2 + sampling-frequency index + channel
+// configuration), which is exactly what fdk-aac itself emits for those streams.  AAC-ELD's
+// config carries the error-correction and SBR/PS signalling as well, so it is taken from a
+// throwaway encoder configured for the same stream instead of being hand-packed.
+[[nodiscard]] std::vector<uint8_t> BuildAudioSpecificConfig(const AudioStreamFormat& format);
+
 } // namespace CarPlayStation::Core::Media

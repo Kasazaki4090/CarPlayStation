@@ -500,6 +500,8 @@ void TestWasapiAudioPipelineMixer() {
         .bit_depth = 16,
         .sample_type = Common::AudioSampleType::PcmInt16
     };
+    // Deterministic mixer test: no render pump draining the queues.
+    pipeline.SetRenderPumpEnabled(false);
     ASSERT_TRUE(pipeline.Start(format).IsOk());
     ASSERT_TRUE(pipeline.IsRunning());
 
@@ -529,16 +531,109 @@ void TestWasapiAudioPipelineMixer() {
     pipeline.PushLaneSamples(AudioLane::MainMedia, a, 4); // 0.5 * 0.5 = 0.25
     auto vol = pipeline.RenderMixed(4);
     ASSERT_TRUE(vol[0] > 0.20f && vol[0] < 0.30f);
+    pipeline.SetLaneVolume(AudioLane::MainMedia, 1.0f);
+
+    // Dynamic voice-activity ducking on AltNavigation. The media lane is
+    // restored kDuckingHangoverMs (1500ms) after the last *audible* chunk.
+    // The 0.5f samples fed to the voice lanes above are audible, so close those
+    // lanes first to clear the local detector before testing it from scratch.
+    pipeline.StopLane(AudioLane::AltNavigation);
+    pipeline.StopLane(AudioLane::SiriTelephony);
+    pipeline.ClearMixBuffers();
+    pipeline.SetTargetDuckingRatio(0.30f);
+    ASSERT_TRUE(!pipeline.IsDuckingActive());
+    ASSERT_EQ(pipeline.GetEffectiveDuckingRatio(), 1.0f);
+
+    // Silence on the navigation lane must not duck the media lane. The stream
+    // stays open for the whole session, so padding is the common case.
+    const float nav_silent[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    pipeline.PushLaneSamples(AudioLane::AltNavigation, nav_silent, 4);
+    ASSERT_TRUE(!pipeline.IsDuckingActive());
+    ASSERT_EQ(pipeline.GetEffectiveDuckingRatio(), 1.0f);
+
+    // Push active voice samples to AltNavigation: ducking activates, instantly.
+    const float nav_voice[4] = {0.8f, 0.8f, 0.8f, 0.8f};
+    pipeline.PushLaneSamples(AudioLane::AltNavigation, nav_voice, 4);
+    ASSERT_TRUE(pipeline.IsDuckingActive());
+    ASSERT_EQ(pipeline.GetEffectiveDuckingRatio(), 0.30f);
+
+    // Push media samples while ducked:
+    pipeline.ClearMixBuffers();
+    pipeline.PushLaneSamples(AudioLane::MainMedia, a, 4); // 0.5 * 0.30 = 0.15
+    auto duckedMedia = pipeline.RenderMixed(4);
+    ASSERT_TRUE(duckedMedia[0] > 0.14f && duckedMedia[0] < 0.16f);
+
+    // Padding after the prompt keeps arriving, but it is not audible, so it must
+    // not keep refreshing the activity clock. Wait past the hangover and the
+    // media lane restores on its own.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1600));
+    pipeline.PushLaneSamples(AudioLane::AltNavigation, nav_silent, 4);
+    ASSERT_TRUE(!pipeline.IsDuckingActive());
+    ASSERT_EQ(pipeline.GetEffectiveDuckingRatio(), 1.0f);
+
+    // An RTSP duckAudio whose unduckAudio never arrives must time out on its
+    // own, independently of the local detector. The safety net is 12 s because
+    // the phone's own duck windows run up to ~8.2 s for a long guidance
+    // sequence; restoring earlier would cut a real prompt short.
+    pipeline.SetDuckingActive(true);
+    ASSERT_TRUE(pipeline.IsDuckingActive());
+    std::this_thread::sleep_for(std::chrono::milliseconds(12500));
+    pipeline.PushLaneSamples(AudioLane::MainMedia, a, 4);
+    ASSERT_TRUE(!pipeline.IsDuckingActive());
+    ASSERT_EQ(pipeline.GetEffectiveDuckingRatio(), 1.0f);
+
+    pipeline.SetDuckingActive(false);
 
     // WriteAudio path: 16-bit PCM bytes are converted and counted.
+    pipeline.ClearMixBuffers();
     std::vector<uint8_t> pcm(48000 * 4, 0x00); // 1s of 16-bit stereo
     ASSERT_TRUE(pipeline.WriteAudio(AudioLane::MainMedia, Common::ByteSpan{pcm.data(), pcm.size()}).IsOk());
     ASSERT_EQ(pipeline.GetRenderedSampleCount(), 48000ULL);
+    ASSERT_EQ(pipeline.GetQueuedFrameCount(AudioLane::MainMedia), 48000U);
 
     pipeline.Shutdown();
     ASSERT_TRUE(!pipeline.IsRunning());
 
     std::cout << "[PASS] TestWasapiAudioPipelineMixer" << std::endl;
+}
+
+// Test 9b: the mix queues are a bounded playback FIFO. Feeding more than the
+// cap must drop the oldest frames (counted) and keep the newest, and consuming
+// from the front must advance the queue frame-by-frame.
+void TestWasapiAudioPipelineFifoBounds() {
+    std::cout << "[RUN] TestWasapiAudioPipelineFifoBounds" << std::endl;
+
+    WasapiAudioPipeline pipeline;
+    Common::AudioOutputFormat format{
+        .sample_rate = 48000,
+        .channels = 2,
+        .bit_depth = 16,
+        .sample_type = Common::AudioSampleType::PcmInt16
+    };
+    // No render pump: exercise the FIFO deterministically.
+    pipeline.SetRenderPumpEnabled(false);
+    ASSERT_TRUE(pipeline.Start(format).IsOk());
+
+    // Push more frames than the cap (default 96000) in one lane.
+    const size_t cap = 96000;
+    const std::vector<float> block(2, 0.25f); // one stereo frame
+    for (size_t i = 0; i < cap + 1000; ++i) {
+        pipeline.PushLaneSamples(AudioLane::MainMedia, block.data(), block.size());
+    }
+    // Queue depth must be clamped to the cap, and the overflow counted.
+    ASSERT_EQ(pipeline.GetQueuedFrameCount(AudioLane::MainMedia), cap);
+    ASSERT_EQ(pipeline.GetDroppedFrameCount(), 1000ULL);
+
+    // Consuming from the front shrinks the queue by exactly that many frames.
+    pipeline.ConsumeLaneSamplesLocked(AudioLane::MainMedia, 500);
+    ASSERT_EQ(pipeline.GetQueuedFrameCount(AudioLane::MainMedia), cap - 500);
+
+    // An idle lane stays empty and must not hold the mixer back: the deepest
+    // lane drives how much can be rendered.
+    ASSERT_EQ(pipeline.GetQueuedFrameCount(AudioLane::SiriTelephony), 0U);
+
+    pipeline.Shutdown();
+    std::cout << "[PASS] TestWasapiAudioPipelineFifoBounds" << std::endl;
 }
 
 // Test 10: WasapiAudioPipeline multi-rate resampler.
@@ -851,8 +946,14 @@ void TestAacEldCodecRoundTrip() {
     dec.sample_rate = rate;
     dec.channels = channels;
 
+    // CarPlay raw AAC-ELD uses standard 4-byte AudioSpecificConfig (480 frame, no SBR).
+    const std::vector<uint8_t> expected_eld_asc = {0xF8, 0xF0, 0x30, 0x00};
+    const std::vector<uint8_t> built_asc = BuildAudioSpecificConfig(dec);
+    ASSERT_EQ(built_asc, expected_eld_asc);
+
     AacAudioDecoder decoder;
-    ASSERT_TRUE(decoder.Open(dec, asc));
+    ASSERT_TRUE(decoder.Open(dec, built_asc));
+    ASSERT_EQ(decoder.frame_size(), 480u);
 
     double energy = 0.0;
     size_t samples = 0;
@@ -877,7 +978,127 @@ void TestAacEldCodecRoundTrip() {
     const double rms = std::sqrt(energy / static_cast<double>(samples));
     ASSERT_TRUE(rms > 100.0);
 
+    // Verify 48 kHz stereo AAC-ELD (AltNavigation / guidance lane).
+    AudioStreamFormat nav_fmt{};
+    nav_fmt.codec = AudioCodecKind::AacEld;
+    nav_fmt.sample_rate = 48000;
+    nav_fmt.channels = 2;
+    const std::vector<uint8_t> nav_asc = BuildAudioSpecificConfig(nav_fmt);
+    const std::vector<uint8_t> expected_nav_asc = {0xF8, 0xE6, 0x50, 0x00};
+    ASSERT_EQ(nav_asc, expected_nav_asc);
+
+    AacAudioDecoder nav_decoder;
+    ASSERT_TRUE(nav_decoder.Open(nav_fmt, nav_asc));
+    ASSERT_EQ(nav_decoder.frame_size(), 480u);
+    ASSERT_EQ(static_cast<int>(nav_decoder.channels()), 2);
+    ASSERT_EQ(nav_decoder.sample_rate(), 48000u);
+
+    const uint8_t silent_au[] = {0x00, 0x68, 0x34, 0x00};
+    DecodedAudioFrame nav_out{};
+    bool nav_concealed = false;
+    bool dec_ok = nav_decoder.Decode(silent_au, sizeof(silent_au), nav_out, nav_concealed);
+    ASSERT_TRUE(dec_ok);
+    ASSERT_EQ(nav_out.pcm.size(), 960u);
+
     std::cout << "[PASS] TestAacEldCodecRoundTrip" << std::endl;
+}
+
+// The downlink media lane negotiates AAC-LC 48 kHz stereo. The iPhone sends raw access
+// units, so the decoder only works when it is handed an AudioSpecificConfig: this test
+// pins both the bytes of the config we build and the failure without one.
+void TestAacLcAudioSpecificConfig() {
+    std::cout << "[RUN] TestAacLcAudioSpecificConfig" << std::endl;
+
+    const uint32_t rate = 48000;
+    const uint8_t channels = 2;
+
+    // AAC-LC (2), sampling-frequency index 3 (48 kHz), channel config 2, then GA "no extension".
+    const std::vector<uint8_t> expected_asc = {0x11, 0x90};
+    AudioStreamFormat lc{};
+    lc.codec = AudioCodecKind::AacLc;
+    lc.sample_rate = rate;
+    lc.channels = channels;
+    const std::vector<uint8_t> asc = BuildAudioSpecificConfig(lc);
+    ASSERT_EQ(asc.size(), expected_asc.size());
+    for (size_t i = 0; i < expected_asc.size(); ++i) {
+        ASSERT_EQ(static_cast<int>(asc[i]), static_cast<int>(expected_asc[i]));
+    }
+
+    uint32_t ascRate = 0;
+    uint8_t ascChannels = 0;
+    ASSERT_TRUE(ParseAudioSpecificConfig(asc.data(), asc.size(), ascRate, ascChannels));
+    ASSERT_EQ(ascRate, rate);
+    ASSERT_EQ(static_cast<int>(ascChannels), static_cast<int>(channels));
+
+    // An unsupported rate cannot be encoded as a CICP index.
+    AudioStreamFormat bogus = lc;
+    bogus.sample_rate = 44137;
+    ASSERT_TRUE(BuildAudioSpecificConfig(bogus).empty());
+
+    // Produce real access units with the encoder, then feed them to the decoder exactly as
+    // the receiver does.
+    AudioStreamFormat enc{};
+    enc.codec = AudioCodecKind::AacLc;
+    enc.sample_rate = rate;
+    enc.channels = channels;
+    enc.bitrate_bps = 256000;
+    AacAudioEncoder encoder;
+    ASSERT_TRUE(encoder.Open(enc));
+    ASSERT_EQ(encoder.frame_size(), 1024u);
+
+    const size_t frame = encoder.frame_size();
+    std::vector<std::vector<uint8_t>> aus;
+    std::vector<int16_t> pcm(frame * 2, 0);
+    for (size_t f = 0; f < 4; ++f) {
+        for (size_t i = 0; i < frame; ++i) {
+            const size_t n = f * frame + i;
+            const double v = 9000.0 * std::sin(2.0 * 3.14159265358979 * 440.0 * n / rate);
+            pcm[i * 2] = static_cast<int16_t>(v);
+            pcm[i * 2 + 1] = static_cast<int16_t>(v);
+        }
+        std::vector<uint8_t> au = encoder.Encode(pcm.data(), frame);
+        if (!au.empty()) {
+            aus.push_back(std::move(au));
+        }
+    }
+    encoder.Close();
+    ASSERT_TRUE(aus.size() >= 2);
+
+    // Without the config, fdk-aac never establishes a channel config and rejects every frame.
+    {
+        AacAudioDecoder unconfigured;
+        ASSERT_TRUE(unconfigured.Open(lc));
+        DecodedAudioFrame out{};
+        bool concealed = false;
+        ASSERT_TRUE(!unconfigured.Decode(aus.front().data(), aus.front().size(), out, concealed));
+        unconfigured.Close();
+    }
+
+    AacAudioDecoder decoder;
+    ASSERT_TRUE(decoder.Open(lc, asc));
+    double energy = 0.0;
+    size_t samples = 0;
+    for (const auto& au : aus) {
+        DecodedAudioFrame out{};
+        bool concealed = false;
+        ASSERT_TRUE(decoder.Decode(au.data(), au.size(), out, concealed));
+        if (out.pcm.empty()) {
+            continue;
+        }
+        ASSERT_EQ(out.sample_rate, rate);
+        ASSERT_EQ(static_cast<int>(out.channels), static_cast<int>(channels));
+        for (int16_t s : out.pcm) {
+            energy += static_cast<double>(s) * static_cast<double>(s);
+        }
+        samples += out.pcm.size();
+    }
+    decoder.Close();
+
+    ASSERT_TRUE(samples > 0);
+    const double rms = std::sqrt(energy / static_cast<double>(samples));
+    ASSERT_TRUE(rms > 100.0);
+
+    std::cout << "[PASS] TestAacLcAudioSpecificConfig" << std::endl;
 }
 
 // The sealed AAC-ELD uplink must emit [rtp header][ciphertext][tag][nonce] frames.
@@ -976,6 +1197,7 @@ int main() {
     // Step 3: 3-lane audio mixer, ducking manager & microphone uplink.
     TestAudioDuckingManager();
     TestWasapiAudioPipelineMixer();
+    TestWasapiAudioPipelineFifoBounds();
     TestWasapiAudioPipelineResampler();
     TestWasapiMicrophoneUplink();
 
@@ -987,6 +1209,7 @@ int main() {
     TestAirPlayAudioDemuxerRoundTrip();
     TestAirPlayAudioDemuxerPlainPcm();
     TestAacEldCodecRoundTrip();
+    TestAacLcAudioSpecificConfig();
     TestMicrophoneRtpSenderAacEld();
 
     std::cout << "========================================" << std::endl;

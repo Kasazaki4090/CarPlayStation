@@ -36,7 +36,8 @@ struct MicrophoneRtpConfig {
     bool aac_eld{false};
     uint32_t bitrate_bps{24000};
     // ChaCha20-Poly1305 key derived from the stream's streamConnectionID
-    // (*input* direction). Ignored unless aac_eld is set.
+    // (*input* direction). Applies to both the AAC-ELD and the PCM uplink: the iPhone
+    // seals every wireless media packet, whatever the codec.
     bool encrypted{false};
     std::array<uint8_t, 32> input_key{};
 };
@@ -121,6 +122,7 @@ private:
     // Writes the 12-byte RTP header shared by both payload formats.
     void WriteHeaderLocked(uint8_t* hdr);
     void SendLocked(const uint8_t* data, size_t len);
+    void MaybeLogStatsLocked();
 
     mutable std::mutex mutex_;
     MicrophoneRtpConfig config_{};
@@ -133,6 +135,8 @@ private:
     uint32_t ts_{0};
     std::atomic<uint64_t> packets_sent_{0};
     PacketInterceptor interceptor_;
+    uint64_t statsClockMs_{0};
+    uint64_t lastPacketsSent_{0};
 
     // AAC-ELD uplink state.
     std::unique_ptr<AacAudioEncoder> encoder_;

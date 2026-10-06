@@ -179,7 +179,9 @@ struct AudioStreamNegotiation {
 };
 
 // Decode the CarPlay `audioFormat` bitmask into codec/sample rate/channel count.
-// Faithful to carplayd's `decode_audio_format` (session.rs:818-834).
+// Faithful to carplayd's `decode_audio_format` (session.rs:818-834), with the PCM half of the
+// table completed from xcertplay's AudioStream.PCM_FORMAT list: we now advertise the whole PCM
+// range, so every bit in it has to decode rather than fall into the AAC-ELD fallback.
 inline void DecodeAudioFormat(uint64_t mask, RtspAudioCodec& codec, uint32_t& sample_rate,
                               uint8_t& channels) {
     struct Row {
@@ -189,7 +191,17 @@ inline void DecodeAudioFormat(uint64_t mask, RtspAudioCodec& codec, uint32_t& sa
         uint8_t channels;
     };
     static constexpr Row kRows[] = {
+        {0x0000000000000004ULL, RtspAudioCodec::PcmS16Be, 8000, 1},
+        {0x0000000000000008ULL, RtspAudioCodec::PcmS16Be, 8000, 2},
         {0x0000000000000010ULL, RtspAudioCodec::PcmS16Be, 16000, 1},
+        {0x0000000000000020ULL, RtspAudioCodec::PcmS16Be, 16000, 2},
+        {0x0000000000000040ULL, RtspAudioCodec::PcmS16Be, 24000, 1},
+        {0x0000000000000080ULL, RtspAudioCodec::PcmS16Be, 24000, 2},
+        {0x0000000000000100ULL, RtspAudioCodec::PcmS16Be, 32000, 1},
+        {0x0000000000000200ULL, RtspAudioCodec::PcmS16Be, 32000, 2},
+        {0x0000000000000400ULL, RtspAudioCodec::PcmS16Be, 44100, 1},
+        {0x0000000000000800ULL, RtspAudioCodec::PcmS16Be, 44100, 2},
+        {0x0000000000004000ULL, RtspAudioCodec::PcmS16Be, 48000, 1},
         {0x0000000000008000ULL, RtspAudioCodec::PcmS16Be, 48000, 2},
         {0x0000000000400000ULL, RtspAudioCodec::AacLc, 44100, 2},
         {0x0000000000800000ULL, RtspAudioCodec::AacLc, 48000, 2},
@@ -200,20 +212,32 @@ inline void DecodeAudioFormat(uint64_t mask, RtspAudioCodec& codec, uint32_t& sa
         {0x0000000080000000ULL, RtspAudioCodec::AacEld, 44100, 1},
         {0x0000000100000000ULL, RtspAudioCodec::AacEld, 48000, 1},
     };
-    // The iPhone may offer several bits at once (e.g. 0x8010). Prefer the richest
-    // PCM entry, matching carplayd's handling of the combined wired mask.
-    if (mask & 0x0000000000008000ULL) {
-        codec = RtspAudioCodec::PcmS16Be;
-        sample_rate = 48000;
-        channels = 2;
-        return;
-    }
     for (const Row& row : kRows) {
         if (mask == row.mask) {
             codec = row.codec;
             sample_rate = row.rate;
             channels = row.channels;
             return;
+        }
+    }
+    // The iPhone may offer several bits at once (e.g. 0x8010). Prefer the richest PCM entry,
+    // matching carplayd's handling of the combined wired mask.
+    static constexpr uint64_t kPcmPreference[] = {
+        0x0000000000008000ULL, 0x0000000000004000ULL, 0x0000000000000800ULL,
+        0x0000000000000400ULL, 0x0000000000000200ULL, 0x0000000000000100ULL,
+        0x0000000000000080ULL, 0x0000000000000040ULL, 0x0000000000000020ULL,
+        0x0000000000000010ULL, 0x0000000000000008ULL, 0x0000000000000004ULL,
+    };
+    for (uint64_t bit : kPcmPreference) {
+        if (mask & bit) {
+            for (const Row& row : kRows) {
+                if (row.mask == bit) {
+                    codec = row.codec;
+                    sample_rate = row.rate;
+                    channels = row.channels;
+                    return;
+                }
+            }
         }
     }
     // Nothing matched: CarPlay's documented fallback is AAC-ELD 24 kHz mono.

@@ -75,6 +75,17 @@ struct AudioOutputFormat {
     uint8_t channels{2};          // 1 = Mono, 2 = Stereo
     uint8_t bit_depth{16};        // 16, 24, 32-bit
     AudioSampleType sample_type{AudioSampleType::PcmInt16};
+
+    bool operator==(const AudioOutputFormat& other) const noexcept {
+        return sample_rate == other.sample_rate &&
+               channels == other.channels &&
+               bit_depth == other.bit_depth &&
+               sample_type == other.sample_type;
+    }
+
+    bool operator!=(const AudioOutputFormat& other) const noexcept {
+        return !(*this == other);
+    }
 };
 
 // Device identity advertised during Bluetooth / protocol handshake.

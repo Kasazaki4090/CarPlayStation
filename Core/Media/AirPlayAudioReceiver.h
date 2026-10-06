@@ -72,6 +72,8 @@ private:
     void UdpListenLoop();
     void HandlePacket(const AirPlayAudioDemuxer::AudioPacket& pkt);
     void PushPcm(const int16_t* pcm, size_t frames, uint8_t srcChannels, uint32_t srcRate);
+    // Periodic dataplane stats (UDP thread only) so a silent lane is visible in the log.
+    void LogStats();
 
     std::shared_ptr<IAudioPipeline> m_pipeline;
     Config m_cfg;
@@ -88,6 +90,15 @@ private:
     // Scratch buffers reused across packets (guarded by the UDP thread only).
     std::vector<float> m_resampleIn;
     std::vector<int16_t> m_convertBuf;
+    // One-shot diagnostic: dumps the first access unit so the wire framing can be checked
+    // against the decoder's expectations (UDP thread only).
+    bool m_au_dumped{false};
+    // Dataplane counters for the periodic stats line (UDP thread only).
+    uint64_t m_decoded_ok{0};
+    uint64_t m_decode_failed{0};
+    uint64_t m_pcm_frames{0};
+    uint64_t m_last_stats_packets{0};
+    uint64_t m_stats_clock_ms{0};
 };
 
 }  // namespace CarPlayStation::Core::Media

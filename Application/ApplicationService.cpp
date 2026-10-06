@@ -174,7 +174,7 @@ Core::Common::Status ApplicationService::ApplySettings(const AppSettings& newSet
         audio->SetLaneVolume(Core::Media::AudioLane::MainMedia, newSettings.audio.media_volume);
         audio->SetLaneVolume(Core::Media::AudioLane::AltNavigation, newSettings.audio.navigation_volume);
         audio->SetLaneVolume(Core::Media::AudioLane::SiriTelephony, newSettings.audio.telephony_volume);
-        audio->SetDuckingRatio(newSettings.audio.ducking_ratio);
+        audio->SetTargetDuckingRatio(newSettings.audio.ducking_ratio);
     }
 
     ui_state_.active_settings = newSettings;

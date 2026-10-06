@@ -24,6 +24,7 @@
 #include <array>
 #include <ctime>
 #include <cstdio>
+#include <unordered_set>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -523,6 +524,59 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
             }
         });
 
+        rtsp_server_->SetDuckAudioCallback([this](bool ducked) {
+            CPS_LOG_INFO("CoreService", "Audio ducking command: ducked=", ducked ? "yes" : "no");
+            if (audio_pipeline_) {
+                audio_pipeline_->SetDuckingActive(ducked);
+            }
+        });
+
+        rtsp_server_->SetStreamTeardownCallback([this](uint32_t stream_type) {
+            CPS_LOG_INFO("CoreService", "Audio stream teardown: type=", stream_type);
+            if (stream_type == 101) {
+                auto it = std::find_if(audio_receivers_.begin(), audio_receivers_.end(),
+                    [](const std::shared_ptr<Media::AirPlayAudioReceiver>& r) {
+                        return r && r->GetLane() == Media::AudioLane::AltNavigation;
+                    });
+                if (it != audio_receivers_.end()) {
+                    (*it)->Stop();
+                    audio_receivers_.erase(it);
+                }
+                if (audio_pipeline_) {
+                    audio_pipeline_->StopLane(Media::AudioLane::AltNavigation);
+                    audio_pipeline_->SetDuckingActive(false);
+                }
+            } else if (stream_type == 100) {
+                auto it = std::find_if(audio_receivers_.begin(), audio_receivers_.end(),
+                    [](const std::shared_ptr<Media::AirPlayAudioReceiver>& r) {
+                        return r && r->GetLane() == Media::AudioLane::SiriTelephony;
+                    });
+                if (it != audio_receivers_.end()) {
+                    (*it)->Stop();
+                    audio_receivers_.erase(it);
+                }
+                if (microphone_sender_) {
+                    microphone_sender_->Stop();
+                    microphone_sender_.reset();
+                }
+                if (audio_pipeline_) {
+                    audio_pipeline_->StopLane(Media::AudioLane::SiriTelephony);
+                }
+            } else if (stream_type == 102) {
+                auto it = std::find_if(audio_receivers_.begin(), audio_receivers_.end(),
+                    [](const std::shared_ptr<Media::AirPlayAudioReceiver>& r) {
+                        return r && r->GetLane() == Media::AudioLane::MainMedia;
+                    });
+                if (it != audio_receivers_.end()) {
+                    (*it)->Stop();
+                    audio_receivers_.erase(it);
+                }
+                if (audio_pipeline_) {
+                    audio_pipeline_->StopLane(Media::AudioLane::MainMedia);
+                }
+            }
+        });
+
         if (wifi_manager_) {
             wifi_manager_->SetStationConnectedCallback([this](const Transport::StationInfo& station) {
                 CPS_LOG_INFO("CoreService", "WiFi Station joined: MAC=", station.macAddress, " IP=", station.ipAddress);
@@ -926,15 +980,7 @@ static Media::AudioLane SelectAudioLane(const Session::AudioStreamNegotiation& s
 }
 
 void CarPlayCoreService::ConfigureAudioReceivers(const Session::NegotiatedMediaParams& params) {
-    // Tear down the previous set first: the iPhone re-SETUPs the audio streams
-    // several times per Siri turn, and every negotiation re-binds the UDP
-    // ports, so a stale receiver would keep draining the old stream's port.
-    for (auto& receiver : audio_receivers_) {
-        if (receiver) {
-            receiver->Stop();
-        }
-    }
-    audio_receivers_.clear();
+    std::unordered_set<Media::AudioLane> active_lanes;
 
     for (const auto& stream : params.audio_streams) {
         if (stream.data_port == 0) {
@@ -943,8 +989,29 @@ void CarPlayCoreService::ConfigureAudioReceivers(const Session::NegotiatedMediaP
             continue;
         }
 
+        Media::AudioLane lane = SelectAudioLane(stream);
+        active_lanes.insert(lane);
+
+        // Check if we already have an active receiver for this lane on the same port
+        auto existing = std::find_if(audio_receivers_.begin(), audio_receivers_.end(),
+            [lane](const std::shared_ptr<Media::AirPlayAudioReceiver>& r) {
+                return r && r->GetLane() == lane;
+            });
+
+        if (existing != audio_receivers_.end() && (*existing)->IsRunning() && (*existing)->GetPort() == stream.data_port) {
+            (*existing)->SetDecryptionKey(stream.output_key);
+            CPS_LOG_INFO("CoreService", "Audio receiver for lane ", static_cast<int>(lane),
+                         " already running on port ", stream.data_port, "; preserved with updated decryption key");
+            continue;
+        }
+
+        if (existing != audio_receivers_.end()) {
+            (*existing)->Stop();
+            audio_receivers_.erase(existing);
+        }
+
         Media::AirPlayAudioReceiver::Config config;
-        config.lane = SelectAudioLane(stream);
+        config.lane = lane;
         config.udp_port = stream.data_port;
         // RtspAudioCodec and AudioCodecKind share the same numbering; Core/Session
         // cannot include Core/Media (Media already depends on Session/Pairing).
@@ -974,6 +1041,17 @@ void CarPlayCoreService::ConfigureAudioReceivers(const Session::NegotiatedMediaP
                      " rate=", config.stream.sample_rate, " ch=", static_cast<int>(config.stream.channels),
                      " audioType=", stream.audio_type);
         audio_receivers_.push_back(receiver);
+    }
+
+    // Stop receivers for lanes that are no longer in params.audio_streams
+    for (auto it = audio_receivers_.begin(); it != audio_receivers_.end(); ) {
+        if (*it && active_lanes.find((*it)->GetLane()) == active_lanes.end()) {
+            CPS_LOG_INFO("CoreService", "Stopping inactive audio receiver for lane ", static_cast<int>((*it)->GetLane()));
+            (*it)->Stop();
+            it = audio_receivers_.erase(it);
+        } else {
+            ++it;
+        }
     }
 
     CPS_LOG_INFO("CoreService", "Audio receivers configured: count=", audio_receivers_.size());

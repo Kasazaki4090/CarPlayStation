@@ -38,6 +38,9 @@ namespace CarPlayStation::Core::Session {
 
 namespace {
 
+// "bplist00" — the magic that opens every binary property list.
+constexpr char kBplistMagic[] = "bplist00";
+
 inline uint64_t NtpNow() {
     auto now = std::chrono::system_clock::now();
     auto epoch = now.time_since_epoch();
@@ -73,9 +76,85 @@ inline socket_t BindUdpEphemeral(uint16_t& out_port) {
     return sock;
 }
 
+// Bind an ephemeral TCP listener and report the port the OS handed out. Used for the
+// iAP2 data-tunnel (stream type 130) dataPort answer.
+inline socket_t BindTcpEphemeral(uint16_t& out_port) {
+    out_port = 0;
+    socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCK) {
+        return INVALID_SOCK;
+    }
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = 0;
+    if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCK_ERR) {
+        CLOSE_SOCK(sock);
+        return INVALID_SOCK;
+    }
+    if (listen(sock, 1) == SOCK_ERR) {
+        CLOSE_SOCK(sock);
+        return INVALID_SOCK;
+    }
+    int len = sizeof(addr);
+    if (getsockname(sock, reinterpret_cast<sockaddr*>(&addr), &len) == SOCK_ERR) {
+        CLOSE_SOCK(sock);
+        return INVALID_SOCK;
+    }
+    out_port = ntohs(addr.sin_port);
+    return sock;
+}
+
 // A plist integer may be stored signed or unsigned; accept both (carplayd session.rs:232-238).
 inline uint64_t PlistAsUInt(const Pairing::BplistValue& v) {
     return v.AsUInt(0);
+}
+
+// The iAP2 data tunnel (RTSP stream type 130) is identified by this client type UUID
+// rather than by a streamConnectionID (xcertplay CarPlayMediaEngine.IAP_DATASTREAM_UUID).
+constexpr char kIapDatastreamUuid[] = "E9459FD0-BCAD-4C45-820F-1E72447EF2F2";
+
+inline std::string UpperAscii(std::string s) {
+    for (char& c : s) {
+        if (c >= 'a' && c <= 'z') c = static_cast<char>(c - ('a' - 'A'));
+    }
+    return s;
+}
+
+// Logs the resource ownership iOS reports in a `modesChanged` command. entity 1 = the
+// iPhone (controller) owns the resource, 2 = us (accessory). Audio only flows once iOS
+// has borrowed MainAudio (resourceID=2 -> entity=1) and follows up with a type 100/101/102 SETUP.
+void LogModeChanges(const Pairing::BplistValue& root) {
+    // Wire shape: {type=modesChanged, params={appStates=[...], resources=[...]}}.
+    // The event-channel reply to our changeModes uses the same params.resources path
+    // under {status=0, params={appStates=[...], resources=[...]}}.
+    const auto* params = root.Find("params");
+    if (!params) return;
+    const auto* resources = params->Find("resources");
+    if (!resources || !resources->AsArray()) return;
+    for (const auto& r : *resources->AsArray()) {
+        const int64_t rid = r.Find("resourceID") ? r.Find("resourceID")->AsInt() : -1;
+        const int64_t entity = r.Find("entity") ? r.Find("entity")->AsInt() : -1;
+        const int64_t perm = r.Find("permanentEntity") ? r.Find("permanentEntity")->AsInt() : -1;
+        const char* name = (rid == 1) ? "MainScreen" : (rid == 2) ? "MainAudio" : (rid == 3) ? "Speech"
+                         : (rid == 4) ? "Phone" : (rid == 5) ? "TurnByTurn" : "Unknown";
+        CPS_LOG_INFO("AirPlayRtsp", "modesChanged resource ", name, " (id=", std::to_string(rid),
+                     ") entity=", std::to_string(entity), " permanentEntity=", std::to_string(perm),
+                     entity == 1 ? " [iPhone owns]" : entity == 2 ? " [accessory owns]" : "");
+    }
+}
+
+// The event channel carries plaintext RTSP responses; some of them (our changeModes
+// requestUI/takeScreen) come back with a bplist body describing the same resource state.
+void LogEventChannelBplist(const std::vector<uint8_t>& pt) {
+    auto it = std::search(pt.begin(), pt.end(), kBplistMagic, kBplistMagic + 8);
+    if (it == pt.end()) return;
+    const size_t off = static_cast<size_t>(it - pt.begin());
+    auto v = Pairing::BplistDecoder::Decode(pt.data() + off, pt.size() - off);
+    CPS_LOG_INFO("AirPlayRtsp", "Event channel bplist body: ", Pairing::BplistDumper::Dump(v));
+    LogModeChanges(v);
 }
 
 inline std::string Hex64(uint64_t v) {
@@ -117,6 +196,15 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
     // Phase 2 audio control sockets (the controlPort we answer for stream type 102).
     // They stay bound for the session so the port we advertised cannot be reused.
     std::vector<socket_t> audio_ctrl_socks;
+
+    // Phase 2 iAP2 data tunnel (RTSP stream type 130). The iPhone connects out to this
+    // listener and sends ChaCha20-Poly1305 sealed APTransportPackage records.
+    socket_t data_listen_sock{INVALID_SOCK};
+    uint16_t data_port{0};
+    std::thread data_thread;
+    std::mutex data_key_mutex;
+    std::array<uint8_t, 32> data_read_key{0};
+    bool data_key_ready{false};
 
     std::atomic<bool> alive{true};
 
@@ -161,6 +249,13 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
             }
         }
         audio_ctrl_socks.clear();
+        if (data_listen_sock != INVALID_SOCK) {
+            CLOSE_SOCK(data_listen_sock);
+            data_listen_sock = INVALID_SOCK;
+        }
+        if (data_thread.joinable()) {
+            data_thread.join();
+        }
     }
 
     void StartTimingResponder() {
@@ -342,10 +437,139 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
                         else ev_ascii += '.';
                     }
                     CPS_LOG_INFO("AirPlayRtsp", "Event channel received: '", first_line, "' (", std::to_string(pt->size()), " B), body=[", ev_ascii, "]");
+                    LogEventChannelBplist(*pt);
                 }
             }
             CPS_LOG_INFO("AirPlayRtsp", "Event channel reader thread finished");
         });
+    }
+
+    // iAP2 data tunnel reader (RTSP stream type 130). Mirrors xcertplay IapTunnel.run():
+    // accept the iPhone's connection, then decrypt a stream of
+    //   [u16 LE payloadLen][payload][Poly1305 tag 16]
+    // frames whose AAD is the two length bytes and whose nonce is 4 zero bytes followed by
+    // an 8-byte little-endian frame counter. The plaintext is a sequence of
+    // APTransportPackage records: [u32 BE totalSize][32 B header][body], where the header's
+    // word at offset 16 is the message type ('comm' = 0x636f6d6d carries iAP2 bytes).
+    void StartDataTunnelReader() {
+        if (data_listen_sock == INVALID_SOCK || !data_key_ready) return;
+        if (data_thread.joinable()) return;  // already listening (iPhone re-SETUP)
+        std::array<uint8_t, 32> key_copy{};
+        {
+            std::lock_guard<std::mutex> lock(data_key_mutex);
+            key_copy = data_read_key;
+        }
+        auto self = shared_from_this();
+        data_thread = std::thread([this, self, key_copy]() {
+            while (alive.load()) {
+                fd_set rfds;
+                FD_ZERO(&rfds);
+                FD_SET(data_listen_sock, &rfds);
+                timeval tv{0, 500000};
+                int sel = select(static_cast<int>(data_listen_sock + 1), &rfds, nullptr, nullptr, &tv);
+                if (sel <= 0) continue;
+                sockaddr_in peer{};
+                int peer_len = sizeof(peer);
+                socket_t conn = accept(data_listen_sock, reinterpret_cast<sockaddr*>(&peer), &peer_len);
+                if (conn == INVALID_SOCK) continue;
+                CPS_LOG_INFO("AirPlayRtsp", "iAP data tunnel TCP accepted from ",
+                             inet_ntoa(peer.sin_addr), ":", std::to_string(ntohs(peer.sin_port)));
+                RunDataTunnelConnection(conn, key_copy);
+                CLOSE_SOCK(conn);
+                if (!alive.load()) break;
+            }
+            CPS_LOG_INFO("AirPlayRtsp", "iAP data tunnel listener thread finished");
+        });
+    }
+
+    void RunDataTunnelConnection(socket_t conn, const std::array<uint8_t, 32>& read_key) {
+#ifdef _WIN32
+        int nodelay = 1;
+        setsockopt(conn, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
+        DWORD tv = 500;
+        setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+#else
+        struct timeval tv{0, 500000};
+        setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+#endif
+        // The frame counter restarts per accepted connection (xcertplay IapTunnel.accept()).
+        uint64_t frame_counter = 0;
+        std::vector<uint8_t> ct;
+        std::vector<uint8_t> plain;
+        uint8_t buf[16384];
+        size_t comm_packages = 0;
+        size_t comm_bytes = 0;
+
+        while (alive.load()) {
+            int n = recv(conn, reinterpret_cast<char*>(buf), sizeof(buf), 0);
+            if (n <= 0) {
+#ifdef _WIN32
+                int err = WSAGetLastError();
+                if (err == WSAETIMEDOUT) continue;
+#else
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+#endif
+                break;
+            }
+            ct.insert(ct.end(), buf, buf + n);
+
+            // Decrypt whole frames, keep the partial tail.
+            size_t offset = 0;
+            while (ct.size() - offset >= 2) {
+                size_t payload_len = static_cast<size_t>(ct[offset]) |
+                                     (static_cast<size_t>(ct[offset + 1]) << 8);
+                size_t frame_len = 2 + payload_len + 16;
+                if (ct.size() - offset < frame_len) break;
+                uint8_t nonce[12] = {0};
+                for (int i = 0; i < 8; ++i) {
+                    nonce[4 + i] = static_cast<uint8_t>((frame_counter >> (8 * i)) & 0xFF);
+                }
+                std::vector<uint8_t> out;
+                if (!pairing::ChaCha20Poly1305OpenWithAad(
+                        read_key.data(), nonce, ct.data() + offset, 2,
+                        ct.data() + offset + 2, payload_len + 16, out)) {
+                    CPS_LOG_WARN("AirPlayRtsp", "iAP data tunnel frame ", std::to_string(frame_counter),
+                                 " failed AEAD authentication (", std::to_string(payload_len), " B)");
+                    frame_counter++;
+                    offset += frame_len;
+                    continue;
+                }
+                frame_counter++;
+                plain.insert(plain.end(), out.begin(), out.end());
+                offset += frame_len;
+            }
+            ct.erase(ct.begin(), ct.begin() + offset);
+
+            // Parse APTransportPackage records out of the plaintext stream.
+            size_t poff = 0;
+            while (plain.size() - poff >= 32) {
+                uint32_t size = (static_cast<uint32_t>(plain[poff]) << 24) |
+                                (static_cast<uint32_t>(plain[poff + 1]) << 16) |
+                                (static_cast<uint32_t>(plain[poff + 2]) << 8) |
+                                static_cast<uint32_t>(plain[poff + 3]);
+                if (size < 32 || size > 4u * 1024u * 1024u) break;
+                if (plain.size() - poff < size) break;
+                uint32_t mtype = (static_cast<uint32_t>(plain[poff + 16]) << 24) |
+                                 (static_cast<uint32_t>(plain[poff + 17]) << 16) |
+                                 (static_cast<uint32_t>(plain[poff + 18]) << 8) |
+                                 static_cast<uint32_t>(plain[poff + 19]);
+                if (mtype == 0x636f6d6d) {  // 'comm'
+                    size_t body = size - 32;
+                    comm_packages++;
+                    comm_bytes += body;
+                    CPS_LOG_INFO("AirPlayRtsp", "iAP data tunnel package type=comm body=",
+                                 std::to_string(body), " B (total ", std::to_string(comm_bytes),
+                                 " B in ", std::to_string(comm_packages), " package(s))");
+                } else {
+                    CPS_LOG_INFO("AirPlayRtsp", "iAP data tunnel package type=0x",
+                                 std::to_string(mtype), " size=", std::to_string(size));
+                }
+                poff += size;
+            }
+            plain.erase(plain.begin(), plain.begin() + poff);
+        }
+        CPS_LOG_INFO("AirPlayRtsp", "iAP data tunnel reader finished: frames=", std::to_string(frame_counter),
+                     ", comm packages=", std::to_string(comm_packages), ", iAP2 bytes=", std::to_string(comm_bytes));
     }
 
     bool TryAcceptEventChannel(int timeout_ms = 500) {
@@ -518,6 +742,16 @@ public:
     void SetStreamingStartedCallback(StreamingStartedCallback callback) {
         std::lock_guard<std::mutex> lock(mutex_);
         streaming_cb_ = std::move(callback);
+    }
+
+    void SetDuckAudioCallback(DuckAudioCallback callback) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        duck_cb_ = std::move(callback);
+    }
+
+    void SetStreamTeardownCallback(StreamTeardownCallback callback) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stream_teardown_cb_ = std::move(callback);
     }
 
     void SetPairSetupIdentity(Pairing::AccessoryIdentity identity, Pairing::PeerSaver saver) {
@@ -770,20 +1004,31 @@ private:
         std::string path = std::string(req.Path());
 
         if (!req.body.empty() && (path == "/command" || path == "/feedback" || req.method == RtspMethod::Teardown || req.method == RtspMethod::Post || req.method == RtspMethod::Setup)) {
-            std::string printable;
-            std::string hexDump;
-            for (size_t i = 0; i < req.body.size(); ++i) {
-                uint8_t b = req.body[i];
-                if (b >= 32 && b <= 126) printable += static_cast<char>(b);
-                else printable += '.';
-                if (i < 64) {
-                    char hbuf[4];
-                    snprintf(hbuf, sizeof(hbuf), "%02x ", b);
-                    hexDump += hbuf;
+            // The body here is already decrypted, so a bplist body can be rendered as
+            // text. The hex preview alone was never enough to tell why iOS did or did
+            // not send a follow-up SETUP (both logs truncate at 64 bytes).
+            const bool is_bplist = req.body.size() >= 8 &&
+                                   std::equal(kBplistMagic, kBplistMagic + 8, req.body.begin());
+            if (is_bplist) {
+                CPS_LOG_INFO("AirPlayRtsp", "Request [", RtspMethodToString(req.method), " ", path,
+                             "] body len=", std::to_string(req.body.size()), ", bplist=[",
+                             Pairing::BplistDumper::Dump(Pairing::BplistDecoder::Decode(req.body.data(), req.body.size())), "]");
+            } else {
+                std::string printable;
+                std::string hexDump;
+                for (size_t i = 0; i < req.body.size(); ++i) {
+                    uint8_t b = req.body[i];
+                    if (b >= 32 && b <= 126) printable += static_cast<char>(b);
+                    else printable += '.';
+                    if (i < 64) {
+                        char hbuf[4];
+                        snprintf(hbuf, sizeof(hbuf), "%02x ", b);
+                        hexDump += hbuf;
+                    }
                 }
+                CPS_LOG_INFO("AirPlayRtsp", "Request [", RtspMethodToString(req.method), " ", path, "] body len=",
+                             std::to_string(req.body.size()), ", hex[:64]=[", hexDump, "], ascii=[", printable, "]");
             }
-            CPS_LOG_INFO("AirPlayRtsp", "Request [", RtspMethodToString(req.method), " ", path, "] body len=",
-                         std::to_string(req.body.size()), ", hex[:64]=[", hexDump, "], ascii=[", printable, "]");
         }
 
         if (path == "/pair-setup") {
@@ -830,8 +1075,11 @@ private:
                     sess->TryAcceptEventChannel(2000);
                 }
 
-                auto resp = AirPlayRtspCodec::MakeOkResponse(cseq, params_.session_id);
-                resp.SetHeader("Audio-Latency", "11025");
+                // Both working references answer RECORD with a bare 200 OK: no `Session` header
+                // and no `Audio-Latency`. Advertising a fixed 11 ms latency is a lie before any
+                // audio lane exists, and iOS uses it to schedule the audio pipeline, so omitting
+                // it is both more honest and closer to the reference behaviour.
+                auto resp = AirPlayRtspCodec::MakeOkResponse(cseq);
                 CPS_LOG_INFO("AirPlayRtsp", "RECORD received — streaming start (video data port ",
                              std::to_string(params_.video_data_port), ", control port ",
                              std::to_string(params_.video_control_port), ")");
@@ -850,8 +1098,35 @@ private:
             }
 
             case RtspMethod::SetParameter:
+                if (params_.session_id.empty()) params_.session_id = "1";
+                return AirPlayRtspCodec::MakeOkResponse(cseq, params_.session_id);
+
             case RtspMethod::Teardown: {
                 if (params_.session_id.empty()) params_.session_id = "1";
+                if (!req.body.empty()) {
+                    auto bplist = Pairing::BplistDecoder::Decode(req.body.data(), req.body.size());
+                    if (const auto* streams = bplist.Find("streams")) {
+                        if (const auto* arr = streams->AsArray()) {
+                            for (const auto& s : *arr) {
+                                if (const auto* ty = s.Find("type")) {
+                                    uint32_t stream_type = static_cast<uint32_t>(ty->AsUInt(0));
+                                    params_.audio_streams.erase(
+                                        std::remove_if(params_.audio_streams.begin(), params_.audio_streams.end(),
+                                                       [stream_type](const AudioStreamNegotiation& st) {
+                                                           return st.type == stream_type;
+                                                       }),
+                                        params_.audio_streams.end());
+                                    if (stream_type == 101) {
+                                        if (duck_cb_) duck_cb_(false);
+                                    }
+                                    if (stream_teardown_cb_) {
+                                        stream_teardown_cb_(stream_type);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 return AirPlayRtspCodec::MakeOkResponse(cseq, params_.session_id);
             }
 
@@ -997,10 +1272,25 @@ private:
         root.emplace_back("firmwareRevision", BplistValue("1.0"));
         root.emplace_back("deviceID", BplistValue(dev_id));
         root.emplace_back("pi", BplistValue(dev_id));
-        root.emplace_back("features", BplistValue(static_cast<int64_t>(0x0000006144440B80ULL)));
+        // xcertplay always advertises a Bluetooth address list and the drive side. iOS uses the
+        // list to decide whether the car's radio can take calls, which is part of the same
+        // audio-routing decision that produces the MainAudio borrow. We have no local radio, so
+        // the list re-uses our own deviceID (a MAC-shaped string), which is what a receiver with
+        // no separate adapter advertises.
+        if (options_.advertise_bluetooth) {
+            BplistArray bt_ids;
+            bt_ids.push_back(BplistValue(dev_id));
+            root.emplace_back("bluetoothIDs", BplistValue(bt_ids));
+            root.emplace_back("rightHandDrive", BplistValue(false));
+        }
+        // The `features` bitmap and the CarPlay feature *tokens* iOS proposes in the phase-1
+        // SETUP are two views of the same thing. The default mask is the one xcertplay
+        // (Reference/diplay) advertises and which the user has verified working on this iPhone;
+        // it lights the audio-management bits our old 0x6144440B80 never lit.
+        root.emplace_back("features", BplistValue(static_cast<int64_t>(options_.info_features)));
         root.emplace_back("statusFlags", BplistValue(static_cast<int64_t>(4)));
-        root.emplace_back("keepAliveLowPower", BplistValue(true));
-        root.emplace_back("keepAliveSendStatsAsBody", BplistValue(true));
+        root.emplace_back("keepAliveLowPower", BplistValue(false));
+        root.emplace_back("keepAliveSendStatsAsBody", BplistValue(false));
 
         // modes
         BplistDict modes;
@@ -1012,52 +1302,140 @@ private:
             r.emplace_back("transferPriority", BplistValue(100)); // NiceToHave
             r.emplace_back("takeConstraint", BplistValue(100));
             r.emplace_back("borrowConstraint", BplistValue(100));
+            r.emplace_back("unborrowConstraint", BplistValue(100));
             return BplistValue(r);
         };
         res_arr.push_back(make_res(1)); // MainScreen
         res_arr.push_back(make_res(2)); // MainAudio
         modes.emplace_back("resources", BplistValue(res_arr));
+        // appStates: the Siri/assistant state machine. appStateID 1 carries `speechMode` (-1 =
+        // "no speech session, but the accessory supports one"); 2 and 3 are boolean state flags.
+        // Without this the iPhone has no way to open a speech session, which is what gates the
+        // voice/audio lanes of the audio advert below.
+        BplistArray app_states;
+        {
+            BplistDict s1;
+            s1.emplace_back("appStateID", BplistValue(2));
+            s1.emplace_back("state", BplistValue(false));
+            app_states.push_back(BplistValue(s1));
+        }
+        {
+            BplistDict s2;
+            s2.emplace_back("appStateID", BplistValue(1));
+            s2.emplace_back("speechMode", BplistValue(static_cast<int64_t>(-1)));
+            app_states.push_back(BplistValue(s2));
+        }
+        {
+            BplistDict s3;
+            s3.emplace_back("appStateID", BplistValue(3));
+            s3.emplace_back("state", BplistValue(false));
+            app_states.push_back(BplistValue(s3));
+        }
+        modes.emplace_back("appStates", BplistValue(app_states));
         root.emplace_back("modes", BplistValue(modes));
 
-        // audioLatencies
-        BplistDict lat;
-        lat.emplace_back("inputLatencyMicros", BplistValue(0));
-        lat.emplace_back("outputLatencyMicros", BplistValue(0));
+        // audioLatencies. Zero is honest here: the lanes have not been opened yet, and the
+        // iPhone re-reads the latency once a stream is running.
+        //
+        // The C reference sends ONE entry with no `type`/`audioType` keys - a catch-all that
+        // applies to every stream and audio type. xcertplay instead enumerates the
+        // (stream type, audioType) pairs it is prepared to carry.
+        auto make_latency = [](int64_t ty, const char* audio_type) {
+            BplistDict l;
+            if (ty != 0) l.emplace_back("type", BplistValue(ty));
+            l.emplace_back("inputLatencyMicros", BplistValue(0));
+            l.emplace_back("outputLatencyMicros", BplistValue(0));
+            if (audio_type) l.emplace_back("audioType", BplistValue(audio_type));
+            return BplistValue(l);
+        };
         BplistArray lat_arr;
-        lat_arr.push_back(BplistValue(lat));
+        if (options_.audio_advert_c_reference) {
+            lat_arr.push_back(make_latency(0, nullptr));
+        } else {
+            lat_arr.push_back(make_latency(100, nullptr));
+            lat_arr.push_back(make_latency(100, "default"));
+            lat_arr.push_back(make_latency(100, "media"));
+            lat_arr.push_back(make_latency(100, "telephony"));
+            lat_arr.push_back(make_latency(100, "speechRecognition"));
+            lat_arr.push_back(make_latency(100, "alert"));
+            lat_arr.push_back(make_latency(101, nullptr));
+            lat_arr.push_back(make_latency(101, "default"));
+            lat_arr.push_back(make_latency(102, "default"));
+        }
         root.emplace_back("audioLatencies", BplistValue(lat_arr));
 
-        // audioFormats: the 8-entry wireless CCPA advert (stock CCPA `_BuildAudioFormatsArray`,
-        // live-captured in c_flow_chatty.log). Format bits: 0x10 PCM 16k mono, 0x8000 PCM 48k
-        // stereo, 0x800000 AAC-LC 48k stereo, 0x2000000 AAC-ELD 48k stereo, 0x4000000 AAC-ELD
-        // 16k mono. `audioInputFormats` is only present on the two-way (microphone) entries.
-        // Without this the iPhone cannot plan audio and tears the session down after RECORD.
+        // audioFormats: every format bit is a bit in the AirPlay PCM/AAC format bitmap; see
+        // DecodeAudioFormat in AirPlayRtspTypes.h for the decoder of the table.
+        // `audioInputFormats` is only present on the two-way (microphone) lanes. Without this
+        // advert the iPhone cannot plan audio and tears the session down after RECORD.
+        //
+        // The two shapes below differ in more than the codec list: the C reference never
+        // advertises PCM for a media lane and never splits MainAudio across a `media` entry,
+        // while xcertplay's set is PCM-first and per-`audioType`. The Rust reference documents
+        // what happens when iOS cannot map the stream it wants onto an entry: it announces
+        // mainAudio=controller in modesChanged, never issues the streamType=100 SETUP, and audio
+        // stays on the phone - which is exactly our symptom. So the default is the set proven on
+        // hardware over the same T=Enet transport we use.
         BplistArray af_arr;
-        constexpr int64_t kPcm16kMono = 0x10;
-        constexpr int64_t kPcm48kStereo = 0x8000;
-        constexpr int64_t kAacLc48kStereo = 0x00800000;
-        constexpr int64_t kAacEld48kStereo = 0x02000000;
-        constexpr int64_t kAacEld16kMono = 0x04000000;
-        auto make_af = [](int64_t ty, const char* audio_type, int64_t inp, int64_t outp) {
+        auto make_af = [](int64_t ty, const char* audio_type, int64_t outp, int64_t inp) {
             BplistDict e;
             e.emplace_back("type", BplistValue(ty));
-            e.emplace_back("audioType", BplistValue(audio_type));
-            if (inp != 0) e.emplace_back("audioInputFormats", BplistValue(inp));
+            if (audio_type) e.emplace_back("audioType", BplistValue(audio_type));
             e.emplace_back("audioOutputFormats", BplistValue(outp));
+            if (inp != 0) e.emplace_back("audioInputFormats", BplistValue(inp));
             return BplistValue(e);
         };
-        // MainAudio (100): legacy PCM catch-all, alerts, and the two-way voice lanes.
-        af_arr.push_back(make_af(100, "compatibility", kPcm16kMono, kPcm48kStereo | kPcm16kMono));
-        af_arr.push_back(make_af(100, "alert", 0, kAacEld48kStereo));
-        af_arr.push_back(make_af(100, "default", kPcm16kMono, kAacEld16kMono));
-        af_arr.push_back(make_af(100, "telephony", kPcm16kMono, kAacEld16kMono));
-        af_arr.push_back(make_af(100, "speechRecognition", kPcm16kMono, kAacEld16kMono));
-        // AltAudio (101): guidance/navigation.
-        af_arr.push_back(make_af(101, "compatibility", 0, kPcm48kStereo));
-        af_arr.push_back(make_af(101, "default", 0, kAacEld48kStereo));
-        // MainHighAudio (102): buffered media, AAC-LC.
-        af_arr.push_back(make_af(102, "media", 0, kAacLc48kStereo));
+        if (options_.audio_advert_c_reference) {
+            // The CCPA 8-entry wireless set the C reference advertises
+            // (docs/c_reference/c_flow_chatty.log line 7). Every entry decodes to something
+            // our media path can actually carry.
+            constexpr int64_t kPcm16kMono = 0x10;             // PCM 16 kHz mono
+            constexpr int64_t kPcm48kStereo = 0x8000;         // PCM 48 kHz stereo
+            constexpr int64_t kAacEld16kMono = 0x04000000;    // AAC-ELD 16 kHz mono
+            constexpr int64_t kAacEld48kMono = 0x02000000;    // AAC-ELD 48 kHz
+            constexpr int64_t kAacLc48kStereo = 0x00800000;   // AAC-LC 48 kHz stereo
+            // MainAudio (100).
+            af_arr.push_back(make_af(100, "compatibility", kPcm48kStereo | kPcm16kMono,
+                                     kPcm16kMono));
+            af_arr.push_back(make_af(100, "alert", kAacEld48kMono, 0));
+            af_arr.push_back(make_af(100, "default", kAacEld16kMono, kAacEld16kMono));
+            af_arr.push_back(make_af(100, "telephony", kAacEld16kMono, kAacEld16kMono));
+            af_arr.push_back(make_af(100, "speechRecognition", kAacEld16kMono, kAacEld16kMono));
+            // AltAudio (101): guidance/navigation.
+            af_arr.push_back(make_af(101, "compatibility", kPcm48kStereo, 0));
+            af_arr.push_back(make_af(101, "default", kAacEld48kMono, 0));
+            // MainHighAudio (102): buffered media, AAC-LC.
+            af_arr.push_back(make_af(102, "media", kAacLc48kStereo, 0));
+        } else {
+            // The 9-entry advert xcertplay sends (Reference/diplay
+            // AirPlayInfoPlist.audioFormats). We deliberately do NOT advertise Opus
+            // (0x70000000) - we have no Opus decoder.
+            constexpr int64_t kPcmVoice = 0x3FC;   // 8/16/24/32 kHz, mono + stereo
+            constexpr int64_t kPcm = kPcmVoice | 0xC000;  // + 48 kHz mono + 48 kHz stereo
+            constexpr int64_t kPcmMono = 0x154 | 0x4000;  // 8/16/24/32/48 kHz mono
+            constexpr int64_t kAacLc48kStereo = 0x00800000;
+            // MainAudio (100).
+            af_arr.push_back(make_af(100, "compatibility", kPcm, kPcmMono));
+            af_arr.push_back(make_af(100, "default", kPcm, kPcmMono));
+            af_arr.push_back(make_af(100, "media", kPcm, 0));
+            af_arr.push_back(make_af(100, "telephony", kPcmMono, kPcmMono));
+            af_arr.push_back(make_af(100, "speechRecognition", kPcmMono, kPcmMono));
+            af_arr.push_back(make_af(100, "alert", kPcm, 0));
+            // AltAudio (101): guidance/navigation.
+            af_arr.push_back(make_af(101, "compatibility", kPcm, 0));
+            af_arr.push_back(make_af(101, "default", kPcm, 0));
+            // MainHighAudio (102): buffered media, AAC-LC.
+            af_arr.push_back(make_af(102, "media", kAacLc48kStereo, 0));
+        }
         root.emplace_back("audioFormats", BplistValue(af_arr));
+
+        // extendedFeatures: the capability names the accessory additionally understands. The
+        // Rust reference notes these must be feature *names* (vocoderInfo / enhancedRequestCarUI),
+        // not codec names; advertising them is what lets iOS use the enhanced request-car-UI flow.
+        BplistArray ext_arr;
+        ext_arr.push_back(BplistValue("vocoderInfo"));
+        ext_arr.push_back(BplistValue("enhancedRequestCarUI"));
+        root.emplace_back("extendedFeatures", BplistValue(ext_arr));
 
         // displays
         BplistDict disp;
@@ -1079,6 +1457,29 @@ private:
         disp.emplace_back("widthPhysical", BplistValue(physical_w));
         disp.emplace_back("heightPhysical", BplistValue(physical_h));
         disp.emplace_back("type", BplistValue(110));
+        if (options_.display_view_areas) {
+            // A single view area covering the whole panel, with a safe area inset of zero.
+            // This is xcertplay's shape (AirPlayInfoPlist.areaDict); the C reference omits it
+            // on iOS 27, hence the switch.
+            auto make_area = [](int64_t w, int64_t h, int64_t x, int64_t y) {
+                BplistDict a;
+                a.emplace_back("widthPixels", BplistValue(w));
+                a.emplace_back("heightPixels", BplistValue(h));
+                a.emplace_back("originXPixels", BplistValue(x));
+                a.emplace_back("originYPixels", BplistValue(y));
+                return a;
+            };
+            const int64_t pw = static_cast<int64_t>(options_.default_video_width);
+            const int64_t ph = static_cast<int64_t>(options_.default_video_height);
+            BplistDict safe = make_area(pw, ph, 0, 0);
+            safe.emplace_back("drawUIOutsideSafeArea", BplistValue(true));
+            BplistDict area = make_area(pw, ph, 0, 0);
+            area.emplace_back("safeArea", BplistValue(safe));
+            BplistArray areas;
+            areas.push_back(BplistValue(area));
+            disp.emplace_back("viewAreas", BplistValue(areas));
+            disp.emplace_back("initialViewArea", BplistValue(0));
+        }
         BplistArray disp_arr;
         disp_arr.push_back(BplistValue(disp));
         root.emplace_back("displays", BplistValue(disp_arr));
@@ -1137,6 +1538,10 @@ private:
         root.emplace_back("hidDevices", BplistValue(hid_arr));
 
         auto bplist = BplistEncoder::Encode(BplistValue(root));
+        // The /info advert is the only remaining body where we differ from the working
+        // reference capture (2182 B vs 1408 B). Dump it so the two can be diffed key by key.
+        CPS_LOG_INFO("AirPlayRtsp", "/info body (", std::to_string(bplist.size()), " B): ",
+                     Pairing::BplistDumper::Dump(BplistValue(root), 6, 64));
         auto resp = AirPlayRtspCodec::MakeOkResponse(cseq);
         resp.SetHeader("Content-Type", "application/x-apple-binary-plist");
         resp.body = std::move(bplist);
@@ -1152,8 +1557,19 @@ private:
             if (const auto* ty = bplist.Find("type")) {
                 cmd_type = ty->AsString();
             }
+            // The /command bodies decide what iOS does next. In particular `modesChanged`
+            // carries the MainAudio (resourceID=2) `entity`: while it stays 2 (accessory)
+            // iOS never sends the audio SETUP, which is exactly the "no audio" symptom.
+            CPS_LOG_INFO("AirPlayRtsp", "/command body: ", Pairing::BplistDumper::Dump(bplist));
+            LogModeChanges(bplist);
         }
         CPS_LOG_INFO("AirPlayRtsp", "Handling /command: type='", cmd_type, "' (body len=", std::to_string(req.body.size()), ")");
+
+        if (cmd_type == "duckAudio") {
+            if (duck_cb_) duck_cb_(true);
+        } else if (cmd_type == "unduckAudio") {
+            if (duck_cb_) duck_cb_(false);
+        }
 
         auto resp = AirPlayRtspCodec::MakeOkResponse(cseq);
         resp.SetHeader("Content-Type", "application/x-apple-binary-plist");
@@ -1203,16 +1619,9 @@ private:
 
             BplistArray out_streams;
             bool has_screen = false;
-            // A SETUP supersedes the previous one (the iPhone re-SETUPs MainAudio several times
-            // per Siri turn), so drop any audio state negotiated by an earlier request.
-            params_.audio_streams.clear();
-            params_.mic_input_requested = false;
-            params_.mic_uplink_port = 0;
-            params_.mic_peer_address.clear();
-            params_.mic_codec = RtspAudioCodec::Unknown;
-            params_.mic_sample_rate = 0;
-            params_.mic_channels = 0;
-            params_.mic_input_key = {};
+            // Each SETUP Phase 2 configures one or more streams. In multi-lane CarPlay,
+            // MainAudio (102), AltAudio/Navigation (101), and Siri/Telephony (100) run concurrently.
+            // When a new stream is set up, other active lanes must be preserved.
 
             for (const auto& s_entry : *streams_val->AsArray()) {
                 int64_t ty = s_entry.Find("type") ? s_entry.Find("type")->AsInt() : 0;
@@ -1325,7 +1734,13 @@ private:
                                      ":", std::to_string(params_.mic_uplink_port));
                     }
 
-                    params_.audio_streams.push_back(neg);
+                    auto existing_stream = std::find_if(params_.audio_streams.begin(), params_.audio_streams.end(),
+                        [ty](const AudioStreamNegotiation& s) { return s.type == ty; });
+                    if (existing_stream != params_.audio_streams.end()) {
+                        *existing_stream = neg;
+                    } else {
+                        params_.audio_streams.push_back(neg);
+                    }
 
                     BplistDict stream_dict;
                     stream_dict.emplace_back("type", BplistValue(ty));
@@ -1337,6 +1752,53 @@ private:
                         stream_dict.emplace_back("controlPort", BplistValue(neg.control_port));
                     }
                     out_streams.push_back(BplistValue(stream_dict));
+                } else if (ty == 130) {
+                    // iAP2 data tunnel. Identified by clientTypeUUID, keyed off the session's
+                    // PairVerify shared secret plus the plaintext `seed` in the request, and
+                    // carried over a TCP socket the iPhone opens back to us. Faithful to
+                    // xcertplay CarPlayMediaEngine.onDataStream + IapTunnel.
+                    const std::string uuid =
+                        s_entry.Find("clientTypeUUID") ? UpperAscii(s_entry.Find("clientTypeUUID")->AsString())
+                                                       : std::string();
+                    const bool uuid_ok = uuid == kIapDatastreamUuid;
+                    const uint64_t seed = s_entry.Find("seed") ? s_entry.Find("seed")->AsUInt(0) : 0;
+                    if (!uuid_ok || !sess) {
+                        CPS_LOG_WARN("AirPlayRtsp", "SETUP Phase 2: data stream type 130 with unexpected ",
+                                     "clientTypeUUID '", uuid, "' (want ", kIapDatastreamUuid, ")");
+                    } else {
+                        // HKDF-SHA512(sharedSecret, "DataStream-Salt"+seed, "DataStream-Output-Encryption-Key").
+                        // The seed is rendered as an UNSIGNED decimal (the plist stores it as one).
+                        const std::string salt = "DataStream-Salt" + std::to_string(seed);
+                        constexpr char kInfo[] = "DataStream-Output-Encryption-Key";
+                        auto key = pairing::HkdfSha512(sess->shared_secret.data(), sess->shared_secret.size(),
+                                                      reinterpret_cast<const uint8_t*>(salt.data()), salt.size(),
+                                                      reinterpret_cast<const uint8_t*>(kInfo), sizeof(kInfo) - 1, 32);
+                        if (key.size() == 32) {
+                            std::lock_guard<std::mutex> lock(sess->data_key_mutex);
+                            memcpy(sess->data_read_key.data(), key.data(), 32);
+                            sess->data_key_ready = true;
+                        }
+                        if (sess->data_listen_sock == INVALID_SOCK) {
+                            sess->data_listen_sock = BindTcpEphemeral(sess->data_port);
+                        }
+                        if (sess->data_listen_sock != INVALID_SOCK && sess->data_key_ready) {
+                            sess->StartDataTunnelReader();
+                            BplistDict stream_dict;
+                            stream_dict.emplace_back("type", BplistValue(130));
+                            stream_dict.emplace_back("streamID", BplistValue(1));
+                            stream_dict.emplace_back("dataPort", BplistValue(sess->data_port));
+                            // Only echo streamConnectionID when the iPhone sent one.
+                            if (scid != 0) {
+                                stream_dict.emplace_back("streamConnectionID", BplistValue(scid));
+                            }
+                            out_streams.push_back(BplistValue(stream_dict));
+                            CPS_LOG_INFO("AirPlayRtsp", "SETUP Phase 2 iAP data tunnel: seed=",
+                                         std::to_string(seed), ", dataPort=", std::to_string(sess->data_port),
+                                         ", read key derived");
+                        } else {
+                            CPS_LOG_WARN("AirPlayRtsp", "SETUP Phase 2: unable to open iAP data tunnel listener");
+                        }
+                    }
                 } else {
                     CPS_LOG_WARN("AirPlayRtsp", "SETUP Phase 2: unhandled stream type ", std::to_string(ty));
                 }
@@ -1431,14 +1893,29 @@ private:
                          ", eventPort=", std::to_string(e_port), ", keepAlivePort=", std::to_string(k_port));
 
             BplistDict resp_dict;
-            resp_dict.emplace_back("timingPort", BplistValue(t_port));
-            resp_dict.emplace_back("eventPort", BplistValue(e_port));
+            // Key order and key set copied from the proven-working C receiver
+            // (c_flow_chatty.log CSeq=6, a 98 byte body): keepAlivePort, eventPort,
+            // timingPort, and nothing else.
             resp_dict.emplace_back("keepAlivePort", BplistValue(k_port));
+            resp_dict.emplace_back("eventPort", BplistValue(e_port));
+            resp_dict.emplace_back("timingPort", BplistValue(t_port));
 
-            BplistArray feat_arr;
-            feat_arr.push_back(BplistValue("mainBuffered"));
-            feat_arr.push_back(BplistValue("videoPlayback"));
-            resp_dict.emplace_back("features", BplistValue(feat_arr));
+            // `enabledFeatures` is the list of optional features the accessory is switching on for
+            // the rest of the session. Both working references send it (carplayd session.rs,
+            // xcertplay AirPlaySession.setupEnabledFeatures); the iPhone uses it to seed the
+            // negotiated feature set. Only claim features we actually advertise elsewhere in the
+            // session: `iAPChannel` matches the iAP2 link we do run, `viewAreas` is only claimed
+            // when the display advert carries the matching viewAreas geometry.
+            if (options_.phase1_enabled_features) {
+                BplistArray enabled;
+                enabled.push_back(BplistValue("iAPChannel"));
+                if (options_.display_view_areas) enabled.push_back(BplistValue("viewAreas"));
+                resp_dict.emplace_back("enabledFeatures", BplistValue(enabled));
+            }
+
+            CPS_LOG_INFO("AirPlayRtsp", "SETUP Phase 1 response body keys=",
+                         std::to_string(resp_dict.size()),
+                         ", enabledFeatures=", options_.phase1_enabled_features ? "on" : "off");
 
             auto bplist = BplistEncoder::Encode(BplistValue(resp_dict));
             auto resp = AirPlayRtspCodec::MakeOkResponse(cseq);
@@ -1460,6 +1937,8 @@ private:
     std::vector<std::thread> worker_threads_;
     RtspRequestHandler custom_handler_;
     StreamingStartedCallback streaming_cb_;
+    DuckAudioCallback duck_cb_;
+    StreamTeardownCallback stream_teardown_cb_;
 
     // Pair-setup (POST /pair-setup) state.
     bool pair_setup_enabled_{false};
@@ -1506,6 +1985,14 @@ void AirPlayRtspServer::SetRequestHandler(RtspRequestHandler handler) {
 
 void AirPlayRtspServer::SetStreamingStartedCallback(StreamingStartedCallback callback) {
     impl_->SetStreamingStartedCallback(std::move(callback));
+}
+
+void AirPlayRtspServer::SetDuckAudioCallback(DuckAudioCallback callback) {
+    impl_->SetDuckAudioCallback(std::move(callback));
+}
+
+void AirPlayRtspServer::SetStreamTeardownCallback(StreamTeardownCallback callback) {
+    impl_->SetStreamTeardownCallback(std::move(callback));
 }
 
 void AirPlayRtspServer::SetPairSetupIdentity(Pairing::AccessoryIdentity identity, Pairing::PeerSaver saver) {

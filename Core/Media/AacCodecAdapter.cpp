@@ -15,6 +15,9 @@ namespace {
 
 constexpr const char* kLogTag = "AacCodec";
 
+// Largest granule any AAC profile can produce (1024 for LC/HE, 960 for ELD above 32 kHz).
+constexpr uint32_t kMaxAacFrameSamples = 2048;
+
 [[nodiscard]] std::string HexErr(uint32_t v) {
     char buf[11]{};
     std::snprintf(buf, sizeof(buf), "0x%04X", v & 0xFFFFu);
@@ -95,6 +98,58 @@ bool ParseAudioSpecificConfig(const uint8_t* asc, size_t asc_len,
     return true;
 }
 
+std::vector<uint8_t> BuildAudioSpecificConfig(const AudioStreamFormat& format) {
+    if (format.codec == AudioCodecKind::AacLc) {
+        // CICP form: 5-bit audioObjectType, 4-bit sampling-frequency index, 4-bit channel config.
+        uint32_t freq_index = 0xFF;
+        for (uint32_t i = 0; i < 13; ++i) {
+            if (kFreqTable[i] == format.sample_rate) {
+                freq_index = i;
+                break;
+            }
+        }
+        const uint8_t channels = format.channels ? format.channels : 2;
+        if (freq_index == 0xFF || channels < 1 || channels > 7) {
+            return {};
+        }
+        const uint32_t v = (2u << 11) | (freq_index << 7) | (channels << 3);
+        return {static_cast<uint8_t>(v >> 8), static_cast<uint8_t>(v & 0xFFu)};
+    }
+
+    if (format.codec == AudioCodecKind::AacEld) {
+        // CarPlay uses raw AAC-ELD with 480-sample frames and no SBR/PS extensions (ISO/IEC 14496-3).
+        // 4-byte AudioSpecificConfig layout:
+        //   Bits  0.. 4 (5b): AOT escape (0x1F = 31)
+        //   Bits  5..10 (6b): AOT ext (0x07 = 7) -> AOT = 32 + 7 = 39 (AOT_ER_AAC_ELD)
+        //   Bits 11..14 (4b): samplingFrequencyIndex
+        //   Bits 15..18 (4b): channelConfiguration
+        //   Bit  19     (1b): frameLengthFlag = 1 (480-sample frame)
+        //   Bits 20..22 (3b): resilience flags = 0
+        //   Bit  23     (1b): sbrPresentFlag = 0 (no SBR)
+        //   Bits 24..27 (4b): eldExtType = 0 (ELDEXT_TERM)
+        //   Bits 28..29 (2b): epConfig = 0
+        //   Bits 30..31 (2b): padding = 0
+        uint32_t freq_index = 0xFF;
+        for (uint32_t i = 0; i < 13; ++i) {
+            if (kFreqTable[i] == format.sample_rate) {
+                freq_index = i;
+                break;
+            }
+        }
+        const uint8_t channels = format.channels ? format.channels : 2;
+        if (freq_index == 0xFF || channels < 1 || channels > 7) {
+            return {};
+        }
+        const uint8_t b0 = 0xF8;
+        const uint8_t b1 = static_cast<uint8_t>((0x07 << 5) | ((freq_index & 0x0F) << 1) | ((channels >> 3) & 0x01));
+        const uint8_t b2 = static_cast<uint8_t>(((channels & 0x07) << 5) | (1 << 4));
+        const uint8_t b3 = 0x00;
+        return {b0, b1, b2, b3};
+    }
+
+    return {};
+}
+
 // ---------------------------------------------------------------------------
 // Decoder
 // ---------------------------------------------------------------------------
@@ -117,18 +172,24 @@ bool AacAudioDecoder::Open(const AudioStreamFormat& format, const std::vector<ui
         return false;
     }
 
-    // Prefer the explicit AudioSpecificConfig when we have one (the iPhone's own config for
-    // the voice stream); otherwise let the decoder lock onto the first access unit.
+    // The explicit AudioSpecificConfig is mandatory for raw AAC: without it the decoder never
+    // establishes a channel config and every DecodeFrame returns 0x2007. Note that
+    // aacDecoder_ConfigRaw takes the length as a const input; the decoder keeps the config
+    // buffered and consumes it internally, so nothing here is left over.
     if (!asc.empty()) {
         std::vector<UCHAR> conf(asc.begin(), asc.end());
-        UINT conf_len = static_cast<UINT>(conf.size());
+        UINT conf_len = static_cast<UINT>(asc.size());
         UCHAR* conf_ptr = conf.data();
         const AAC_DECODER_ERROR cfg_err = aacDecoder_ConfigRaw(h, &conf_ptr, &conf_len);
         if (cfg_err != AAC_DEC_OK) {
-            // Not fatal: the decoder can still sync on the bitstream itself.
-            CPS_LOG_WARN(kLogTag, "aacDecoder_ConfigRaw rejected the AudioSpecificConfig: ",
-                         HexErr(static_cast<uint32_t>(cfg_err)));
+            CPS_LOG_ERROR(kLogTag, "aacDecoder_ConfigRaw rejected the AudioSpecificConfig: ",
+                          HexErr(static_cast<uint32_t>(cfg_err)));
+            aacDecoder_Close(h);
+            return false;
         }
+    } else {
+        CPS_LOG_WARN(kLogTag, "opening a raw AAC decoder without an AudioSpecificConfig; "
+                              "decoding will fail with 0x2007 until one is supplied");
     }
 
     // Keep the decoder's native channel order and 16-bit interleaved output (fdk-aac 2.x always
@@ -138,15 +199,22 @@ bool AacAudioDecoder::Open(const AudioStreamFormat& format, const std::vector<ui
     aacDecoder_SetParam(h, AAC_PCM_MAX_OUTPUT_CHANNELS, chans);
     aacDecoder_SetParam(h, AAC_CONCEAL_METHOD, 1); // noise substitution
 
-    m_handle = h;
     m_rate = format.sample_rate;
     m_channels = format.channels;
-    m_frame_size = format.codec == AudioCodecKind::AacEld ? 480 : 1024;
-    m_scratch.resize(static_cast<size_t>(m_frame_size) * static_cast<size_t>(chans));
+    m_frame_size = format.codec == AudioCodecKind::AacEld ? 480u : 1024u;
+    // Always allocate for the largest AAC frame (2048 samples/channel) so DecodeFrame can never
+    // be handed too small a buffer, whatever the decoder decides the granule really is.
+    m_scratch.resize(kMaxAacFrameSamples * static_cast<size_t>(m_channels ? m_channels : 1));
+    if (CStreamInfo* si = aacDecoder_GetStreamInfo(h)) {
+        if (si->sampleRate > 0) m_rate = static_cast<uint32_t>(si->sampleRate);
+        if (si->numChannels > 0) m_channels = static_cast<uint8_t>(si->numChannels);
+        if (si->frameSize > 0) m_frame_size = static_cast<uint32_t>(si->frameSize);
+    }
+    m_handle = h;
 
     CPS_LOG_INFO(kLogTag, "decoder ready: ", AudioCodecKindName(format.codec), " ", m_rate, " Hz x",
                  static_cast<int>(m_channels), " frame=", m_frame_size,
-                 asc.empty() ? " (sync on bitstream)" : " (explicit AudioSpecificConfig)");
+                 asc.empty() ? " (no AudioSpecificConfig)" : " (explicit AudioSpecificConfig)");
     return true;
 }
 
@@ -196,8 +264,13 @@ bool AacAudioDecoder::Decode(const uint8_t* au, size_t au_len, DecodedAudioFrame
         if (si->frameSize > 0) m_frame_size = static_cast<uint32_t>(si->frameSize);
     }
 
-    const size_t frames = static_cast<size_t>(m_frame_size);
     const size_t chans = m_channels ? m_channels : 1;
+    // Grow the scratch if the decoder settled on a wider layout than the negotiation implied.
+    if (m_scratch.size() < static_cast<size_t>(kMaxAacFrameSamples) * chans) {
+        m_scratch.resize(static_cast<size_t>(kMaxAacFrameSamples) * chans);
+    }
+    const size_t frames = m_frame_size > m_scratch.size() / chans ? m_scratch.size() / chans
+                                                                : m_frame_size;
     out.sample_rate = m_rate;
     out.channels = m_channels;
     out.pcm.assign(m_scratch.begin(), m_scratch.begin() + frames * chans);
@@ -265,6 +338,7 @@ bool AacAudioEncoder::Open(const AudioStreamFormat& format) {
     set_param(AACENC_AFTERBURNER, 0);
     if (eld) {
         set_param(AACENC_GRANULE_LENGTH, 480);
+        set_param(AACENC_SBR_MODE, 0);
     }
 
     // The NULL-argument call performs the actual configuration.

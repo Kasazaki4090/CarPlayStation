@@ -66,6 +66,21 @@ public:
     void SetDuckingRatio(float ratio) override {
         std::lock_guard<std::mutex> lock(mutex_);
         ducking_ratio_ = ratio;
+        target_ducking_ratio_ = ratio;
+    }
+
+    void SetTargetDuckingRatio(float ratio) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        target_ducking_ratio_ = ratio;
+        if (ducking_active_) {
+            ducking_ratio_ = ratio;
+        }
+    }
+
+    void SetDuckingActive(bool active) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ducking_active_ = active;
+        ducking_ratio_ = active ? target_ducking_ratio_ : 1.0f;
     }
 
     [[nodiscard]] AudioCapabilities QueryCapabilities() const override {
@@ -106,7 +121,17 @@ public:
 
     [[nodiscard]] float GetDuckingRatio() const {
         std::lock_guard<std::mutex> lock(mutex_);
+        return target_ducking_ratio_;
+    }
+
+    [[nodiscard]] float GetEffectiveDuckingRatio() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         return ducking_ratio_;
+    }
+
+    [[nodiscard]] bool IsDuckingActive() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ducking_active_;
     }
 
     [[nodiscard]] size_t GetLaneWrittenBytes(AudioLane lane) const {
@@ -153,6 +178,8 @@ private:
     Common::AudioOutputFormat format_{};
     AudioCapabilities capabilities_{};
     float ducking_ratio_{1.0f};
+    float target_ducking_ratio_{0.25f};
+    bool ducking_active_{false};
     std::unordered_map<AudioLane, float> lane_volumes_;
     std::unordered_map<AudioLane, size_t> lane_written_bytes_;
     std::unordered_map<AudioLane, uint32_t> lane_write_calls_;

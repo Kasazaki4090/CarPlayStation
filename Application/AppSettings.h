@@ -67,7 +67,9 @@ struct AudioPreferences {
     float media_volume{1.0f};     // 0.0 to 1.0
     float navigation_volume{1.0f};// 0.0 to 1.0
     float telephony_volume{1.0f}; // 0.0 to 1.0
-    float ducking_ratio{0.25f};   // Media volume multiplier during navigation prompt
+    float ducking_ratio{0.20f};   // Media volume multiplier during navigation prompt
+                                  // (0.2 = -14 dB, the value carplayd and the
+                                  // CarPlay reference receivers use)
 };
 
 struct DevicePreferences {

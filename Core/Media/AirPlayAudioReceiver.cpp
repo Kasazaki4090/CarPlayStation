@@ -5,7 +5,9 @@
 #include "Core/Media/WasapiAudioPipeline.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <string>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -21,6 +23,15 @@ namespace {
 
 constexpr int kUdpReceiveBufferBytes = 1024 * 1024;
 constexpr size_t kMaxDatagramBytes = 2048;
+
+const char* Hex2(uint8_t v) {
+    static const char kDigits[] = "0123456789ABCDEF";
+    static char out[3];
+    out[0] = kDigits[(v >> 4) & 0xF];
+    out[1] = kDigits[v & 0xF];
+    out[2] = '\0';
+    return out;
+}
 
 // Big-endian S16 (the container CarPlay uses when a stream is negotiated
 // uncompressed) to the host-order S16 the pipeline expects.
@@ -57,7 +68,25 @@ Common::Status AirPlayAudioReceiver::SetStreamFormat(const AudioStreamFormat& fo
     m_decoder.reset();
     if (format.codec == AudioCodecKind::AacLc || format.codec == AudioCodecKind::AacEld) {
         auto decoder = std::make_unique<AacAudioDecoder>();
-        if (!decoder->Open(format)) {
+        // Raw AAC access units carry no configuration of their own, so the decoder has to be
+        // told what the stream is before its first frame.
+        const std::vector<uint8_t> asc = BuildAudioSpecificConfig(format);
+        if (asc.empty()) {
+            CPS_LOG_WARN("AudioReceiver", "lane ", AudioLaneToString(m_cfg.lane),
+                         ": no AudioSpecificConfig could be built for ",
+                         AudioCodecKindName(format.codec), " ", format.sample_rate, "Hz ",
+                         static_cast<int>(format.channels), "ch");
+        } else {
+            std::string hex;
+            hex.reserve(asc.size() * 3);
+            for (uint8_t b : asc) {
+                hex += Hex2(b);
+                hex += ' ';
+            }
+            CPS_LOG_INFO("AudioReceiver", "lane ", AudioLaneToString(m_cfg.lane),
+                         ": AudioSpecificConfig ", hex, "(", asc.size(), " bytes)");
+        }
+        if (!decoder->Open(format, asc)) {
             CPS_LOG_ERROR("AudioReceiver", "unable to open ", AudioCodecKindName(format.codec),
                           " decoder for lane ", AudioLaneToString(m_cfg.lane));
             return Common::MakeError(Common::StatusCode::Unavailable, "AAC decoder open failed");
@@ -162,6 +191,7 @@ void AirPlayAudioReceiver::UdpListenLoop() {
             continue;
         }
         m_demux.Demux(buf.data(), static_cast<size_t>(n));
+        LogStats();
     }
 #endif
 }
@@ -178,6 +208,8 @@ void AirPlayAudioReceiver::HandlePacket(const AirPlayAudioDemuxer::AudioPacket& 
         m_convertBuf.assign(pkt.au.begin(), pkt.au.end());
         SwapBytesToHostS16(reinterpret_cast<uint8_t*>(m_convertBuf.data()), m_convertBuf.size());
         const size_t frames = m_convertBuf.size() / (stream.channels ? stream.channels : 1);
+        ++m_decoded_ok;
+        m_pcm_frames += frames;
         PushPcm(m_convertBuf.data(), frames, stream.channels, stream.sample_rate);
         return;
     }
@@ -186,9 +218,22 @@ void AirPlayAudioReceiver::HandlePacket(const AirPlayAudioDemuxer::AudioPacket& 
     if (!m_decoder) {
         return;
     }
+    if (!m_au_dumped) {
+        m_au_dumped = true;
+        static constexpr size_t kDumpBytes = 16;
+        std::string hex;
+        hex.reserve(std::min(kDumpBytes, pkt.au.size()) * 3);
+        for (size_t i = 0; i < kDumpBytes && i < pkt.au.size(); ++i) {
+            hex += Hex2(pkt.au[i]);
+            hex += ' ';
+        }
+        CPS_LOG_INFO("AudioReceiver", "lane ", AudioLaneToString(m_cfg.lane), ": first access unit ",
+                     static_cast<unsigned long>(pkt.au.size()), " bytes: ", hex);
+    }
     DecodedAudioFrame frame{};
     bool concealed = false;
     if (!m_decoder->Decode(pkt.au.data(), pkt.au.size(), frame, concealed)) {
+        ++m_decode_failed;
         if (m_demux.GetStats().packetsEmitted < 5) {
             CPS_LOG_WARN("AudioReceiver", "AAC decode failed on lane ",
                          AudioLaneToString(m_cfg.lane), " (seq ", pkt.seq, ")");
@@ -198,8 +243,36 @@ void AirPlayAudioReceiver::HandlePacket(const AirPlayAudioDemuxer::AudioPacket& 
     if (frame.pcm.empty()) {
         return;
     }
+    ++m_decoded_ok;
+    m_pcm_frames += frame.pcm.size() / (frame.channels ? frame.channels : 1);
     PushPcm(frame.pcm.data(), frame.pcm.size() / (frame.channels ? frame.channels : 1),
             frame.channels, frame.sample_rate);
+}
+
+// One stats line per second while the lane is fed, mirroring the video receiver.
+// Without it a lane that receives packets but produces no sound is invisible.
+void AirPlayAudioReceiver::LogStats() {
+    const uint64_t packets = m_demux.GetStats().packetsEmitted;
+    if (packets == m_last_stats_packets) {
+        return;
+    }
+    const uint64_t now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    if (m_stats_clock_ms != 0 && now_ms - m_stats_clock_ms < 1000) {
+        return;
+    }
+    const uint64_t rendered = m_pipeline ? m_pipeline->GetRenderedSampleCount() : 0;
+    CPS_LOG_INFO("AudioReceiver", "lane ", AudioLaneToString(m_cfg.lane),
+                 ": packets=", std::to_string(packets),
+                 " decrypted_failed=", std::to_string(m_demux.GetStats().decryptErrors),
+                 " decoded=", std::to_string(m_decoded_ok),
+                 " decode_failed=", std::to_string(m_decode_failed),
+                 " pcm_frames=", std::to_string(m_pcm_frames),
+                 " pipeline_rendered_samples=", std::to_string(rendered));
+    m_stats_clock_ms = now_ms;
+    m_last_stats_packets = packets;
 }
 
 // Adapt decoded PCM (its own rate/channel count) to the container the pipeline

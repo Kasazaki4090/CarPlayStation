@@ -109,6 +109,7 @@ public:
         lane_volumes_[lane] = volume;
     }
     void SetDuckingRatio(float ratio) override { ducking_ratio_ = ratio; }
+    void SetDuckingActive(bool active) override { ducking_active_ = active; }
     [[nodiscard]] Core::Media::AudioCapabilities QueryCapabilities() const override { return {}; }
     [[nodiscard]] uint64_t GetRenderedSampleCount() const noexcept { return 0; }
     void StopLane(Core::Media::AudioLane) override {}
@@ -127,6 +128,7 @@ private:
     uint32_t reconfigure_count_{0};
     std::map<Core::Media::AudioLane, float> lane_volumes_;
     float ducking_ratio_{0.25f};
+    bool ducking_active_{false};
 };
 
 // Minimal mock input sink
