@@ -444,6 +444,81 @@ driver at all.
 
 ---
 
+## BUG-009 — Wireless CarPlay stalls at `AccessoryWiFiConfig` (0x5703)
+
+**Status:** `Fixed`
+
+**Date:** 2026-10-06
+
+### Symptom
+
+"怎么现在连不上去了？卡(0x5703)": the iPhone connects over Bluetooth, iAP2
+authentication and identify both succeed, the accessory sends
+`AccessoryWiFiConfig` (0x5703), and then nothing happens. No station join, no
+mDNS discovery, no RTSP connection.
+
+### Reproduction
+
+1. Start `CarPlayStation.exe` with the SoftAP up and the mock/hardware transport.
+2. Pair and connect an iPhone over Bluetooth.
+3. Watch the log: `0x5702` → `0x5703` repeats, then silence.
+
+### Expected
+
+After the Wi-Fi credentials are exchanged the iPhone joins the SoftAP, discovers
+the AirPlay receiver, and starts the RTSP session.
+
+### Actual
+
+The iPhone re-requests `RequestAccessoryWiFi` (0x5702) and the accessory keeps
+answering 0x5703 forever. The iPhone never advances to the CarPlay session.
+
+### Root Cause
+
+1. **The identify record never advertised the CarPlay session messages.**
+   `BuildIdentifyInfo()` only appended `wirelessCarPlayStartSession` (0x4301) and
+   `carPlayAvailability` (0x4300) to the sent/received message lists when
+   `declareWired` was true. In wireless mode the iPhone therefore never considered
+   us CarPlay-capable and never sent `0x4300`, so nothing advanced past `0x5703`.
+2. **The rest of the wireless control plane was unimplemented.** `carplayd`
+   documents the `0x5702/0x5703` exchange plus AP hosting as "Phase A2" and
+   defers the subscriptions, `0x4E0x` handling and `0x4300 → 0x4301` transition to
+   "Phase A3", which had never been written. Nothing handled `0x4E0D`
+   (wirelessCarPlayAvailability), `0x4E0E` (deviceTransportIdentifier) or `0x4300`.
+3. **No accessory long-term identity.** `0x4301` has to name the same Ed25519
+   public key that RTSP pair-setup uses. The keypair was regenerated on every
+   launch, so it could not be published in the iAP2 record.
+
+### Fix
+
+1. `Iap2MessageCatalog` now always declares `0x4301`/`0x4300` (the
+   `declareWired` parameter was removed) and gained the wire codec for the whole
+   control plane: `BuildAccessoryWiFiConfig`, the five subscription builders,
+   `BuildCarPlayStartSession`, and parsers for `0x5702`, `0x4E0D` and `0x4E0E`.
+2. New `Protocol::Iap2WirelessControlPlane` (`Core/Protocol/Iap2ControlPlane.*`)
+   holds the state machine: identify accepted → five subscriptions → `0x5703` with
+   the real SoftAP SSID/passphrase/BSSID/channel, resend on `0x5702` under a
+   pre/post-transport send cap, `0x4E0D` → availability flag, `0x4E0E` → transport
+   flag then resend, `0x4300` → `0x4301` with the RTSP port, device identifier and
+   Ed25519 public key. The class never sends; the service emits what it returns.
+3. New `Session::AccessoryIdentityStore` persists the accessory Ed25519 keypair in
+   `carplay_accessory_identity.json`, and `CarPlayCoreService` feeds it to RTSP
+   pair-setup/pair-verify and to the handler via `SetAirPlayReceiver()`.
+4. `CoreIap2PacketHandler` refreshes the SoftAP credentials/BSSID before every
+   control message and routes every unhandled control message id through the
+   control plane.
+
+### Verification
+
+1. New `ProtocolTests`: `TestBuildAccessoryWiFiConfig`, `TestSubscriptionBuilders`,
+   `TestBuildCarPlayStartSession`, `TestWirelessControlParsers` and
+   `TestWirelessControlPlane` (full identify → subscriptions → 0x5703 → 0x5702 →
+   0x4E0D → 0x4E0E → 0x4300 → 0x4301 walk, plus the send caps).
+2. All 10 test suites pass (`ctest`).
+3. On hardware the log should now show the five subscriptions after identify
+   accepted, one `0x5703` per `0x5702` up to the cap, then a station join and an
+   RTSP connection.
+
 ---
 
 ## Bug Template

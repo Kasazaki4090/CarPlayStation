@@ -120,7 +120,7 @@ Common::Status Iap2SessionManager::ExecuteSendIdentify(Iap2LinkEngine& link, con
     // Build the IdentifyInformation body. For a full retry with exclusions we'd rebuild
     // omitting specific top-level groups; for now we build the standard wireless declaration.
     Common::ByteBuffer identBody = Iap2MessageCatalog::BuildIdentifyInfo(
-        config_.accessoryName, config_.btMac, /*declareWired=*/false);
+        config_.accessoryName, config_.btMac);
 
     // In a full retry path, `excludeParams` would filter top-level TLV groups from identBody.
     (void)excludeParams;

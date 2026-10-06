@@ -163,5 +163,16 @@ inline void WriteLe32(uint8_t* ptr, uint32_t val) noexcept {
     return oss.str();
 }
 
+// Contiguous lowercase hex (no separators) — the form iAP2 and AirPlay carry
+// keys and identifiers in.
+[[nodiscard]] inline std::string ToHexCompact(ByteSpan data) {
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+    for (uint8_t b : data) {
+        oss << std::setw(2) << static_cast<int>(b);
+    }
+    return oss.str();
+}
+
 } // namespace CarPlayStation::Core::Common
 

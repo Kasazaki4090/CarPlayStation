@@ -8,10 +8,12 @@
 #include "Core/Hardware/TouchscreenCapabilities.h"
 #include "Core/Protocol/Iap2LinkEngine.h"
 #include "Core/Protocol/Iap2MessageCatalog.h"
+#include "Core/Protocol/Iap2ControlPlane.h"
 #include "Core/Session/CarPlaySessionStateMachine.h"
 #include "Core/Session/PairingStore.h"
+#include "Core/Session/AccessoryIdentityStore.h"
 #include "Core/Session/AirPlayRtspServer.h"
-#include "Core/Session/Pairing/Ed25519.h"
+#include "Core/Session/Pairing/PairSetup.h"
 #include "Core/Input/IInputEventSink.h"
 #include "Core/Media/MpvVideoPlayer.h"
 #include "Core/Media/WasapiAudioPipeline.h"
@@ -477,11 +479,7 @@ public:
                     break;
                 case Protocol::Iap2MsgId::IdentifyAccepted: // 0x1D02
                     CPS_LOG_INFO("CoreService", "iAP2 IdentifyAccepted (0x1D02) received! Wireless CarPlay confirmed by iPhone");
-                    HandleRequestAccessoryWiFi();
-                    break;
-                case Protocol::Iap2MsgId::RequestAccessoryWiFi: // 0x5702
-                    CPS_LOG_INFO("CoreService", "iAP2 RequestAccessoryWiFi (0x5702) received from iPhone — sending WiFi configuration");
-                    HandleRequestAccessoryWiFi();
+                    HandleIdentifyAccepted();
                     break;
                 case Protocol::Iap2MsgId::IdentifyRejected: { // 0x1D03
                     auto rejected = Protocol::Iap2MessageCatalog::ParseRejectedParamIds(groups);
@@ -493,8 +491,17 @@ public:
                     CPS_LOG_WARN("CoreService", "iAP2 IdentifyRejected (0x1D03) received from iPhone; rejected params: [", rejStr, "]");
                     break;
                 }
-                default:
+                default: {
+                    // Everything else on the control session belongs to the
+                    // wireless control plane: 0x5700/0x5702 (Wi-Fi credentials),
+                    // 0x4E0A/0x4E0B/0x4E0D/0x4E0E (device info + transport
+                    // notifications) and 0x4300 (CarPlay availability).
+                    auto replies = control_.OnControlMessage(msgId, groups);
+                    if (!replies.empty()) {
+                        SendAll(replies);
+                    }
                     break;
+                }
             }
         } catch (const std::exception& ex) {
             CPS_LOG_ERROR("CoreService", "Exception processing iAP2 message ", hexBuf, ": ", ex.what());
@@ -580,7 +587,7 @@ private:
     void SendIdentifyInformation() {
         if (!send_fn_) return;
         Common::ByteBuffer identBody = Protocol::Iap2MessageCatalog::BuildIdentifyInfo(
-            device_name_, bt_mac_, /*declareWired=*/false);
+            device_name_, bt_mac_);
         auto status = send_fn_(Protocol::Iap2MsgId::IdentifyInformation,
                                Common::ByteSpan(identBody.data(), identBody.size()));
         if (status.IsOk()) {
@@ -591,39 +598,92 @@ private:
         }
     }
 
-    void HandleRequestAccessoryWiFi() {
-        std::string ssid = fallback_ssid_;
-        std::string pass = fallback_passphrase_;
-        // Default to 0 (omit channel) so the iPhone scans for the SSID on its
-        // real channel. Only override with a concrete channel if we actually
-        // know one (creds.channel != 0).
-        uint8_t channel = 0;
+public:
+    // Refreshes the hotspot + AirPlay receiver parameters the control plane
+    // needs for 0x5703 and 0x4301. Safe to call repeatedly; the WinRT hotspot
+    // only reports its SSID/passphrase once it is actually up.
+    void RefreshAccessPointConfig() {
+        Protocol::Iap2WirelessControlPlane::WiFiConfig cfg;
+        cfg.ssid = fallback_ssid_;
+        cfg.passphrase = fallback_passphrase_;
+        // Default to 0 (unknown channel) so the iPhone scans for the SSID on its
+        // real channel. Only advertise a concrete channel if we actually know one.
+        cfg.channel = 0;
 
         if (wifi_mgr_) {
             auto creds = wifi_mgr_->GetCredentials();
             if (!creds.ssid.empty()) {
-                ssid = creds.ssid;
+                cfg.ssid = creds.ssid;
             }
             if (!creds.passphrase.empty()) {
-                pass = creds.passphrase;
+                cfg.passphrase = creds.passphrase;
             }
             if (creds.channel != 0) {
-                channel = static_cast<uint8_t>(creds.channel);
+                cfg.channel = static_cast<uint8_t>(creds.channel);
+            }
+            if (auto bssid = ParseMac(creds.bssid); !bssid.IsZero()) {
+                cfg.bssid = bssid.bytes;
+                cfg.hasBssid = true;
+            }
+            // gatewayIp is our own address on the hotspot subnet.
+            if (!creds.gatewayIp.empty()) {
+                session_params_.ipAddress = creds.gatewayIp;
             }
         }
+        control_.SetWiFiConfig(std::move(cfg));
+        control_.SetSessionParams(session_params_);
+    }
 
-        CPS_LOG_INFO("CoreService", "Sending iAP2 AccessoryWiFiConfig (0x5703) to iPhone: SSID='", ssid, "', channel=", std::to_string(channel));
-        auto body = Protocol::Iap2MessageCatalog::BuildAccessoryWiFiConfig(ssid, pass, 2, channel);
-        if (send_fn_) {
-            auto status = send_fn_(Protocol::Iap2MsgId::AccessoryWiFiConfig,
-                                   Common::ByteSpan(body.data(), body.size()));
-            if (status.IsOk()) {
-                CPS_LOG_INFO("CoreService", "iAP2 AccessoryWiFiConfig (0x5703) sent successfully (",
-                             std::to_string(body.size()), " bytes)");
-            } else {
-                CPS_LOG_WARN("CoreService", "Failed to send iAP2 AccessoryWiFiConfig: ", status.Message());
+    // The AirPlay receiver identity carried by 0x4301. The publicKey is the
+    // accessory's persisted Ed25519 LTPK (lowercase hex).
+    void SetAirPlayReceiver(uint32_t port, std::string deviceIdentifier, std::string publicKey) {
+        session_params_.airPlayPort = port;
+        session_params_.deviceIdentifier = std::move(deviceIdentifier);
+        session_params_.publicKey = std::move(publicKey);
+        control_.SetSessionParams(session_params_);
+    }
+
+private:
+    static Common::MacAddress ParseMac(std::string_view str) {
+        Common::MacAddress mac{};
+        unsigned int b[6] = {0};
+        if (sscanf_s(str.data(), "%02x:%02x:%02x:%02x:%02x:%02x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {
+            for (int i = 0; i < 6; ++i) {
+                mac.bytes[i] = static_cast<uint8_t>(b[i]);
             }
         }
+        return mac;
+    }
+
+    static bool IsZeroMac(const Common::MacAddress& mac) {
+        for (uint8_t b : mac.bytes) {
+            if (b != 0) return false;
+        }
+        return true;
+    }
+
+    void SendAll(const std::vector<Protocol::Iap2WirelessControlPlane::OutgoingMessage>& messages) {
+        if (!send_fn_) return;
+        for (const auto& msg : messages) {
+            auto status = send_fn_(msg.msgId, Common::ByteSpan(msg.body.data(), msg.body.size()));
+            if (status.IsError()) {
+                CPS_LOG_WARN("CoreService", "Failed to send iAP2 control message: ", status.Message());
+            }
+        }
+    }
+
+    // After IdentifyAccepted the iPhone expects the five update subscriptions and
+    // then our hotspot credentials; without that sequence it never reaches the
+    // CarPlay session (it just keeps re-sending 0x5702).
+    void HandleIdentifyAccepted() {
+        RefreshAccessPointConfig();
+        auto subscriptions = control_.OnIdentifyAccepted();
+        SendAll(subscriptions);
+
+        // The first 0x5703 is sent unsolicited: the iPhone only asks for it
+        // (0x5702) once it has already been told the hotspot exists.
+        auto first = control_.OnControlMessage(Protocol::Iap2MsgId::RequestWiFiInfo, {});
+        SendAll(first);
     }
 
     std::shared_ptr<Session::ICarPlaySession> session_;
@@ -634,6 +694,8 @@ private:
     Common::MacAddress bt_mac_{0x00, 0x1A, 0x7D, 0xDA, 0x71, 0x13};
     std::string fallback_ssid_{"CarPlayStation"};
     std::string fallback_passphrase_{"CarPlayStationSecret123"};
+    Protocol::Iap2WirelessControlPlane control_;
+    Protocol::Iap2WirelessControlPlane::SessionParams session_params_;
 };
 
 } // anonymous namespace
@@ -755,14 +817,13 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
         session_deps.pairing_store = pairing_store_;
 
         // Enable the RTSP pair-setup handshake (POST /pair-setup). The accessory's
-        // Ed25519 long-term keypair is generated on the fly; each newly-paired
-        // controller is recorded in the pairing store.
+        // Ed25519 long-term keypair is loaded from (or created in) a small file so
+        // the iPhone recognises us as the same accessory next time; each newly
+        // paired controller is recorded in the pairing store.
         {
-            auto kp = Session::Pairing::ed25519::GenerateKeyPair();
-            Session::Pairing::AccessoryIdentity identity;
+            accessory_identity_ = std::make_shared<Session::AccessoryIdentityStore>();
+            Session::Pairing::AccessoryIdentity identity = accessory_identity_->Identity().ToAccessoryIdentity();
             identity.id = std::vector<uint8_t>(local_bt_mac_str.begin(), local_bt_mac_str.end());
-            identity.ltpk = kp.pubKey;
-            identity.ltpk_secret = kp.secret;
             rtsp_server_->SetPairSetupIdentity(identity,
                 [store = pairing_store_](const uint8_t* id, size_t idLen, const uint8_t* ltpk) {
                     Session::PairedDevice dev;
@@ -1014,12 +1075,21 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
         }
         return Common::MakeError(Common::StatusCode::Unavailable, "iAP2 link unavailable");
     };
-    iap2_handler_ = std::make_shared<CoreIap2PacketHandler>(
+    auto handler = std::make_shared<CoreIap2PacketHandler>(
         session_, mfi_signer_, wifi_manager_, send_control_message,
         env_config_.identity.device_name,
         local_bt_mac,
         env_config_.network.wifi_softap_ssid,
         env_config_.network.wifi_softap_password);
+    // The 0x4301 wirelessCarPlayStartSession record has to name the same AirPlay
+    // receiver (port, device id, Ed25519 publicKey) that mDNS advertises and that
+    // RTSP pair-setup authenticates with, otherwise the iPhone drops the session.
+    if (accessory_identity_) {
+        const auto& ltpk = accessory_identity_->Identity().public_key;
+        handler->SetAirPlayReceiver(env_config_.network.rtsp_port != 0 ? env_config_.network.rtsp_port : 5000,
+                                    device_id_, Common::ToHexCompact(ltpk));
+    }
+    iap2_handler_ = handler;
     if (iap2_link_) {
         iap2_link_->SetPacketHandler(iap2_handler_.get());
     }

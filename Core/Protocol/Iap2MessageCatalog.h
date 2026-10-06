@@ -29,6 +29,7 @@ namespace Iap2MsgId {
     // CarPlay session (0x430x)
     inline constexpr uint16_t CarPlayAvailability    = 0x4300;
     inline constexpr uint16_t CarPlayStartSession    = 0x4301;
+    inline constexpr uint16_t WiredCarPlayAvailability = 0x4302;
 
     // WiFi handoff (0x570x)
     inline constexpr uint16_t RequestWiFiInfo        = 0x5700;
@@ -50,10 +51,20 @@ namespace Iap2MsgId {
     // Call control (0x415x)
     inline constexpr uint16_t StartCallState         = 0x4154;
     inline constexpr uint16_t CallStateUpdate        = 0x4155;
+    inline constexpr uint16_t StopCallState          = 0x4156;
+    inline constexpr uint16_t StartCommunications    = 0x4157;
+    inline constexpr uint16_t StopCommunications     = 0x4159;
     inline constexpr uint16_t AcceptCall             = 0x415B;
     inline constexpr uint16_t EndCall                = 0x415C;
 
+    // Power (0xAE0x)
+    inline constexpr uint16_t StartPowerUpdates      = 0xAE00;
+    inline constexpr uint16_t PowerUpdate            = 0xAE01;
+    inline constexpr uint16_t StopPowerUpdates       = 0xAE02;
+    inline constexpr uint16_t PowerSourceUpdate      = 0xAE03;
+
     // Device info (0x4E0x)
+    inline constexpr uint16_t WirelessCarPlayAvailability = 0x4E0D;
     inline constexpr uint16_t DeviceLanguageUpdate   = 0x4E0A;
     inline constexpr uint16_t DeviceTimeUpdate       = 0x4E0B;
     inline constexpr uint16_t DeviceTransportId      = 0x4E0E;
@@ -77,6 +88,7 @@ namespace Iap2IdentParam {
     inline constexpr uint16_t MessagesReceivedFromDevice    = 7;
     inline constexpr uint16_t PowerProvidingCapability      = 8;
     inline constexpr uint16_t MaxCurrentDrawn               = 9;
+    inline constexpr uint16_t ExternalAccessoryProtocol     = 10;
     inline constexpr uint16_t CurrentLanguage               = 12;
     inline constexpr uint16_t SupportedLanguage             = 13;
     inline constexpr uint16_t USBHostTransport              = 16;
@@ -139,20 +151,73 @@ public:
     [[nodiscard]] static Common::ByteBuffer GroupOne(uint16_t pid, Common::ByteSpan value);
 
     // Build the IdentifyInformation (0x1D01) body for wireless CarPlay.
+    // The record always declares the CarPlay session messages (0x4301 out,
+    // 0x4300/0x4E0D in); without them the iPhone never starts the CarPlay
+    // session handshake and the wireless control plane stalls at 0x5703.
     [[nodiscard]] static Common::ByteBuffer BuildIdentifyInfo(
         std::string_view name,
-        const Common::MacAddress& btMac,
-        bool declareWired = false);
+        const Common::MacAddress& btMac);
 
     // Build the AccessoryWiFiConfigurationInformation (0x5703) body.
+    // `bssid` may be empty; `channel` 0 means "unknown" and is still a legal value.
     [[nodiscard]] static Common::ByteBuffer BuildAccessoryWiFiConfig(
         std::string_view ssid,
         std::string_view passphrase,
         uint8_t securityType = 2,
-        uint8_t channel = 36);
+        uint8_t channel = 0,
+        Common::ByteSpan bssid = {});
 
     // Parse rejected top-level param IDs from a 0x1D03 body (after stripping the 6-byte header).
     [[nodiscard]] static std::vector<uint16_t> ParseRejectedParamIds(Common::ByteSpan body);
+
+    // --- Subscriptions the accessory sends right after IdentifyAccepted ---------
+    // Each returns the message body for the matching Start*Updates message.
+    [[nodiscard]] static Common::ByteBuffer BuildStartNowPlaying();
+    [[nodiscard]] static Common::ByteBuffer BuildStartRouteGuidance();
+    [[nodiscard]] static Common::ByteBuffer BuildStartPowerUpdates();
+    [[nodiscard]] static Common::ByteBuffer BuildStartCommunicationsUpdates();
+    [[nodiscard]] static Common::ByteBuffer BuildStartCallState();
+
+    // --- CarPlay session handshake (0x4300 -> 0x4301) -------------------------
+    struct CarPlayAvailabilityInfo {
+        bool hasWired = false;
+        bool wiredAvailable = false;
+        std::string wiredIdentifier;
+        bool hasWireless = false;
+        bool wirelessAvailable = false;
+        std::string wirelessIdentifier;
+    };
+
+    struct DeviceTransportIdentifier {
+        std::string bluetoothMac;
+        std::string usbTransportIdentifier;
+    };
+
+    struct CarPlaySessionConfig {
+        uint32_t airPlayPort = 5000;
+        // Wireless transport parameters (the hotspot we host).
+        std::string ssid;
+        std::string passphrase;
+        std::string ipAddress;  // our IPv4 on the hotspot network
+        uint8_t channel = 0;
+        uint8_t securityType = 2;
+        // Identity the iPhone pairs with over AirPlay.
+        std::string deviceIdentifier;
+        std::string publicKey;      // accessory Ed25519 LTPK, lowercase hex
+        std::string sourceVersion = "320.17";
+    };
+
+    // Build the CarPlayStartSession (0x4301) body.
+    [[nodiscard]] static Common::ByteBuffer BuildCarPlayStartSession(const CarPlaySessionConfig& cfg);
+
+    // Parse a 0x4300 body. Returns nullopt when the body is malformed.
+    [[nodiscard]] static std::optional<CarPlayAvailabilityInfo> ParseCarPlayAvailability(Common::ByteSpan body);
+
+    // Parse the availability byte of a 0x4E0D body.
+    [[nodiscard]] static std::optional<bool> ParseWirelessCarPlayAvailability(Common::ByteSpan body);
+
+    // Parse a 0x4E0E body.
+    [[nodiscard]] static std::optional<DeviceTransportIdentifier> ParseDeviceTransportIdentifier(Common::ByteSpan body);
 
     // Extract the challenge bytes from a 0xAA02 payload.
     // Payload layout: [40 40][total BE16][msg_id BE16][group_len BE16][pid BE16][challenge...]

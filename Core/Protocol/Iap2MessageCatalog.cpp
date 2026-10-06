@@ -81,8 +81,7 @@ Common::ByteBuffer Iap2MessageCatalog::GroupOne(uint16_t pid, Common::ByteSpan v
 
 Common::ByteBuffer Iap2MessageCatalog::BuildIdentifyInfo(
     std::string_view name,
-    const Common::MacAddress& btMac,
-    bool declareWired)
+    const Common::MacAddress& btMac)
 {
     namespace ip = Iap2IdentParam;
     TlvBuilder b;
@@ -121,11 +120,9 @@ Common::ByteBuffer Iap2MessageCatalog::BuildIdentifyInfo(
             0x415F,  // HoldStatusUpdate
             0x4160,  // MuteStatusUpdate
             0x4161,  // SendDTMF
-            0x5703   // AccessoryWiFiConfigurationInformation
+            0x5703,  // AccessoryWiFiConfigurationInformation
+            0x4301   // CarPlayStartSession
         };
-        if (declareWired) {
-            sentIds.push_back(0x4301); // CarPlayStartSession
-        }
         Common::ByteBuffer idBytes;
         for (auto id : sentIds) {
             idBytes.push_back(static_cast<uint8_t>((id >> 8) & 0xFF));
@@ -144,11 +141,10 @@ Common::ByteBuffer Iap2MessageCatalog::BuildIdentifyInfo(
             0x5001,  // NowPlayingUpdate
             0x5201,  // RouteGuidanceUpdate
             0x5202,  // RouteGuidanceManeuverInformation
-            0x5702   // RequestAccessoryWiFiConfigurationInformation
+            0x5702,  // RequestAccessoryWiFiConfigurationInformation
+            0x4E0D,  // WirelessCarPlayAvailabilityNotification
+            0x4300   // CarPlayAvailability
         };
-        if (declareWired) {
-            rcvIds.push_back(0x4300); // CarPlayAvailability
-        }
         Common::ByteBuffer idBytes;
         for (auto id : rcvIds) {
             idBytes.push_back(static_cast<uint8_t>((id >> 8) & 0xFF));
@@ -211,8 +207,6 @@ Common::ByteBuffer Iap2MessageCatalog::BuildIdentifyInfo(
 
         b.Bytes(ip::RouteGuidanceDisplay, inner.Span());
     }
-
-    (void)declareWired;
     return b.Data();
 }
 
@@ -220,22 +214,220 @@ Common::ByteBuffer Iap2MessageCatalog::BuildAccessoryWiFiConfig(
     std::string_view ssid,
     std::string_view passphrase,
     uint8_t securityType,
-    uint8_t channel)
+    uint8_t channel,
+    Common::ByteSpan bssid)
 {
     TlvBuilder b;
+    // Param 0: BSSID (6 bytes, optional). Omitted when unknown.
+    if (bssid.size() == 6) {
+        b.Bytes(0, bssid);
+    }
     // Param 1: WiFiSSID (utf8, required)
     b.Str(1, ssid);
     // Param 2: Passphrase (utf8, required if securityType != 0)
     if (!passphrase.empty()) {
         b.Str(2, passphrase);
     }
-    // Param 3: SecurityType (uint8 enum: 0=None, 1=WEP, 2=WPA2/WPA3 Personal)
+    // Param 3: SecurityType (uint8 enum: 0=None, 1=WEP, 2=WPA/WPA2 Personal,
+    //          3=WPA3 transition, 4=WPA3 only)
     b.U8(3, securityType);
-    // Param 4: Channel (uint8, e.g. 36 or 6)
-    if (channel != 0) {
-        b.U8(4, channel);
+    // Param 4: Channel (uint8). Always emitted; 0 means "channel selection is
+    // left to the AP" and is a value the iPhone accepts.
+    b.U8(4, channel);
+    return b.Data();
+}
+
+// ============================================================================
+// Subscription messages (sent right after IdentifyAccepted)
+// ============================================================================
+
+Common::ByteBuffer Iap2MessageCatalog::BuildStartNowPlaying() {
+    // Subscribe to the Now Playing fields we can actually render.
+    TlvBuilder b;
+    {
+        TlvBuilder track;
+        track.None(1);   // TrackTitle
+        track.None(4);   // ArtistName
+        track.None(6);   // AlbumName
+        track.None(12);  // PlaybackState
+        track.None(26);  // TrackContentIdentifier
+        b.Bytes(0, track.Span());
+        TlvBuilder playback;
+        playback.None(0);  // PlaybackQueueSupported
+        playback.None(1);  // PlaybackCtrlSupported
+        playback.None(7);  // PlaybackState
+        b.Bytes(1, playback.Span());
     }
     return b.Data();
+}
+
+Common::ByteBuffer Iap2MessageCatalog::BuildStartRouteGuidance() {
+    // Match the RouteGuidance display component declared in the identify record.
+    TlvBuilder b;
+    b.U16(0, 42);  // DisplayComponentIdentifier
+    b.None(1);     // StepByStepInstructions
+    b.None(2);     // RouteManeuverIcons
+    return b.Data();
+}
+
+Common::ByteBuffer Iap2MessageCatalog::BuildStartPowerUpdates() {
+    TlvBuilder b;
+    b.None(4);  // ReserveCurrent
+    b.None(5);  // MaxNonSiphoningCurrentExceeded
+    b.None(6);  // IsDeviceChargingViaSiphoningPower
+    return b.Data();
+}
+
+Common::ByteBuffer Iap2MessageCatalog::BuildStartCommunicationsUpdates() {
+    TlvBuilder b;
+    b.None(0);  // IncomingCall
+    b.None(4);  // CallState
+    b.None(5);  // CallStateDetailed
+    return b.Data();
+}
+
+Common::ByteBuffer Iap2MessageCatalog::BuildStartCallState() {
+    TlvBuilder b;
+    b.None(0);  // CallState
+    b.None(1);  // CallType
+    b.None(2);  // CallerID
+    b.None(3);  // UnknownCallerID
+    b.None(4);  // CallStateDetailed
+    b.None(11); // ConferenceCallStateDetailed
+    return b.Data();
+}
+
+// ============================================================================
+// CarPlay session handshake (0x4300 -> 0x4301)
+// ============================================================================
+
+Common::ByteBuffer Iap2MessageCatalog::BuildCarPlayStartSession(const CarPlaySessionConfig& cfg) {
+    TlvBuilder b;
+    // Param 1: wireless transport parameters.
+    {
+        TlvBuilder wireless;
+        wireless.Str(0, cfg.ssid);
+        wireless.Str(1, cfg.passphrase);
+        wireless.U8(2, cfg.channel);
+        if (!cfg.ipAddress.empty()) {
+            wireless.Str(3, cfg.ipAddress);
+        }
+        wireless.U8(4, cfg.securityType);
+        b.Bytes(1, wireless.Span());
+    }
+    // Param 2: AirPlay RTSP port.
+    b.U32(2, cfg.airPlayPort);
+    // Param 3: device identifier (the iPhone's Bluetooth MAC when known).
+    if (!cfg.deviceIdentifier.empty()) {
+        b.Str(3, cfg.deviceIdentifier);
+    }
+    // Param 4: accessory public key (Ed25519 LTPK, hex).
+    b.Str(4, cfg.publicKey);
+    // Param 5: source version.
+    b.Str(5, cfg.sourceVersion);
+    return b.Data();
+}
+
+namespace {
+
+// Walks the top-level TLV groups of a message body.
+struct TlvGroup {
+    uint16_t pid;
+    Common::ByteSpan value;
+};
+
+[[nodiscard]] std::vector<TlvGroup> ReadGroups(Common::ByteSpan body) {
+    std::vector<TlvGroup> groups;
+    size_t i = 0;
+    while (i + 4 <= body.size()) {
+        const uint16_t groupLen = Common::Endian::ReadBe16(body.data() + i);
+        const uint16_t pid = Common::Endian::ReadBe16(body.data() + i + 2);
+        if (groupLen < 4 || static_cast<size_t>(groupLen) > body.size() - i) {
+            break;
+        }
+        groups.push_back(TlvGroup{pid, Common::ByteSpan(body.data() + i + 4, groupLen - 4)});
+        i += groupLen;
+    }
+    return groups;
+}
+
+[[nodiscard]] std::optional<std::string> ReadString(Common::ByteSpan value) {
+    if (value.empty()) return std::nullopt;
+    size_t len = value.size();
+    if (value.back() == 0) {
+        --len;  // strip the NUL terminator
+    }
+    return std::string(reinterpret_cast<const char*>(value.data()), len);
+}
+
+[[nodiscard]] std::optional<bool> ReadAvailabilityFlag(Common::ByteSpan value) {
+    if (value.size() != 1 || value[0] > 1) return std::nullopt;
+    return value[0] == 1;
+}
+
+} // namespace
+
+std::optional<Iap2MessageCatalog::CarPlayAvailabilityInfo>
+Iap2MessageCatalog::ParseCarPlayAvailability(Common::ByteSpan body) {
+    const auto outer = ReadGroups(body);
+    if (outer.empty()) return std::nullopt;
+
+    CarPlayAvailabilityInfo info;
+    for (const auto& section : outer) {
+        const auto fields = ReadGroups(section.value);
+        CarPlayAvailabilityInfo* target = nullptr;
+        if (section.pid == 0) {
+            target = &info;
+            info.hasWired = true;
+        } else if (section.pid == 1) {
+            target = &info;
+            info.hasWireless = true;
+        } else {
+            continue;  // theme assets and anything else is not used
+        }
+
+        for (const auto& field : fields) {
+            if (field.pid == 0) {
+                const auto available = ReadAvailabilityFlag(field.value);
+                if (!available.has_value()) return std::nullopt;
+                if (section.pid == 0) info.wiredAvailable = *available;
+                else info.wirelessAvailable = *available;
+            } else if (field.pid == 1) {
+                const auto id = ReadString(field.value);
+                if (id.has_value()) {
+                    if (section.pid == 0) info.wiredIdentifier = *id;
+                    else info.wirelessIdentifier = *id;
+                }
+            }
+        }
+        (void)target;
+    }
+    return info;
+}
+
+std::optional<bool> Iap2MessageCatalog::ParseWirelessCarPlayAvailability(Common::ByteSpan body) {
+    for (const auto& group : ReadGroups(body)) {
+        if (group.pid == 0) {
+            return ReadAvailabilityFlag(group.value);
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<Iap2MessageCatalog::DeviceTransportIdentifier>
+Iap2MessageCatalog::ParseDeviceTransportIdentifier(Common::ByteSpan body) {
+    const auto groups = ReadGroups(body);
+    if (groups.empty()) return std::nullopt;
+
+    DeviceTransportIdentifier id;
+    for (const auto& group : groups) {
+        if (group.pid == 0) {
+            if (auto s = ReadString(group.value)) id.bluetoothMac = *s;
+        } else if (group.pid == 1) {
+            if (auto s = ReadString(group.value)) id.usbTransportIdentifier = *s;
+        }
+    }
+    return id;
 }
 
 std::vector<uint16_t> Iap2MessageCatalog::ParseRejectedParamIds(Common::ByteSpan body) {

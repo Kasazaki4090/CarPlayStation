@@ -21,6 +21,7 @@ namespace CarPlayStation::Core::Transport {
 namespace CarPlayStation::Core::Session {
     class AirPlayRtspServer;
     class IPairingStore;
+    class AccessoryIdentityStore;
     struct NegotiatedMediaParams;
 }
 namespace CarPlayStation::Core::Media {
@@ -139,6 +140,9 @@ private:
     // look up known devices by MAC and proactively dial a re-joining iPhone's
     // _carplay-ctrl port (fast reconnect without re-doing the BT/iAP2 flow).
     std::shared_ptr<Session::IPairingStore> pairing_store_;
+    // The accessory's long-term Ed25519 keypair, persisted so RTSP pair-verify
+    // and the iAP2 0x4301 publicKey stay stable across restarts.
+    std::shared_ptr<Session::AccessoryIdentityStore> accessory_identity_;
 
     Common::CoreEnvironmentConfig env_config_;
     // Real device identity (Bluetooth MAC string) used for the mDNS

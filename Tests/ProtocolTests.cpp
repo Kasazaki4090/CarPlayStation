@@ -1,8 +1,10 @@
 #include "Core/Protocol/Iap2LinkEngine.h"
+#include "Core/Protocol/Iap2ControlPlane.h"
 #include "Core/Protocol/Iap2MessageCatalog.h"
 #include "Core/Protocol/Iap2SessionManager.h"
 #include <cassert>
 #include <iostream>
+#include <string>
 #include <vector>
 
 using namespace CarPlayStation::Core;
@@ -302,6 +304,261 @@ void TestSessionManagerIdentifyRetry() {
 }
 
 // ============================================================================
+// Shared TLV walker for the message-body tests
+// ============================================================================
+struct TestTlvGroup {
+    uint16_t pid;
+    ByteBuffer value;
+};
+
+std::vector<TestTlvGroup> WalkGroups(ByteSpan body) {
+    std::vector<TestTlvGroup> groups;
+    size_t i = 0;
+    while (i + 4 <= body.size()) {
+        const uint16_t len = Endian::ReadBe16(body.data() + i);
+        const uint16_t pid = Endian::ReadBe16(body.data() + i + 2);
+        assert(len >= 4 && static_cast<size_t>(len) <= body.size() - i);
+        groups.push_back({pid, ByteBuffer(body.data() + i + 4, body.data() + i + len)});
+        i += len;
+    }
+    assert(i == body.size());  // every byte consumed by a well formed group
+    return groups;
+}
+
+const TestTlvGroup* FindGroup(const std::vector<TestTlvGroup>& groups, uint16_t pid) {
+    for (const auto& g : groups) {
+        if (g.pid == pid) return &g;
+    }
+    return nullptr;
+}
+
+std::string ToNulTerminatedString(ByteSpan value) {
+    size_t len = value.size();
+    if (len > 0 && value[len - 1] == 0) --len;
+    return std::string(reinterpret_cast<const char*>(value.data()), len);
+}
+
+// ============================================================================
+// Test: BuildAccessoryWiFiConfig (0x5703)
+// ============================================================================
+void TestBuildAccessoryWiFiConfig() {
+    // Without a BSSID: SSID, passphrase, security type and channel must be there,
+    // and channel 0 has to be emitted (the iPhone accepts it as "unknown").
+    auto body = Iap2MessageCatalog::BuildAccessoryWiFiConfig("CarPlay-AP", "secret123", 2, 0);
+    auto groups = WalkGroups(body);
+    assert(FindGroup(groups, 0) == nullptr);  // BSSID omitted
+    assert(ToNulTerminatedString(FindGroup(groups, 1)->value) == "CarPlay-AP");
+    assert(ToNulTerminatedString(FindGroup(groups, 2)->value) == "secret123");
+    assert(FindGroup(groups, 3)->value.size() == 1 && FindGroup(groups, 3)->value[0] == 2);
+    const auto* channel = FindGroup(groups, 4);
+    assert(channel && channel->value.size() == 1 && channel->value[0] == 0);
+
+    // With a BSSID it becomes the first group.
+    const uint8_t bssid[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+    auto withBssid = Iap2MessageCatalog::BuildAccessoryWiFiConfig("AP", "pw", 4, 36, ByteSpan(bssid, 6));
+    auto groups2 = WalkGroups(withBssid);
+    assert(groups2.front().pid == 0 && groups2.front().value.size() == 6);
+    assert(groups2.front().value == ByteBuffer(bssid, bssid + 6));
+    assert(FindGroup(groups2, 4)->value[0] == 36);
+
+    std::cout << "  [PASS] TestBuildAccessoryWiFiConfig\n";
+}
+
+// ============================================================================
+// Test: the five post-identify subscription builders
+// ============================================================================
+void TestSubscriptionBuilders() {
+    const ByteBuffer bodies[] = {
+        Iap2MessageCatalog::BuildStartNowPlaying(),
+        Iap2MessageCatalog::BuildStartRouteGuidance(),
+        Iap2MessageCatalog::BuildStartPowerUpdates(),
+        Iap2MessageCatalog::BuildStartCommunicationsUpdates(),
+        Iap2MessageCatalog::BuildStartCallState(),
+    };
+    for (const auto& body : bodies) {
+        assert(!body.empty());
+        (void)WalkGroups(body);  // asserts well formed, fully consumed framing
+    }
+
+    // NowPlaying subscribes through the nested track-attributes (0) and
+    // playback-attributes (1) groups.
+    auto nowPlaying = WalkGroups(bodies[0]);
+    assert(FindGroup(nowPlaying, 0) != nullptr);
+    assert(FindGroup(nowPlaying, 1) != nullptr);
+
+    std::cout << "  [PASS] TestSubscriptionBuilders\n";
+}
+
+// ============================================================================
+// Test: BuildCarPlayStartSession (0x4301) carries the hotspot + receiver identity
+// ============================================================================
+void TestBuildCarPlayStartSession() {
+    Iap2MessageCatalog::CarPlaySessionConfig cfg;
+    cfg.airPlayPort = 5000;
+    cfg.ssid = "CarPlay-AP";
+    cfg.passphrase = "secret123";
+    cfg.ipAddress = "192.168.137.1";
+    cfg.channel = 0;
+    cfg.securityType = 2;
+    cfg.deviceIdentifier = "11:22:33:44:55:66";
+    cfg.publicKey = std::string(64, 'a');
+    cfg.sourceVersion = "320.17";
+
+    auto groups = WalkGroups(Iap2MessageCatalog::BuildCarPlayStartSession(cfg));
+
+    const auto* wireless = FindGroup(groups, 1);
+    assert(wireless != nullptr);
+    auto inner = WalkGroups(wireless->value);
+    assert(ToNulTerminatedString(FindGroup(inner, 0)->value) == "CarPlay-AP");
+    assert(ToNulTerminatedString(FindGroup(inner, 1)->value) == "secret123");
+    assert(FindGroup(inner, 2)->value[0] == 0);
+    assert(ToNulTerminatedString(FindGroup(inner, 3)->value) == "192.168.137.1");
+    assert(FindGroup(inner, 4)->value[0] == 2);
+
+    const auto* port = FindGroup(groups, 2);
+    assert(port && port->value.size() == 4);
+    assert(Endian::ReadBe32(port->value.data()) == 5000u);
+    assert(ToNulTerminatedString(FindGroup(groups, 3)->value) == "11:22:33:44:55:66");
+    assert(ToNulTerminatedString(FindGroup(groups, 4)->value) == std::string(64, 'a'));
+    assert(ToNulTerminatedString(FindGroup(groups, 5)->value) == "320.17");
+
+    std::cout << "  [PASS] TestBuildCarPlayStartSession\n";
+}
+
+// ============================================================================
+// Test: 0x4300 / 0x4E0D / 0x4E0E parsers round-trip what we can build
+// ============================================================================
+void TestWirelessControlParsers() {
+    // 0x4300: wireless availability section (param 1) with the iPhone's identifier.
+    TlvBuilder wireless;
+    wireless.Bool(0, true);
+    wireless.Str(1, "AA-BB-CC-DD-EE-FF");
+    TlvBuilder availability;
+    availability.Bytes(1, wireless.Span());
+    auto parsed = Iap2MessageCatalog::ParseCarPlayAvailability(availability.Span());
+    assert(parsed.has_value());
+    assert(!parsed->hasWired);
+    assert(parsed->hasWireless);
+    assert(parsed->wirelessAvailable);
+    assert(parsed->wirelessIdentifier == "AA-BB-CC-DD-EE-FF");
+
+    // A malformed availability byte must be rejected rather than guessed at.
+    TlvBuilder badWireless;
+    badWireless.U8(0, 7);
+    TlvBuilder bad;
+    bad.Bytes(1, badWireless.Span());
+    assert(!Iap2MessageCatalog::ParseCarPlayAvailability(bad.Span()).has_value());
+    assert(!Iap2MessageCatalog::ParseCarPlayAvailability({}).has_value());
+
+    // 0x4E0D
+    TlvBuilder avail;
+    avail.Bool(0, true);
+    auto flag = Iap2MessageCatalog::ParseWirelessCarPlayAvailability(avail.Span());
+    assert(flag.has_value() && *flag);
+    assert(!Iap2MessageCatalog::ParseWirelessCarPlayAvailability({}).has_value());
+
+    // 0x4E0E
+    TlvBuilder transport;
+    transport.Str(0, "11:22:33:44:55:66");
+    auto ids = Iap2MessageCatalog::ParseDeviceTransportIdentifier(transport.Span());
+    assert(ids.has_value());
+    assert(ids->bluetoothMac == "11:22:33:44:55:66");
+    assert(ids->usbTransportIdentifier.empty());
+    assert(!Iap2MessageCatalog::ParseDeviceTransportIdentifier({}).has_value());
+
+    std::cout << "  [PASS] TestWirelessControlParsers\n";
+}
+
+// ============================================================================
+// Test: the wireless control plane drives subscriptions, 0x5703 and 0x4301
+// ============================================================================
+void TestWirelessControlPlane() {
+    Iap2WirelessControlPlane plane;
+
+    Iap2WirelessControlPlane::WiFiConfig wifi;
+    wifi.ssid = "CarPlay-AP";
+    wifi.passphrase = "secret123";
+    plane.SetWiFiConfig(wifi);
+
+    Iap2WirelessControlPlane::SessionParams params;
+    params.airPlayPort = 5000;
+    params.ipAddress = "192.168.137.1";
+    params.deviceIdentifier = "11:22:33:44:55:66";
+    params.publicKey = std::string(64, 'b');
+    plane.SetSessionParams(params);
+
+    // Subscriptions in the order the reference sends them, and only once.
+    auto subs = plane.OnIdentifyAccepted();
+    assert(subs.size() == 5);
+    const uint16_t expectedOrder[] = {
+        Iap2MsgId::StartNowPlaying, Iap2MsgId::StartRouteGuidance, Iap2MsgId::StartPowerUpdates,
+        Iap2MsgId::StartCommunications, Iap2MsgId::StartCallState,
+    };
+    for (size_t i = 0; i < subs.size(); ++i) {
+        assert(subs[i].msgId == expectedOrder[i]);
+        assert(!subs[i].body.empty());
+    }
+    assert(plane.OnIdentifyAccepted().empty());
+    assert(plane.SubscriptionsSent());
+
+    // 0x5702 resends 0x5703 up to the pre-transport cap of five.
+    for (int i = 1; i <= Iap2WirelessControlPlane::kMaxPreTransportWiFiSends; ++i) {
+        auto replies = plane.OnControlMessage(Iap2MsgId::RequestAccessoryWiFi, {});
+        assert(replies.size() == 1);
+        assert(replies[0].msgId == Iap2MsgId::AccessoryWiFiConfig);
+        assert(plane.WiFiConfigSends() == i);
+    }
+    assert(plane.OnControlMessage(Iap2MsgId::RequestAccessoryWiFi, {}).empty());
+    assert(plane.WiFiConfigSends() == Iap2WirelessControlPlane::kMaxPreTransportWiFiSends);
+
+    // 0x4E0D records availability and answers nothing.
+    TlvBuilder avail;
+    avail.Bool(0, true);
+    assert(plane.OnControlMessage(Iap2MsgId::WirelessCarPlayAvailability, avail.Span()).empty());
+    assert(plane.WirelessCarPlayAvailable());
+
+    // 0x4E0E switches to the (smaller) post-transport budget.
+    TlvBuilder transport;
+    transport.Str(0, "AA-BB-CC-DD-EE-FF");
+    auto afterTransport = plane.OnControlMessage(Iap2MsgId::DeviceTransportId, transport.Span());
+    assert(afterTransport.size() == 1);
+    assert(afterTransport[0].msgId == Iap2MsgId::AccessoryWiFiConfig);
+    assert(plane.TransportNotified());
+    assert(plane.OnControlMessage(Iap2MsgId::RequestAccessoryWiFi, {}).size() == 1);
+    assert(plane.OnControlMessage(Iap2MsgId::RequestAccessoryWiFi, {}).empty());
+    assert(plane.WiFiConfigSends() == Iap2WirelessControlPlane::kMaxPreTransportWiFiSends
+                                    + Iap2WirelessControlPlane::kMaxPostTransportWiFiSends);
+
+    // 0x4300 is answered with 0x4301 carrying our hotspot and receiver identity.
+    TlvBuilder wirelessSection;
+    wirelessSection.Bool(0, true);
+    wirelessSection.Str(1, "AA-BB-CC-DD-EE-FF");
+    TlvBuilder availability2;
+    availability2.Bytes(1, wirelessSection.Span());
+    auto start = plane.OnControlMessage(Iap2MsgId::CarPlayAvailability, availability2.Span());
+    assert(start.size() == 1);
+    assert(start[0].msgId == Iap2MsgId::CarPlayStartSession);
+    assert(plane.CarPlayStartSessionSends() == 1);
+
+    auto groups = WalkGroups(start[0].body);
+    const auto* wireless = FindGroup(groups, 1);
+    assert(wireless != nullptr);
+    auto inner = WalkGroups(wireless->value);
+    assert(ToNulTerminatedString(FindGroup(inner, 0)->value) == "CarPlay-AP");
+    assert(ToNulTerminatedString(FindGroup(groups, 4)->value) == std::string(64, 'b'));
+
+    // Without a public key we must not emit a half-built 0x4301.
+    Iap2WirelessControlPlane keyless;
+    keyless.SetWiFiConfig(wifi);
+    Iap2WirelessControlPlane::SessionParams noKey;
+    noKey.publicKey.clear();
+    keyless.SetSessionParams(noKey);
+    assert(keyless.OnControlMessage(Iap2MsgId::CarPlayAvailability, availability2.Span()).empty());
+
+    std::cout << "  [PASS] TestWirelessControlPlane\n";
+}
+
+// ============================================================================
 // Main test runner
 // ============================================================================
 int main() {
@@ -318,6 +575,11 @@ int main() {
     TestSessionManagerHappyPath();
     TestSessionManagerOutOfOrder();
     TestSessionManagerIdentifyRetry();
+    TestBuildAccessoryWiFiConfig();
+    TestSubscriptionBuilders();
+    TestBuildCarPlayStartSession();
+    TestWirelessControlParsers();
+    TestWirelessControlPlane();
 
     std::cout << "All protocol tests passed.\n";
     return 0;
