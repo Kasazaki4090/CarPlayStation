@@ -273,8 +273,15 @@ Common::Result<void> Ch341I2cAdapter::PulseReset(uint8_t pin_index,
     }
 
 #ifdef _WIN32
-    if (!driver_->IsValid() || !driver_->fn_set_output_) {
-        return Common::Result<void>::Ok();
+    if (!driver_->IsValid()) {
+        return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "CH341 driver unavailable.");
+    }
+    // Reporting success here would let the caller log a reset pulse that never
+    // happened, which is exactly the wrong thing to conclude from when the chip
+    // is silent.
+    if (!driver_->fn_set_output_) {
+        return Common::Status::Error(Common::StatusCode::NotSupported,
+            "Loaded CH341 driver exports no CH341SetOutput; cannot drive a reset GPIO.");
     }
 
     ULONG pin_mask = 1UL << (pin_index & 0x07);

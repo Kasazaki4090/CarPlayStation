@@ -63,11 +63,23 @@ public:
     }
 
     // Probe if an I2C device acknowledges its 7-bit address.
+    //
+    // A zero-length write cannot answer this question: the USB bridge drivers
+    // (CH341StreamI2C and friends) return success even when the slave NACKed
+    // the address, so every address on the bus would look present. Ask for a
+    // couple of bytes instead — an addressed slave drives the data lines, and a
+    // slave that never answered leaves the bridge's read buffer at the idle
+    // level (all 0xFF).
     virtual bool ProbeDevice(uint8_t address7Bit) {
         if (!IsOpen()) return false;
-        // Probe by performing a 0-byte write transaction or querying address ack
-        auto res = Write(address7Bit, {});
-        return res.IsOk();
+        auto res = Read(address7Bit, 2);
+        if (res.IsError()) return false;
+        const auto& data = res.Value();
+        if (data.empty()) return false;
+        for (uint8_t byte : data) {
+            if (byte != 0xFF) return true;
+        }
+        return false;
     }
 
     // Get adapter name / driver description for diagnostics.

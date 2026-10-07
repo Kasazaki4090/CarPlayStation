@@ -251,8 +251,12 @@ Common::Result<void> Ch347I2cAdapter::PulseReset(uint8_t pin_index,
     }
 
 #ifdef _WIN32
-    if (!driver_->IsValid() || !driver_->fn_gpio_set_) {
-        return Common::Result<void>::Ok();
+    if (!driver_ || !driver_->IsValid()) {
+        return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "CH347 driver not loaded.");
+    }
+    if (!driver_->fn_gpio_set_) {
+        return Common::Status::Error(Common::StatusCode::NotSupported,
+            "Loaded CH347 driver exports no GPIO set function; cannot drive a reset GPIO.");
     }
 
     UCHAR pin_mask = static_cast<UCHAR>(1 << (pin_index & 0x07));

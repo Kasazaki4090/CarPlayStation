@@ -4,6 +4,8 @@
 #include "Core/Common/Logging.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <thread>
 
 namespace CarPlayStation::Application {
 
@@ -392,6 +394,43 @@ void ApplicationService::ApplyMfiSigner(const AppSettings& settings) {
     }
     Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Info, "AppService",
         "MFi signer active: ", MfiSignerFactory::Describe(settings.mfi));
+
+    // A hardware backend is only reachable through a phone's 0xAA00 request, so
+    // a dead bus looks identical to an unused feature. Probe it once here.
+    if (settings.mfi.backend_type == MFiBackendType::HardwareI2C) {
+        ProbeMfiHardwareAsync(signer);
+    }
+}
+
+void ApplicationService::ProbeMfiHardwareAsync(
+        const std::shared_ptr<Core::Hardware::IMfiSigner>& signer) {
+    // Detached on purpose: the warm-up and bus sweep can take a couple of
+    // seconds and must never block the UI thread or session startup. The signer
+    // is held by the Core service for the lifetime of the process, and the
+    // logger is a singleton, so the capture stays valid.
+    std::thread([signer]() {
+        auto info = signer->GetChipInfo();
+        if (!info.present) {
+            Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Warn, "AppService",
+                "MFi self-probe: no coprocessor answered. Check power, SDA/SCL, "
+                "pull-ups and the slave address before blaming the protocol stack.");
+            return;
+        }
+        char id[16];
+        std::snprintf(id, sizeof(id), "0x%08X", info.chip_id);
+        Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Info, "AppService",
+            "MFi self-probe: coprocessor present, chip_id=", id,
+            " firmware=", info.firmware_version);
+        auto cert = signer->FetchCertificate();
+        if (cert.IsError()) {
+            Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Warn, "AppService",
+                "MFi self-probe: chip answered but certificate read failed: ",
+                cert.Error().Message());
+            return;
+        }
+        Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Info, "AppService",
+            "MFi self-probe: certificate read, ", cert.Value().size(), " bytes.");
+    }).detach();
 }
 
 } // namespace CarPlayStation::Application

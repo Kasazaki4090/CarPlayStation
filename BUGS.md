@@ -764,6 +764,77 @@ That produced two more findings.
 
 ---
 
+## BUG-012 — Bus scan reported every address as present; reset pulse could be a silent no-op
+
+**Status:** `Fix applied, awaiting hardware retest`
+
+**Date:** 2026-10-07
+
+### Symptom
+
+BUG-011 added a bus sweep so a failed warm-up could tell "wrong address" from
+"nothing on the bus". Reading the adapter layer showed that sweep could not be
+trusted, and that the log line claiming a reset pulse had been issued did not
+prove one had been.
+
+### Root Cause
+
+1. **`II2cAdapter::ProbeDevice()` was NACK-blind.** It wrote a zero-length
+   payload and trusted the return value, but `CH341StreamI2C` returns TRUE when
+   the slave NACKs the address. Every one of the 112 swept addresses would have
+   been logged as answering, so the diagnostic could never distinguish the two
+   cases it exists for.
+2. **`PulseReset()` returned success when it could not do anything.**
+   `Ch341Driver::IsValid()` only requires open/close/stream-I2C; if the loaded
+   DLL exports no `CH341SetOutput` (same shape in CH347 via the GPIO set
+   function), `PulseReset()` fell through to `Ok()` and the log said
+   `Pulsed coprocessor reset line (GPIO0)`. A reset pulse that never happened is
+   exactly the wrong thing to conclude from when the chip is silent.
+3. **`GetChipInfo()` read the protocol register with a raw adapter
+   transaction**, bypassing the idle-fill rejection added in BUG-011, so an
+   all-`0xFF` NACK would have been reported as a present chip with
+   `chip_id=0x000200FF`.
+4. **Nothing ever exercised the chip without a phone.** `GetChipInfo()` had no
+   caller, so a dead bus was only visible as three failed `0xAA00` attempts five
+   seconds apart.
+
+### Fix
+
+1. `II2cAdapter::ProbeDevice()` now probes with a short read and answers true
+   only if at least one byte is not the `0xFF` idle fill. A zero-length write
+   cannot detect a NACK on these bridges, which is noted in the comment.
+2. `Ch341I2cAdapter::PulseReset()` and `Ch347I2cAdapter::PulseReset()` return
+   `DeviceUnavailable` when the driver is not loaded and `NotSupported` when the
+   loaded driver exports no GPIO output function, instead of `Ok()`.
+   `WarmUpLocked()` only logs the pulse when the call actually succeeded, and
+   otherwise logs why no pulse was possible.
+3. `GetChipInfo()` reads register `0x02` through `ReadRegisterOnce()`, so the
+   idle-fill check applies and `present` stays false on a NACK.
+4. `ApplicationService::ApplyMfiSigner()` now starts a detached self-probe for
+   `HardwareI2C`: `GetChipInfo()` followed by `FetchCertificate()`, logging
+   either the chip id and certificate size or an explicit "no coprocessor
+   answered — check power, SDA/SCL, pull-ups and the slave address". It runs off
+   the calling thread because the warm-up and bus sweep can take a couple of
+   seconds.
+
+### Verification
+
+1. Clean rebuild, no new warnings; all 10 test suites pass. `MockI2cAdapter`
+   returns "Address NACK" from `Transaction()` for the wrong address and never
+   returns an idle fill, so the new probe and the new `GetChipInfo()` path are
+   covered by `HardwareTests`.
+2. On hardware, a failed warm-up must now log either
+   `slave(s) answered at 0x…` (the INI address is wrong) or that nothing
+   answered anywhere (power, reset, wiring) — never all 112 addresses.
+
+### Related
+
+- GitHub Issue:
+- Commit: pending
+- Related Bug: BUG-011 (coprocessor never answered)
+
+---
+
 ## Bug Template
 
 Copy the following template when adding a new bug:

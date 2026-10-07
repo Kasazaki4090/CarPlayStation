@@ -68,6 +68,11 @@ private:
     // HardwareI2C) is actually used for MFi authentication.
     void ApplyMfiSigner(const AppSettings& settings);
 
+    // Ask a hardware-backed signer once whether its coprocessor answers on the
+    // bus, so a wiring/address problem is visible at startup instead of only
+    // after a phone has failed to authenticate. Runs off the calling thread.
+    void ProbeMfiHardwareAsync(const std::shared_ptr<Core::Hardware::IMfiSigner>& signer);
+
     std::shared_ptr<Core::Service::ICarPlayCoreApi> core_api_;
     AppUiState ui_state_;
     AppSettings current_settings_;

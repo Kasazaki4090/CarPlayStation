@@ -137,6 +137,11 @@ bool I2cMfiSigner::WarmUpLocked() const {
             if (pulse.IsOk()) {
                 CPS_LOG_INFO("I2cMfiSigner", "Pulsed coprocessor reset line (GPIO",
                              static_cast<int>(options_.reset_gpio_pin), ")");
+            } else {
+                // Say so when no pulse was possible: without this the log would
+                // imply the reset line was driven and the chip still stayed quiet.
+                CPS_LOG_WARN("I2cMfiSigner", "Could not pulse a reset line: ",
+                             pulse.Error().Message());
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -416,10 +421,11 @@ MFiChipInfo I2cMfiSigner::GetChipInfo() const noexcept {
     }
     WarmUpLocked();
 
-    // Read major protocol version from 0x02
-    uint8_t reg = REG_PROTOCOL_MAJOR;
-    auto res = adapter_->Transaction(slave_address_, Common::ByteSpan(&reg, 1), 1);
-    if (res.IsOk() && !res.Value().empty()) {
+    // Read major protocol version from 0x02. ReadRegisterOnce is used rather
+    // than a raw transaction so a NACK's 0xFF idle fill cannot be mistaken for
+    // a chip that is present.
+    auto res = ReadRegisterOnce(REG_PROTOCOL_MAJOR, 1);
+    if (res.IsOk() && !res.Value().empty() && !IsBusIdleFill(res.Value())) {
         uint8_t major = res.Value()[0];
         info.present = true;
         info.chip_id = 0x00020000 | major;
