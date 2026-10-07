@@ -966,12 +966,8 @@ required hand-editing a config file.
    `host:port`, the port as `1..65535`, and rejects a host containing a URL scheme.
 4. **The wizard offers one network option, not two.** The TCP signing daemon and the Remote MFi HTTP service are the
    same thing from the user's point of view — a signing service reached over the network — so the first-run wizard
-   shows a single "网络 MFi 认证服务" radio with one shared address/port/token field set and a nested protocol
-   sub-selector (HTTP JSON API by default, binary TCP daemon still selectable). The sub-selector only decides which
-   `MFiBackendType` the wizard writes back (`RemoteHttp` or `NetworkDaemon`) and which settings struct the typed
-   endpoint is persisted into; the enum, factory, `.ini` keys and tests are unchanged. Switching protocol refills an
-   empty or default port field with that protocol's default (8972 / 9000) and hides the bearer-token field, which the
-   binary protocol has no use for.
+   shows a single "网络 MFi 认证服务" radio with one shared address/port/token field set. *(Amended below: the
+   protocol sub-selector that briefly accompanied this, and the TCP backend itself, have since been removed.)*
 5. **`protocolMajor` is mapped onto the existing chip-identity fields.** `MFiChipInfo` has no protocol field, and
    `Core/Session/Pairing/AuthSetup.h` selects the v2 vs v3 digest from `chip_id` bits 16-23 or from substrings of
    `firmware_version`. So `protocolMajor:2` becomes `chip_id = 0x00020000` / `firmware_version = "remote-mfi 2.0"`,
@@ -987,9 +983,10 @@ required hand-editing a config file.
 
 ### Alternatives
 
-- **An HTTP mode inside `NetworkMfiClient`**: rejected. The daemon client speaks a binary framed protocol
+- **An HTTP mode inside `NetworkMfiClient`**: rejected. The daemon client spoke a binary framed protocol
   (`op | length BE | payload`) with its own framing and framing-level errors; the HTTP service has neither frames nor
-  a persistent connection. Sharing one class would mean two transport state machines in one socket loop.
+  a persistent connection. Sharing one class would have meant two transport state machines in one socket loop.
+  (Moot now — see the amendment: the daemon client was deleted instead.)
 - **`WinHTTP` / `winhttp.lib`**: rejected. It would add a link dependency and a second HTTP stack for four GETs and
   two POSTs, and the response handling (bounded reads, flat error bodies) is small enough to keep explicit.
 - **TLS via Schannel**: deferred, not rejected. The reference service listens plaintext by default and is expected on
@@ -1014,7 +1011,7 @@ the backend choice stays a factory decision (`Application::MfiSignerFactory`) ex
 Positive:
 - A session can authenticate without any USB/I2C hardware in the loop, which unblocks every iAP2 `StartAuth` test on
   this machine.
-- Host, port and token are configured in the GUI, so the daemon and remote backends are usable without editing
+- Host, port and token are configured in the GUI, so the remote backend is usable without editing
   `carplay_config.ini` by hand.
 - The backend is covered by unit tests against an in-process HTTP stub server
   (`TestRemoteMfiHttpClientSuccess`, `TestRemoteMfiHttpClientErrors`, `TestRemoteMfiHttpClientHealthAndReset`).
@@ -1028,6 +1025,27 @@ Negative / limitations:
 - `MFiChipInfo::chip_id` for this backend is synthetic. Anything that expects a real coprocessor serial number will
   have to be told that the remote backend cannot provide one.
 - The I2C hardware path is still unresolved and remains stashed; choosing `HardwareI2C` on this machine still fails.
+
+### Amendment (2026-10-08): the TCP signing daemon is removed
+
+Item 4 above was implemented as a single network radio with a nested HTTP/TCP protocol sub-selector, which kept both
+`MFiBackendType::NetworkDaemon` and `MFiBackendType::RemoteHttp` alive behind one UI. That turned out to be two
+options for one thing the user actually has: only the HTTP service exists. `NetworkMfiClient` was our own invention
+from `DEC-003` — a binary framed protocol (`op | length BE | payload`, ops `0x01`/`0x02`, status-byte replies, default
+port 9000) with no server implementation anywhere in or outside this repository, while the HTTP JSON API on port 8972
+is specified, documented and already served by the reference project. So the TCP backend was deleted outright:
+
+- `Core/Hardware/NetworkMfiClient.{h,cpp}` deleted, along with its source entry in `Core/CMakeLists.txt`, its three
+  unit tests and the in-process `MockTcpMfiServer` in `Tests/HardwareTests.cpp`.
+- `MFiBackendType::NetworkDaemon` (= 1) removed from the enum. The numeric value is left as a hole so existing
+  `.ini` files keep their meaning for the other values; `BackendType=1` is migrated to `RemoteHttp` on load.
+- `MFiPreferences::daemon_endpoint` and the `DaemonHost`/`DaemonPort` `.ini` keys are gone. They are deliberately not
+  reused as a fallback for the HTTP endpoint: the old default port (9000) is not the service's port (8972), and a
+  half-migrated endpoint is worse than an empty one.
+- The wizard's network section is now one radio and one set of address/port/token fields, prefilled with port 8972.
+
+`DEC-003`'s three-way backend choice (physical chip / local files / network service) still stands; only the wire
+protocol of the third option is now the HTTP JSON API rather than a bespoke TCP framing.
 
 ### Related
 

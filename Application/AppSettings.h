@@ -83,10 +83,12 @@ struct DevicePreferences {
 // implementation from these settings — Core never hardcodes a daemon address or file path.
 enum class MFiBackendType : uint8_t {
     LocalFile = 0,     // Pure offline software signer using imported cert & private key (DEC-006)
-    NetworkDaemon = 1, // Remote/Local TCP daemon at daemon_endpoint (DEC-003)
     HardwareI2C = 2,   // Physical USB-to-I2C bridge (CH341) driving an MFi coprocessor (DEC-003)
     RemoteHttp = 3     // Remote MFi service over HTTP (see Reference/remote-mfi-for-xcertplay)
 };
+// Value 1 was the binary-framed TCP signing daemon (DEC-003). It is gone: the HTTP
+// JSON service covers the same use case and is far more general. Configs that still
+// say BackendType=1 are migrated to RemoteHttp when the .ini is read.
 
 enum class HardwareI2cDriverType : uint8_t {
     Auto = 0,    // Probe available drivers in order: CH341 -> CH347 -> FTDI
@@ -121,10 +123,7 @@ struct MFiPreferences {
     std::string certificate_path{"certs/certificate.p7b"};
     std::string private_key_path{"certs/identity.pk8"};
 
-    // For NetworkDaemon backend (DEC-003):
-    Core::Common::IpEndpoint daemon_endpoint{"127.0.0.1", 9000};
-
-    // For RemoteHttp backend:
+    // For RemoteHttp backend (the network signing service):
     RemoteMfiPreferences remote_mfi{};
 
     // For HardwareI2C backend (DEC-003, DEC-007):

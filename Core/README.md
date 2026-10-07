@@ -49,7 +49,7 @@ Drawing inspiration from the OSI 7-layer model and real-world CarPlay receiver p
 ║  └──────────────────────────────────┬───────────────────────────────┘  ║
 ║                                     │                                  ║
 ║  ┌──────────────────────────────────▼───────────────────────────────┐  ║
-║  │ Layer 1: Hardware & MFi (CH341 I2C Driver, Configurable Daemon)  │  ║
+║  │ Layer 1: Hardware & MFi (CH341 I2C Driver, Remote MFi HTTP)      │  ║
 ║  └──────────────────────────────────────────────────────────────────┘  ║
 ╚════════════════════════════════════════════════════════════════════════╝
                                     │
@@ -65,7 +65,7 @@ Drawing inspiration from the OSI 7-layer model and real-world CarPlay receiver p
 
 | Layer | Directory | Primary Responsibilities | Key Interfaces & Components |
 | :--- | :--- | :--- | :--- |
-| **Layer 1** | [`Hardware/`](file:///d:/CarPlayStation/Core/Hardware/README.md) | Hardware Abstraction & MFi Bridges | `IMfiSigner` (CH341 USB-to-I2C driver, Configurable MFi Daemon client) |
+| **Layer 1** | [`Hardware/`](file:///d:/CarPlayStation/Core/Hardware/README.md) | Hardware Abstraction & MFi Bridges | `IMfiSigner` (CH341 USB-to-I2C driver, Remote MFi HTTP client) |
 | **Layer 2** | [`Transport/`](file:///d:/CarPlayStation/Core/Transport/README.md) | Link Layer & Wireless Channels | `BtRfcommTransport`, `WifiSoftApManager`, `MdnsAdvertiser` |
 | **Layer 3** | [`Protocol/`](file:///d:/CarPlayStation/Core/Protocol/README.md) | iAP2 Framing & Message Codecs | `Iap2LinkEngine` (`0xFF 0x5A`), `Iap2SessionManager`, Message Catalog |
 | **Layer 4** | [`Session/`](file:///d:/CarPlayStation/Core/Session/README.md) | CarPlay & AirPlay Orchestration | `CarPlaySessionStateMachine`, `AirPlayRtspServer`, `PairingStore` |

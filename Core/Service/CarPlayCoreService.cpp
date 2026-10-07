@@ -1167,9 +1167,8 @@ Common::Status CarPlayCoreService::UpdateEnvironment(const Common::CoreEnvironme
 
     env_config_ = env;
 
-    // Hot-update the MFi signer endpoint if it's a NetworkMfiClient.
-    // (The Application layer is responsible for constructing the correct
-    //  signer type; the facade just stores the config.)
+    // The Application layer constructs the correct signer type; the facade only
+    // stores the environment config, so no signer endpoint is updated here.
 
     Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
         "Environment updated: ", env.identity.device_name);

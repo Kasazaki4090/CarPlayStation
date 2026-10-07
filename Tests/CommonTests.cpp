@@ -107,8 +107,9 @@ void TestConfigSeparation() {
     using namespace CarPlayStation::Application;
     AppSettings settings;
     assert(settings.mfi.backend_type != MFiBackendType::HardwareI2C); // Default to local file/network per DEC-003/DEC-006
-    settings.mfi.daemon_endpoint = IpEndpoint{"192.168.2.50", 9999};
-    assert(settings.mfi.daemon_endpoint.ToString() == "192.168.2.50:9999");
+    settings.mfi.remote_mfi.host = "192.168.2.50";
+    settings.mfi.remote_mfi.port = 9999;
+    assert(settings.mfi.remote_mfi.host == "192.168.2.50" && settings.mfi.remote_mfi.port == 9999);
 
     settings.video.resolution_preset = VideoResolutionPreset::Res720P;
     auto [w720, h720] = settings.video.GetEffectiveDimensions();

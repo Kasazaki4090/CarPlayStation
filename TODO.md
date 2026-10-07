@@ -135,7 +135,8 @@ Project-wide review completed on 2026-10-01:
   P0 project focus**. Wired CarPlay is deprioritized and deferred to external hardware bridge solutions.
 - MFi Authentication Strategy (`DEC-003`): Pluggable signer interfaces supporting USB-to-I2C chips (CH341, etc.)
   for local physical chips, and configurable network proxy / daemon socket endpoint (defaulting to `127.0.0.1:9000`)
-  for remote/emulated signing.
+  for remote/emulated signing. *(The network option is now the Remote MFi HTTP JSON API on port 8972; the TCP daemon
+  endpoint was retired by `DEC-011`.)*
 - Input Strategy (`DEC-003`): Mouse is mapped directly to touch events (left-click tap/drag, right-click back);
   keyboard is mapped to vehicle rotary knob / directional controls (arrow keys, Enter, Backspace/Esc, hotkeys).
 
@@ -144,7 +145,7 @@ Tasks below reflect the initial master planning. Remaining items have been conso
 ### 1. Architectural and strategic decisions
 
 - [x] P0 [Concluded: DEC-003] **Wired xDCI vs. Wireless Priority**: Native PC USB device mode is unviable due to Intel xDCI BIOS/EC constraints. **Wireless CarPlay is the primary, mandatory milestone (P0)**.
-- [x] P0 [Concluded: DEC-003] **MFi Authentication Interface**: Adopt pluggable signer backends supporting both local USB-to-I2C bridge chips (CH341 / CP2112 / FT232H) and configurable network daemon / proxy endpoint (default `127.0.0.1:9000`).
+- [x] P0 [Concluded: DEC-003] **MFi Authentication Interface**: Adopt pluggable signer backends supporting both local USB-to-I2C bridge chips (CH341 / CP2112 / FT232H) and configurable network daemon / proxy endpoint (default `127.0.0.1:9000`). *(Network option superseded by the Remote MFi HTTP API, `DEC-011`.)*
 - [x] P0 [Concluded: DEC-003] **Input Modality Translation**: Mouse maps to Touch (tap, drag, right-click back); Keyboard maps to vehicle rotary/directional controls (arrow keys, Enter, Backspace/Esc, media/Siri hotkeys).
 - [ ] P2 [Research] If wired CarPlay support is required later, evaluate external bridge MCU/SBC hardware (Pi Zero, RP2350, ESP32-S3 OTG, Carlinkit-style dongle) attached over USB/serial/Ethernet.
 
@@ -163,7 +164,7 @@ Tasks below reflect the initial master planning. Remaining items have been conso
 - [x] P0 [Concluded: Partition 3] Implement iAP2 framing and serialization/deserialization for the control and data links, with round-trip tests built from recorded frames. (Iap2LinkEngine + TlvBuilder)
 - [x] P0 [Concluded: Partition 3] Implement accessory identification and wireless session start/stop (handling Wi-Fi/BT declare flags). (BuildIdentifyInfo + Iap2SessionManager)
 - [x] P0 Implement pluggable MFi authentication backend for USB-to-I2C bridge chips (CH341, CH347, FTDI, etc.) for local hardware MFi coprocessors (DEC-003, DEC-007).
-- [x] P0 Implement pluggable MFi authentication backend over configurable network daemon / proxy endpoint (`127.0.0.1:9000` / TCP RPC) for remote signing / daemon services (DEC-003, DEC-005).
+- [x] P0 Implement pluggable MFi authentication backend over configurable network daemon / proxy endpoint (`127.0.0.1:9000` / TCP RPC) for remote signing / daemon services (DEC-003, DEC-005). *(Implemented, then removed by DEC-011: no server exists for that protocol; the HTTP JSON API replaced it.)*
 - [x] P0 Implement pluggable MFi authentication backend over the Remote MFi HTTP JSON API, with the host, port and bearer token entered in the setup wizard (DEC-011). (RemoteMfiHttpClient)
 - [x] P1 [Concluded: Partition 3] Implement the `IdentificationRejected` retry behaviour (carplayd doc 23) once a reject can be reproduced. (First-reject → RetryIdentify, second-reject → Abort)
 - [ ] P1 Establish a single source of truth for message ids, directions, parameters and enums, mirroring `crates/iap2-core/src/spec.rs`, and a generator or checked-in table derived from Apple's authoritative spec.

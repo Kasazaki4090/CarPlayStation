@@ -16,9 +16,6 @@ This module is located at the lowest layer of Core (Layer 1). It directly interf
   - Encapsulates register interaction (0x02, 0x05, 0x10, 0x11, 0x12, 0x20, 0x21, 0x30, 0x31..), windowed certificate retrieval, challenge signing, and exponential retry recovery.
 - **Local File MFi Signer (`FileMfiSigner`)**:
   - Pure offline software signer (DEC-006) loading external X.509/PKCS#7 certificate and PKCS#8 private key, computing ECDSA P-256 signatures via native Windows CNG (`bcrypt.dll`).
-- **MFi Network Daemon Client (`NetworkMfiClient`)**:
-  - Configurable TCP client connecting to a remote/local MFi signing daemon/proxy address (configured and injected by the Application layer via `Application::MFiPreferences::daemon_endpoint`; Core/Lib does not hardcode daemon addresses).
-  - Dispatches MFi challenges (Challenge / Digest) to the signing daemon service and retrieves certificates and cryptographic signatures.
 - **Remote MFi HTTP Client (`RemoteMfiHttpClient`)**:
   - Implements `IMfiSigner` against the Remote MFi HTTP JSON API (DEC-011): `GET /mfi/certificate`, `POST /mfi/sign`, `POST /mfi/reset`, `GET /healthz`.
   - Raw Winsock HTTP/1.1 with `Connection: close`; no TLS (set `use_tls` and every call returns `NotSupported`), no third-party HTTP library.

@@ -1,7 +1,6 @@
 #include "Application/MfiSignerFactory.h"
 
 #include "Core/Hardware/FileMfiSigner.h"
-#include "Core/Hardware/NetworkMfiClient.h"
 #include "Core/Hardware/RemoteMfiHttpClient.h"
 #include "Core/Hardware/I2cMfiSigner.h"
 #include "Core/Hardware/Ch341I2cAdapter.h"
@@ -65,14 +64,9 @@ std::shared_ptr<Core::Hardware::IMfiSigner> MfiSignerFactory::Build(const MFiPre
                 prefs.certificate_path, prefs.private_key_path);
         }
 
-        case MFiBackendType::NetworkDaemon: {
-            // TCP signing daemon (DEC-003).
-            return std::make_shared<NetworkMfiClient>(prefs.daemon_endpoint);
-        }
-
         case MFiBackendType::RemoteHttp: {
-            // Remote MFi service over HTTP. The service owns the coprocessor;
-            // we only speak its flat-JSON API.
+            // The network MFi signing service (DEC-003 as revised). The service owns
+            // the coprocessor; we only speak its flat-JSON HTTP API.
             RemoteMfiHttpClient::Options opts;
             opts.host = prefs.remote_mfi.host;
             opts.port = prefs.remote_mfi.port;
@@ -102,8 +96,6 @@ std::string MfiSignerFactory::Describe(const MFiPreferences& prefs) {
     switch (prefs.backend_type) {
         case MFiBackendType::LocalFile:
             return "LocalFile: " + prefs.certificate_path + " / " + prefs.private_key_path;
-        case MFiBackendType::NetworkDaemon:
-            return "NetworkDaemon: " + prefs.daemon_endpoint.ToString();
         case MFiBackendType::RemoteHttp:
             // The bearer token is deliberately not printed.
             return "RemoteHttp: http://" + prefs.remote_mfi.host + ":" +
