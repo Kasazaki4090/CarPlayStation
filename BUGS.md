@@ -624,7 +624,7 @@ connection on port 5000. The iPhone keeps showing the "checking" spinner.
 
 ## BUG-011 — Hardware signer reads `Invalid MFi certificate length: 65535` (coprocessor never answered)
 
-**Status:** `Fix applied, awaiting hardware retest`
+**Status:** `Fix applied (second round: combined I2C transactions), awaiting hardware retest`
 
 **Date:** 2026-10-07
 
@@ -667,9 +667,48 @@ No `0x4301`, no RTSP connection, no CarPlay session. The software signer
    `ReadRegister()`, which spends a full `io_retry_timeout` (2 s) per poll, while
    the reference notes NACKs during signing are expected for ~750 ms–1.6 s.
 
+The first round of fixes (warm-up + idle-fill rejection) shipped and behaved
+exactly as designed on the next run — and the chip still refused to answer:
+
+```
+[INFO] MFi reset pulse issued on CH341 GPIO0
+[WARN] Coprocessor did not answer the warm-up read at address 0x17
+[WARN] Register 0x48 read failed after 2000ms: I2C read returned bus-idle padding (slave not answering)
+[WARN] MFi certificate fetch failed: I2C read returned bus-idle padding (slave not answering)
+```
+
+That produced two more findings.
+
+4. **The log was lying about every address.** `static_cast<int>(reg)` streamed
+   after a literal `"0x"` prints decimal: `address 0x17` was `0x11`, and
+   `Register 0x48` was `REG_CERT_LEN = 0x30`. The addressing had been correct
+   the whole time (`I2cSlaveAddress=17` in the INI is parsed as decimal and
+   becomes `0x11`), which is why chasing an "address mismatch" would have been a
+   dead end.
+5. **Register select and read were two separate I2C transactions.** This is the
+   actual reason the coprocessor never answers. `ReadRegisterOnce()` used to do
+   `adapter_->Write(addr, {reg})` and then `adapter_->Read(addr, len)`, and
+   `Ch341I2cAdapter` implements each of those as its own `CH341StreamI2C` call,
+   so a STOP is emitted between them. The MFi chip drops the selected register
+   across a STOP, so the read addresses a chip that has forgotten what was
+   selected and NACKs. Both proven transports do it as one message pair with a
+   repeated start:
+
+   ```c
+   /* mfi_oracle.c i2c_rd() */
+   struct i2c_msg m[2] = { { .addr=a, .flags=0,      .len=1,     .buf=&reg },
+                           { .addr=a, .flags=I2C_RD,  .len=(__u32)n, .buf=buf } };
+   ioctl(fd, I2C_RDWR, &rq);   /* START addr(W) reg  RESTART addr(R) data STOP */
+   ```
+
+   `Ch341I2cAdapter::Transaction(addr, writeData, readLength)` already emits that
+   shape, and `I2cMfiSigner::GetChipInfo()` was already using it — which is why
+   the one method that had never been called from the app was the only one that
+   would have worked.
+
 ### Fix
 
-1. `I2cMfiSigner::WarmUpLocked()`: up to 8 single-shot select/read pairs on
+1. `I2cMfiSigner::WarmUpLocked()`: up to 8 single-shot select/read attempts on
    `REG_DEVICE_VERSION = 0x00` at 50 ms spacing, accepting only a non-empty,
    non-`0xFF` response; after the fourth attempt it pulses the reset GPIO when
    `auto_pulse_reset_on_failure` is set. Latched in `warmup_ok_`, cleared
@@ -677,8 +716,8 @@ No `0x4301`, no RTSP connection, no CarPlay session. The software signer
    from `FetchCertificate()`, `SignChallenge()` and `GetChipInfo()`.
 2. `IsBusIdleFill()` plus `ReadRegisterOnce()`: a read that comes back as all
    `0xFF` is now `HardwareError` "I2C read returned bus-idle padding (slave not
-   answering)", so `ReadRegister()` retries the select/read pair and finally logs
-   the register, the retry budget and the message.
+   answering)", so `ReadRegister()` retries the read and finally logs the
+   register, the retry budget and the message.
 3. `FetchCertificate()` is split: the public method does the open/warm-up and one
    reset-and-retry, `FetchCertificateLocked()` does the length read and the
    windowed body read, and success is logged reference-style (`MFi certificate
@@ -686,6 +725,20 @@ No `0x4301`, no RTSP connection, no CarPlay session. The software signer
 4. `SignChallenge()` polls the status register with `ReadRegisterOnce()` so a
    NACK costs one transaction, not the I/O retry budget; only the `auth_timeout`
    deadline can end the loop, and the number of NACKed polls is logged.
+5. `ReadRegisterOnce()` now issues the select and the read as **one** combined
+   transaction (`adapter_->Transaction(slave_address_, {reg}, length)`), matching
+   `mfi_oracle.c` and `GetChipInfo()`; `SelectRegister()` is gone.
+   `MockI2cAdapter` routes its own `Write`/`Read` through `Transaction()` and
+   tracks the selected register from the write phase, so the mock coprocessor
+   still answers and the existing tests cover the new path.
+6. Every address, register and device field in the MFi logs is now printed as
+   real hex (`HexByte()`/`HexWord()` in `I2cMfiSigner.cpp`, `%08X` for the chip
+   id in `AuthSetup.h`).
+7. When the warm-up fails, `ReportSlavesOnBus()` sweeps addresses `0x08`–`0x77`
+   with `ProbeDevice()` and logs either the addresses that did answer (wrong
+   `I2cSlaveAddress`) or that nothing answered anywhere (power, reset, wiring).
+   That turns the most likely hardware misconfiguration into a one-line answer
+   instead of another guess.
 
 ### Verification
 
@@ -695,12 +748,13 @@ No `0x4301`, no RTSP connection, no CarPlay session. The software signer
    `MockI2cAdapter` answers register `0x00` with `0x00`, so the warm-up succeeds
    against the mock, and it never returns an idle fill, so the new check does not
    change the expected certificate or signature flows.
-3. On hardware the log must show `MFi coprocessor awake: DeviceVersion=0x…`
-   followed by `MFi certificate read: <607..945> bytes first16=…`, then
-   `MFi-SAP M2 size=…` and the RTSP connection. If instead
+3. On hardware the log must show `MFi coprocessor awake at 0x11:
+   DeviceVersion=0x…` followed by `MFi certificate read: <607..945> bytes
+   first16=…`, then `MFi-SAP M2 size=…` and the RTSP connection. If instead
    `Coprocessor did not answer the warm-up read at address 0x11` appears, the
-   coprocessor is not on the bus (wiring, address, or power) and no amount of
-   retrying will help.
+   following bus-scan line decides: an address that answered means
+   `I2cSlaveAddress` is wrong; nothing answering anywhere means the module is
+   unpowered, held in reset, or not wired — and no amount of retrying will help.
 
 ### Related
 

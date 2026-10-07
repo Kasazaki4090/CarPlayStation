@@ -26,6 +26,7 @@
 #include <memory>
 #include <string>
 #include <algorithm>
+#include <cstdio>
 
 namespace CarPlayStation::Core::Session::Pairing {
 
@@ -114,10 +115,12 @@ public:
             }
         }
 
+        char chip_id_hex[12];
+        std::snprintf(chip_id_hex, sizeof(chip_id_hex), "0x%08X",
+                      static_cast<unsigned>(chip_info.chip_id));
         CPS_LOG_INFO("AuthSetup", "MFi hardware generation detected: ",
                      is_v2 ? "2nd Gen (MFi 2.0 / SHA-1)" : "3rd Gen (MFi 3.0 / SHA-256)",
-                     " (cert size=", std::to_string(cert.size()), ", chip_id=0x",
-                     std::to_string(chip_info.chip_id), ")");
+                     " (cert size=", std::to_string(cert.size()), ", chip_id=", chip_id_hex, ")");
 
         // Digest over our_pk || peer_pk:
         // MFi 2.0 uses SHA-1 (20 bytes)

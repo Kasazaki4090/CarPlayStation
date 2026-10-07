@@ -44,11 +44,10 @@ private:
     [[nodiscard]] Common::Result<uint8_t> ReadByte(uint8_t reg);
     [[nodiscard]] Common::Result<uint16_t> ReadBigEndianShort(uint8_t reg);
     [[nodiscard]] Common::Result<void> WriteBigEndianShort(uint8_t reg, uint16_t value);
-    [[nodiscard]] Common::Result<void> SelectRegister(uint8_t reg);
     [[nodiscard]] Common::Result<Common::ByteBuffer> ReadRegister(uint8_t reg, size_t length);
     // One select/read pair, no retry loop. Used where the caller owns the retry
     // deadline (e.g. polling the coprocessor while it computes a signature).
-    [[nodiscard]] Common::Result<Common::ByteBuffer> ReadRegisterOnce(uint8_t reg, size_t length);
+    [[nodiscard]] Common::Result<Common::ByteBuffer> ReadRegisterOnce(uint8_t reg, size_t length) const;
     [[nodiscard]] Common::Result<Common::ByteBuffer> ReadRegisterWindows(uint8_t base_reg, size_t length);
     [[nodiscard]] Common::Result<void> WriteRegister(uint8_t reg, Common::ByteSpan data);
 

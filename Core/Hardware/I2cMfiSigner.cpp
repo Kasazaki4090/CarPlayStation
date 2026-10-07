@@ -1,5 +1,6 @@
 #include "Core/Hardware/I2cMfiSigner.h"
 #include "Core/Common/Logging.h"
+#include <cstdio>
 #include <thread>
 #include <vector>
 #include <algorithm>
@@ -43,6 +44,47 @@ bool IsBusIdleFill(const Common::ByteBuffer& data) {
     }
     return true;
 }
+
+// Addresses, registers and chip ids are bytes, and the log lines below print
+// them behind a literal "0x". Streaming them as decimal turned slave address
+// 0x11 into "0x17" and register 0x30 into "0x48", which made a correctly
+// addressed bus look mis-addressed. Format them the way the datasheet does.
+[[nodiscard]] std::string HexByte(uint8_t value) {
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "0x%02X", static_cast<unsigned>(value));
+    return buf;
+}
+
+[[nodiscard]] std::string HexWord(uint16_t value) {
+    char buf[10];
+    std::snprintf(buf, sizeof(buf), "0x%04X", static_cast<unsigned>(value));
+    return buf;
+}
+
+// A coprocessor that never answers at the configured address is either living at
+// a different address or not powered / held in reset at all, and those need
+// different fixes. The 7-bit address space is small enough to sweep, so sweep it
+// once and report what was actually on the bus instead of guessing.
+void ReportSlavesOnBus(II2cAdapter& adapter, uint8_t configured) {
+    std::string found;
+    for (uint8_t addr = 0x08; addr <= 0x77; ++addr) {
+        if (addr == configured) continue;
+        if (adapter.ProbeDevice(addr)) {
+            if (!found.empty()) found += ", ";
+            found += HexByte(addr);
+        }
+    }
+    if (found.empty()) {
+        CPS_LOG_WARN("I2cMfiSigner",
+                     "I2C bus scan: no slave answered anywhere in 0x08-0x77. The "
+                     "coprocessor is unpowered, held in reset, or not wired to this bridge.");
+    } else {
+        CPS_LOG_WARN("I2cMfiSigner",
+                     "I2C bus scan: slave(s) answered at ", found,
+                     " but nothing at the configured ", HexByte(configured),
+                     ". Set I2cSlaveAddress in carplaystation_ui.ini to the address that answered.");
+    }
+}
 } // namespace
 
 I2cMfiSigner::I2cMfiSigner(std::shared_ptr<II2cAdapter> adapter,
@@ -83,16 +125,12 @@ bool I2cMfiSigner::WarmUpLocked() const {
     // after a few attempts fall back to a GPIO reset pulse if the adapter can
     // generate one.
     for (int attempt = 0; attempt < 8; ++attempt) {
-        uint8_t reg = REG_DEVICE_VERSION;
-        auto sel = adapter_->Write(slave_address_, Common::ByteSpan(&reg, 1));
-        if (sel.IsOk()) {
-            auto res = adapter_->Read(slave_address_, 1);
-            if (res.IsOk() && !res.Value().empty() && !IsBusIdleFill(res.Value())) {
-                warmup_ok_ = true;
-                CPS_LOG_INFO("I2cMfiSigner", "MFi coprocessor awake: DeviceVersion=0x",
-                             static_cast<int>(res.Value()[0] & 0xFF));
-                return true;
-            }
+        auto res = ReadRegisterOnce(REG_DEVICE_VERSION, 1);
+        if (res.IsOk() && !res.Value().empty()) {
+            warmup_ok_ = true;
+            CPS_LOG_INFO("I2cMfiSigner", "MFi coprocessor awake at ", HexByte(slave_address_),
+                         ": DeviceVersion=", HexByte(res.Value()[0]));
+            return true;
         }
         if (attempt == 3 && options_.auto_pulse_reset_on_failure) {
             auto pulse = adapter_->PulseReset(options_.reset_gpio_pin);
@@ -104,8 +142,10 @@ bool I2cMfiSigner::WarmUpLocked() const {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
-    CPS_LOG_WARN("I2cMfiSigner", "Coprocessor did not answer the warm-up read at address 0x",
-                 static_cast<int>(slave_address_), "; continuing anyway");
+    CPS_LOG_WARN("I2cMfiSigner", "Coprocessor did not answer the warm-up read at address ",
+                 HexByte(slave_address_), "; continuing anyway");
+    // Distinguish "wrong address" from "dead chip" for whoever is reading the log.
+    ReportSlavesOnBus(*adapter_, slave_address_);
     return false;
 }
 
@@ -150,26 +190,19 @@ Common::Result<void> I2cMfiSigner::WriteBigEndianShort(uint8_t reg, uint16_t val
     return WriteRegister(reg, Common::ByteSpan(data, 2));
 }
 
-Common::Result<void> I2cMfiSigner::SelectRegister(uint8_t reg) {
+Common::Result<Common::ByteBuffer> I2cMfiSigner::ReadRegisterOnce(uint8_t reg, size_t length) const {
     if (!adapter_ || !adapter_->IsOpen()) {
         return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "I2C adapter is not open");
     }
 
+    // Register select and read must be ONE transaction with a repeated start
+    // (START addr(W) reg RESTART addr(R) data STOP). Issuing them as two
+    // separate transactions puts a STOP between them, and the MFi coprocessor
+    // drops the selected register across that STOP: every read then comes back
+    // as bus-idle padding. The proven reference drivers use a single two-message
+    // I2C_RDWR for exactly this reason.
     uint8_t reg_addr = reg;
-    return adapter_->Write(slave_address_, Common::ByteSpan(&reg_addr, 1));
-}
-
-Common::Result<Common::ByteBuffer> I2cMfiSigner::ReadRegisterOnce(uint8_t reg, size_t length) {
-    if (!adapter_ || !adapter_->IsOpen()) {
-        return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "I2C adapter is not open");
-    }
-
-    auto sel = SelectRegister(reg);
-    if (sel.IsError()) {
-        return sel.Error();
-    }
-
-    auto res = adapter_->Read(slave_address_, length);
+    auto res = adapter_->Transaction(slave_address_, Common::ByteSpan(&reg_addr, 1), length);
     if (res.IsError()) {
         return res;
     }
@@ -203,7 +236,7 @@ Common::Result<Common::ByteBuffer> I2cMfiSigner::ReadRegister(uint8_t reg, size_
         std::this_thread::sleep_for(options_.io_retry_delay);
     }
 
-    CPS_LOG_WARN("I2cMfiSigner", "Register 0x", static_cast<int>(reg), " read failed after ",
+    CPS_LOG_WARN("I2cMfiSigner", "Register ", HexByte(reg), " read failed after ",
                  options_.io_retry_timeout.count(), "ms: ", last_res.Error().Message());
     return last_res;
 }
@@ -290,7 +323,8 @@ Common::Result<Common::ByteBuffer> I2cMfiSigner::FetchCertificateLocked() {
     uint16_t cert_len = len_res.Value();
     if (cert_len == 0 || cert_len > 65525) {
         return Common::Status::Error(Common::StatusCode::AuthenticationFailed,
-            "Invalid MFi certificate length: " + std::to_string(cert_len));
+            "Invalid MFi certificate length: " + std::to_string(cert_len) +
+            " (" + HexWord(cert_len) + ")");
     }
 
     // The certificate body is exposed as sequential 128-byte register windows
@@ -351,7 +385,7 @@ Common::Result<Common::ByteBuffer> I2cMfiSigner::SignChallenge(Common::ByteSpan 
         auto err_byte = ReadByte(REG_ERROR_CODE);
         uint8_t code = err_byte.IsOk() ? err_byte.Value() : 0xFF;
         return Common::Status::Error(Common::StatusCode::AuthenticationFailed,
-            "MFi chip failed to compute signature. Chip error code: 0x" + std::to_string(code));
+            "MFi chip failed to compute signature. Chip error code: " + HexByte(code));
     }
 
     // 5. Read response signature length from 0x11
