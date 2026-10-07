@@ -84,7 +84,8 @@ struct DevicePreferences {
 enum class MFiBackendType : uint8_t {
     LocalFile = 0,     // Pure offline software signer using imported cert & private key (DEC-006)
     NetworkDaemon = 1, // Remote/Local TCP daemon at daemon_endpoint (DEC-003)
-    HardwareI2C = 2    // Physical USB-to-I2C bridge (CH341) driving an MFi coprocessor (DEC-003)
+    HardwareI2C = 2,   // Physical USB-to-I2C bridge (CH341) driving an MFi coprocessor (DEC-003)
+    RemoteHttp = 3     // Remote MFi service over HTTP (see Reference/remote-mfi-for-xcertplay)
 };
 
 enum class HardwareI2cDriverType : uint8_t {
@@ -100,8 +101,17 @@ struct HardwareI2cPreferences {
     uint32_t device_index{0};
     uint8_t slave_address{0x11}; // 7-bit I2C address of the MFi coprocessor
     uint32_t speed_khz{100};     // Bus clock speed in kHz (e.g. 100 or 400)
-    bool pulse_reset_on_init{true};
+    bool pulse_reset_on_init{false};
     uint8_t reset_gpio_pin{0};   // Reset pin index on bridge chip (e.g. D0 on CH341)
+};
+
+struct RemoteMfiPreferences {
+    // Remote MFi HTTP service (Reference/remote-mfi-for-xcertplay). The host and
+    // port are user-entered in the setup wizard; nothing is hardcoded beyond the
+    // service's own default listen port.
+    std::string host{"127.0.0.1"};
+    uint16_t port{8972};
+    std::string bearer_token{};  // Empty = service has no auth configured.
 };
 
 struct MFiPreferences {
@@ -113,6 +123,9 @@ struct MFiPreferences {
 
     // For NetworkDaemon backend (DEC-003):
     Core::Common::IpEndpoint daemon_endpoint{"127.0.0.1", 9000};
+
+    // For RemoteHttp backend:
+    RemoteMfiPreferences remote_mfi{};
 
     // For HardwareI2C backend (DEC-003, DEC-007):
     HardwareI2cPreferences hardware_i2c{};

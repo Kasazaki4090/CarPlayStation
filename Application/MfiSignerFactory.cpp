@@ -2,6 +2,7 @@
 
 #include "Core/Hardware/FileMfiSigner.h"
 #include "Core/Hardware/NetworkMfiClient.h"
+#include "Core/Hardware/RemoteMfiHttpClient.h"
 #include "Core/Hardware/I2cMfiSigner.h"
 #include "Core/Hardware/Ch341I2cAdapter.h"
 #include "Core/Hardware/Ch347I2cAdapter.h"
@@ -69,6 +70,16 @@ std::shared_ptr<Core::Hardware::IMfiSigner> MfiSignerFactory::Build(const MFiPre
             return std::make_shared<NetworkMfiClient>(prefs.daemon_endpoint);
         }
 
+        case MFiBackendType::RemoteHttp: {
+            // Remote MFi service over HTTP. The service owns the coprocessor;
+            // we only speak its flat-JSON API.
+            RemoteMfiHttpClient::Options opts;
+            opts.host = prefs.remote_mfi.host;
+            opts.port = prefs.remote_mfi.port;
+            opts.bearer_token = prefs.remote_mfi.bearer_token;
+            return std::make_shared<RemoteMfiHttpClient>(std::move(opts));
+        }
+
         case MFiBackendType::HardwareI2C: {
             // Physical USB-to-I2C bridge driving an MFi coprocessor (DEC-003/DEC-007).
             auto adapter = BuildI2cAdapter(prefs.hardware_i2c.driver_type);
@@ -76,6 +87,7 @@ std::shared_ptr<Core::Hardware::IMfiSigner> MfiSignerFactory::Build(const MFiPre
                 return nullptr; // No usable bridge driver present.
             }
             I2cMfiSigner::Options opts;
+            opts.auto_pulse_reset_on_failure = prefs.hardware_i2c.pulse_reset_on_init;
             opts.reset_gpio_pin = prefs.hardware_i2c.reset_gpio_pin;
             return std::make_shared<I2cMfiSigner>(
                 adapter, prefs.hardware_i2c.slave_address, opts);
@@ -92,6 +104,10 @@ std::string MfiSignerFactory::Describe(const MFiPreferences& prefs) {
             return "LocalFile: " + prefs.certificate_path + " / " + prefs.private_key_path;
         case MFiBackendType::NetworkDaemon:
             return "NetworkDaemon: " + prefs.daemon_endpoint.ToString();
+        case MFiBackendType::RemoteHttp:
+            // The bearer token is deliberately not printed.
+            return "RemoteHttp: http://" + prefs.remote_mfi.host + ":" +
+                   std::to_string(prefs.remote_mfi.port);
         case MFiBackendType::HardwareI2C: {
             std::ostringstream address;
             address << "0x" << std::hex << std::uppercase << std::setw(2) << std::setfill('0')

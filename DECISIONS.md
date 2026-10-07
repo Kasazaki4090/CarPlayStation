@@ -916,3 +916,119 @@ Negative / limitations:
   `Core/Media/MicrophoneRtpSender.h`, `Core/Service/CarPlayCoreService.cpp`
 - `Lib/Readme.md` (fdk-aac library record), `.gitmodules`
 - `TODO.md` section 8
+
+---
+
+## DEC-011 — MFi over HTTP: a Remote MFi backend and user-entered service endpoints
+
+**Status:** `Accepted`
+
+**Date:** 2026-10-07
+
+### Context
+
+`DEC-003` gave MFi authentication three backends: a physical USB-to-I2C coprocessor, a local certificate/key pair
+(`DEC-006`), and a TCP signing daemon. On this machine the hardware path never worked: after vendoring the WCH and
+FTDI driver DLLs into `Lib/`, fixing the combined-transaction reads (`7c73c88`) and adding a NACK-aware startup
+self-probe (`822600b`, `BUG-012`), every tool in the chain — the app, a standalone `CH341_GetDeviceId`/`ReadI2C`
+probe, and the vendor demo — reported an empty bus for the same board that the vendor demo had been expected to
+see. The PCB is open source and already fabricated, so the board cannot be changed to satisfy the driver stack, and
+the iPhone kept failing authentication with "check the accessory" regardless of which register sequence was tried.
+
+The vendored `Reference/remote-mfi-for-xcertplay` project solves the same problem from the other side: it is a Go
+service that owns the coprocessor (or a certificate) and exposes it as a small HTTP JSON API, already used by
+`xcertplay`. Talking to that service gives a working signing path without any USB/I2C stack in this process, and it
+also works for a service hosted on another machine on the LAN.
+
+The existing endpoint plumbing was also inadequate for that: `MFiPreferences::daemon_endpoint` was editable only in
+the `.ini`, and the setup wizard offered radio buttons with no way to type a host or port, so a remote service
+required hand-editing a config file.
+
+### Decision
+
+1. **A fourth backend, `MFiBackendType::RemoteHttp`, implemented as `Core::Hardware::RemoteMfiHttpClient`.**
+   It implements `IMfiSigner` against the Remote MFi HTTP API contract:
+   - `GetCertificate()` -> `GET /mfi/certificate`, which returns `{"type":"mfi","protocolMajor":N,"certificate":"<base64>"}`;
+   - `SignChallenge()` -> `POST /mfi/sign` with `{"challenge":"<base64>","requestId":"<uuid v4>"}`;
+   - `ResetChip()` -> `POST /mfi/reset` with the body exactly `{}`;
+   - `GetHealth()` -> `GET /healthz`, which is never authenticated.
+   Errors are the service's flat `{"detail":"..."}` bodies, mapped by status code: `400`->`InvalidArgument`,
+   `401`->`AuthenticationFailed`, `404`->`NotFound`, `503`->`DeviceUnavailable`, `500`->`HardwareError`, anything
+   else ->`NetworkError`. The `detail` string is carried into the `Status` message.
+2. **Raw Winsock HTTP/1.1, no TLS, no new third-party library.** The client speaks `HTTP/1.1` with
+   `Connection: close`, reads until the peer closes (or `Content-Length` is satisfied), and rejects oversized
+   responses at 2 MiB and decoded payloads above 65525 bytes, matching the service's own limits. `ws2_32` is already
+   linked by the network daemon client, so this adds no dependency. `Options::use_tls` defaults to false and, if set,
+   every call returns `NotSupported` rather than silently sending plaintext to a TLS endpoint.
+3. **The endpoint is typed by the user, never hardcoded.** `Application::RemoteMfiPreferences{host,port,bearer_token}`
+   is persisted in the `.ini` (`RemoteHost`, `RemotePort`, `RemoteToken`) and edited in the MFi setup wizard, which
+   now has edit controls for the daemon host/port and for the remote host/port/token (the token field is
+   `ES_PASSWORD`). The default port is the service's own default listen port, 8972. The wizard validates the host as
+   a bare name or `host:port`, the port as `1..65535`, and rejects a host containing a URL scheme.
+4. **`protocolMajor` is mapped onto the existing chip-identity fields.** `MFiChipInfo` has no protocol field, and
+   `Core/Session/Pairing/AuthSetup.h` selects the v2 vs v3 digest from `chip_id` bits 16-23 or from substrings of
+   `firmware_version`. So `protocolMajor:2` becomes `chip_id = 0x00020000` / `firmware_version = "remote-mfi 2.0"`,
+   `3` becomes `0x00030000` / `"remote-mfi 3.0"`, and an unknown value leaves both at the neutral `"remote-mfi"`,
+   which lets the certificate-driven heuristic decide. `FetchCertificate()` also sets `MFiChipInfo::present = true`,
+   which the startup self-probe in `ApplicationService` gates its logging on.
+5. **Certificates are cached, connect failures and `503` are retried.** One `GET /mfi/certificate` per session until
+   `ResetChip()` or `InvalidateCache()` drops it. `RequestWithRetry` retries only connect failures and `503` (the
+   service holds a chip gate for up to eight seconds and answers `503` while it does), `max_retries + 1` attempts
+   with `retry_delay` between them; `400`/`401`/`404` are returned immediately. A fresh `requestId` is generated per
+   sign, because the service caches signatures per id for sixty seconds and rejects a reused id with a different
+   challenge.
+
+### Alternatives
+
+- **An HTTP mode inside `NetworkMfiClient`**: rejected. The daemon client speaks a binary framed protocol
+  (`op | length BE | payload`) with its own framing and framing-level errors; the HTTP service has neither frames nor
+  a persistent connection. Sharing one class would mean two transport state machines in one socket loop.
+- **`WinHTTP` / `winhttp.lib`**: rejected. It would add a link dependency and a second HTTP stack for four GETs and
+  two POSTs, and the response handling (bounded reads, flat error bodies) is small enough to keep explicit.
+- **TLS via Schannel**: deferred, not rejected. The reference service listens plaintext by default and is expected on
+  a LAN; adding Schannel now would be speculative work with no endpoint to test against. The `use_tls` option and its
+  `NotSupported` result are the placeholder, so a future implementation cannot silently downgrade.
+- **Fixing the I2C path instead**: attempted at length across `BUG-011`/`BUG-012` and the driver vendoring, and left
+  parked in a stash. The hardware path stays in the tree and selectable; it is simply no longer the only route to a
+  signed challenge.
+- **Patching `xcertplay`'s own client instead of writing ours**: rejected. `xcertplay` is a reference submodule we do
+  not own, and its client is Rust.
+
+### Reason
+
+The HTTP contract is small, already documented in the reference repository (`docs/01-api-contract.md`), and already
+proven against a real iPhone by another project. Implementing it costs one file, no new dependency, and no hardware;
+and because the endpoint is user-entered, the same build can sign against a service on this machine, on the LAN, or
+on a future host. Keeping it a separate `IMfiSigner` implementation means the iAP2 `StartAuth` path is unchanged —
+the backend choice stays a factory decision (`Application::MfiSignerFactory`) exactly as `DEC-003` arranged it.
+
+### Consequences
+
+Positive:
+- A session can authenticate without any USB/I2C hardware in the loop, which unblocks every iAP2 `StartAuth` test on
+  this machine.
+- Host, port and token are configured in the GUI, so the daemon and remote backends are usable without editing
+  `carplay_config.ini` by hand.
+- The backend is covered by unit tests against an in-process HTTP stub server
+  (`TestRemoteMfiHttpClientSuccess`, `TestRemoteMfiHttpClientErrors`, `TestRemoteMfiHttpClientHealthAndReset`).
+
+Negative / limitations:
+- Plaintext HTTP: the bearer token and the certificate cross the network unencrypted. Until TLS is implemented, the
+  service should be on the same LAN as the receiver.
+- The base64 and JSON handling is a hand-written scanner, not a parser. It handles the service's own output shapes
+  (flat objects, no nested structures in the fields we read) and reports `ProtocolError` otherwise; it is not a
+  general JSON implementation.
+- `MFiChipInfo::chip_id` for this backend is synthetic. Anything that expects a real coprocessor serial number will
+  have to be told that the remote backend cannot provide one.
+- The I2C hardware path is still unresolved and remains stashed; choosing `HardwareI2C` on this machine still fails.
+
+### Related
+
+- `DEC-003` (MFi backend selection and the factory), `DEC-006` (the offline file signer), `DEC-007` (I2C hardware path)
+- `Core/Hardware/RemoteMfiHttpClient.h`, `Core/Hardware/RemoteMfiHttpClient.cpp`, `Core/Hardware/IMfiSigner.h`
+- `Application/AppSettings.h` (`MFiBackendType::RemoteHttp`, `RemoteMfiPreferences`), `Application/MfiSignerFactory.cpp`,
+  `UI/Win32/SetupWizard.cpp` (`LoadMFiSettings`/`SaveMFiSettings` read and write the `.ini` keys)
+- `Core/Session/Pairing/AuthSetup.h` (why `protocolMajor` maps to `chip_id`/`firmware_version`)
+- `Tests/HardwareTests.cpp` (`MockHttpMfiServer` and the three remote-MFi tests)
+- `Reference/remote-mfi-for-xcertplay/docs/01-api-contract.md`, `internal/httpapi/handlers.go`
+- `Core/Hardware/README.md` (backend list), `.gitmodules`

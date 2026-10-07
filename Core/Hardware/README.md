@@ -19,6 +19,11 @@ This module is located at the lowest layer of Core (Layer 1). It directly interf
 - **MFi Network Daemon Client (`NetworkMfiClient`)**:
   - Configurable TCP client connecting to a remote/local MFi signing daemon/proxy address (configured and injected by the Application layer via `Application::MFiPreferences::daemon_endpoint`; Core/Lib does not hardcode daemon addresses).
   - Dispatches MFi challenges (Challenge / Digest) to the signing daemon service and retrieves certificates and cryptographic signatures.
+- **Remote MFi HTTP Client (`RemoteMfiHttpClient`)**:
+  - Implements `IMfiSigner` against the Remote MFi HTTP JSON API (DEC-011): `GET /mfi/certificate`, `POST /mfi/sign`, `POST /mfi/reset`, `GET /healthz`.
+  - Raw Winsock HTTP/1.1 with `Connection: close`; no TLS (set `use_tls` and every call returns `NotSupported`), no third-party HTTP library.
+  - Certificates are cached after the first fetch (`InvalidateCache()` drops it), connect failures and `503` are retried per `Options::max_retries`, and HTTP status codes map onto `Common::StatusCode`.
+  - Host, port and optional bearer token come from `Application::MFiPreferences::remote_mfi` (`RemoteMfiPreferences`); nothing is hardcoded in Core.
 - **Radio & Adapter Helpers (`RadioAdapterHelper`)**:
   - Windows Bluetooth Radio status inquiry and power state queries.
   - Wi-Fi adapter HostedNetwork / SoftAP capability detection and 5GHz band support checks.

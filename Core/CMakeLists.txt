@@ -1,5 +1,6 @@
 add_library(CarPlayCore STATIC
     Hardware/NetworkMfiClient.cpp
+    Hardware/RemoteMfiHttpClient.cpp
     Hardware/FileMfiSigner.cpp
     Hardware/Ch341I2cAdapter.cpp
     Hardware/Ch347I2cAdapter.cpp

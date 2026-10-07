@@ -10,3 +10,6 @@
 [submodule "Lib/fdk-aac"]
 	path = Lib/fdk-aac
 	url = https://github.com/mstorsjo/fdk-aac
+[submodule "Reference/remote-mfi-for-xcertplay"]
+	path = Reference/remote-mfi-for-xcertplay
+	url = https://github.com/cuckoohello/remote-mfi-for-xcertplay.git

@@ -1,3 +1,5 @@
+// Assertions are the test oracle here, so keep them alive in Release builds.
+#undef NDEBUG
 #include "Core/Hardware/MockMfiSigner.h"
 #include "Core/Hardware/NetworkMfiClient.h"
 #include "Core/Hardware/II2cAdapter.h"
@@ -8,6 +10,7 @@
 #include "Core/Hardware/MockI2cAdapter.h"
 #include "Core/Hardware/I2cMfiSigner.h"
 #include "Core/Hardware/RadioAdapterHelper.h"
+#include "Core/Hardware/RemoteMfiHttpClient.h"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -32,6 +35,10 @@
 #include <vector>
 #include <atomic>
 #include <chrono>
+#include <functional>
+#include <mutex>
+#include <string>
+#include <cstdlib>
 
 using namespace CarPlayStation::Core;
 using namespace CarPlayStation::Core::Hardware;
@@ -621,6 +628,423 @@ void TestRadioAdapterHelper() {
     std::cout << "[Test] RadioAdapterHelper tests passed.\n";
 }
 
+// ---------------------------------------------------------------------------
+// RemoteMfiHttpClient (Remote MFi HTTP API) tests
+// ---------------------------------------------------------------------------
+
+// Minimal HTTP/1.1 stub for the flat-JSON Remote MFi API. Requests are handled
+// one at a time and every reply is closed, which matches what the client asks
+// for (Connection: close).
+struct StubHttpRequest {
+    std::string method;
+    std::string path;
+    std::string headers;  // request header block, lower-cased names only matter for asserts
+    std::string body;
+};
+
+struct StubHttpResponse {
+    int status{200};
+    std::string body;
+};
+
+class MockHttpMfiServer {
+public:
+    explicit MockHttpMfiServer(std::function<StubHttpResponse(const StubHttpRequest&)> router)
+        : router_(std::move(router)) {
+#ifdef _WIN32
+        WSADATA wsa_data;
+        WSAStartup(MAKEWORD(2, 2), &wsa_data);
+#endif
+        listen_sock_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        assert(listen_sock_ != INVALID_SOCKET);
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+
+        assert(bind(listen_sock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+
+        sockaddr_in assigned{};
+        socklen_t len = sizeof(assigned);
+        getsockname(listen_sock_, reinterpret_cast<sockaddr*>(&assigned), &len);
+        port_ = ntohs(assigned.sin_port);
+
+        assert(listen(listen_sock_, 5) == 0);
+
+        running_ = true;
+        thread_ = std::thread([this]() {
+            while (running_) {
+                fd_set rfds;
+                FD_ZERO(&rfds);
+                FD_SET(listen_sock_, &rfds);
+                timeval tv{0, 100000};
+                if (select(static_cast<int>(listen_sock_ + 1), &rfds, nullptr, nullptr, &tv) <= 0) {
+                    continue;
+                }
+                SOCKET client = accept(listen_sock_, nullptr, nullptr);
+                if (client == INVALID_SOCKET) {
+                    continue;
+                }
+                StubHttpRequest req;
+                if (ReadRequest(client, req)) {
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        requests_.push_back(req);
+                    }
+                    const StubHttpResponse resp = router_(req);
+                    WriteResponse(client, resp);
+                }
+                closesocket(client);
+            }
+        });
+    }
+
+    ~MockHttpMfiServer() {
+        running_ = false;
+        if (listen_sock_ != INVALID_SOCKET) {
+            closesocket(listen_sock_);
+            listen_sock_ = INVALID_SOCKET;
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    [[nodiscard]] uint16_t GetPort() const noexcept { return port_; }
+
+    std::vector<StubHttpRequest> Requests() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return requests_;
+    }
+
+private:
+    static bool ReadRequest(SOCKET sock, StubHttpRequest& req) {
+        std::string raw;
+        char buffer[1024];
+        std::size_t head_end = std::string::npos;
+        while (head_end == std::string::npos) {
+            const int n = recv(sock, buffer, sizeof(buffer), 0);
+            if (n <= 0) {
+                return false;
+            }
+            raw.append(buffer, static_cast<std::size_t>(n));
+            head_end = raw.find("\r\n\r\n");
+        }
+        const std::string head = raw.substr(0, head_end);
+        req.body = raw.substr(head_end + 4);
+
+        const std::size_t line_end = head.find("\r\n");
+        const std::string request_line = head.substr(0, line_end);
+        req.headers = head.substr(line_end == std::string::npos ? 0 : line_end + 2);
+
+        const std::size_t sp1 = request_line.find(' ');
+        const std::size_t sp2 = request_line.find(' ', sp1 + 1);
+        if (sp1 == std::string::npos) {
+            return false;
+        }
+        req.method = request_line.substr(0, sp1);
+        req.path = request_line.substr(sp1 + 1, sp2 == std::string::npos ? std::string::npos : sp2 - sp1 - 1);
+
+        const std::size_t cl = req.headers.find("Content-Length:");
+        if (cl != std::string::npos) {
+            const std::size_t expected = std::strtoul(req.headers.c_str() + cl + 15, nullptr, 10);
+            while (req.body.size() < expected) {
+                const int n = recv(sock, buffer, sizeof(buffer), 0);
+                if (n <= 0) {
+                    break;
+                }
+                req.body.append(buffer, static_cast<std::size_t>(n));
+            }
+        }
+        return true;
+    }
+
+    static void WriteResponse(SOCKET sock, const StubHttpResponse& resp) {
+        const char* reason = (resp.status == 200) ? "OK"
+                         : (resp.status == 400) ? "Bad Request"
+                         : (resp.status == 401) ? "Unauthorized"
+                         : (resp.status == 404) ? "Not Found"
+                         : (resp.status == 500) ? "Internal Server Error"
+                         : (resp.status == 503) ? "Service Unavailable"
+                                                : "Error";
+        std::string out = "HTTP/1.1 " + std::to_string(resp.status) + " " + reason + "\r\n";
+        out += "Content-Type: application/json\r\n";
+        out += "Content-Length: " + std::to_string(resp.body.size()) + "\r\n";
+        out += "Connection: close\r\n\r\n";
+        out += resp.body;
+        std::size_t sent = 0;
+        while (sent < out.size()) {
+            const int n = send(sock, out.data() + sent, static_cast<int>(out.size() - sent), 0);
+            if (n <= 0) {
+                break;
+            }
+            sent += static_cast<std::size_t>(n);
+        }
+    }
+
+    std::function<StubHttpResponse(const StubHttpRequest&)> router_;
+    SOCKET listen_sock_{INVALID_SOCKET};
+    uint16_t port_{0};
+    std::atomic<bool> running_{false};
+    std::thread thread_;
+    mutable std::mutex mutex_;
+    std::vector<StubHttpRequest> requests_;
+};
+
+// Certificate used by the stub: 30 82 01 02 DE AD BE EF.
+static const char* kStubCertBase64 = "MIIBAt6tvu8=";
+static const Common::ByteBuffer kStubCertDer = {0x30, 0x82, 0x01, 0x02, 0xDE, 0xAD, 0xBE, 0xEF};
+// Signature used by the stub: AA BB CC DD.
+static const char* kStubSignatureBase64 = "qrvM3Q==";
+static const Common::ByteBuffer kStubSignature = {0xAA, 0xBB, 0xCC, 0xDD};
+
+void TestRemoteMfiHttpClientSuccess() {
+    std::cout << "[Test] Running RemoteMfiHttpClient success transactions...\n";
+
+    MockHttpMfiServer server([](const StubHttpRequest& req) -> StubHttpResponse {
+        if (req.path == "/mfi/certificate") {
+            return StubHttpResponse{200,
+                "{\"type\":\"mfi\",\"protocolMajor\":3,\"certificate\":\"" +
+                std::string(kStubCertBase64) +
+                "\",\"certificateSha256\":\"00000000000000000000000000000000"
+                "0000000000000000000000000000\"}"};
+        }
+        if (req.path == "/mfi/sign") {
+            return StubHttpResponse{200, "{\"signature\":\"" + std::string(kStubSignatureBase64) + "\"}"};
+        }
+        return StubHttpResponse{404, "{\"detail\":\"unknown path\"}"};
+    });
+
+    RemoteMfiHttpClient::Options opt;
+    opt.host = "127.0.0.1";
+    opt.port = server.GetPort();
+    opt.bearer_token = "secret-token";
+    RemoteMfiHttpClient client(opt);
+
+    // 1. Certificate fetch decodes base64 and caches.
+    auto cert = client.FetchCertificate();
+    assert(cert.IsOk());
+    assert(cert.Value() == kStubCertDer);
+
+    // 2. protocolMajor=3 must surface as the v3 generation marker so the
+    //    existing digest selection keeps working.
+    auto info = client.GetChipInfo();
+    assert(info.present);
+    assert(info.chip_id == 0x00030000u);
+    assert(info.firmware_version == "remote-mfi 3.0");
+
+    // The certificate is cached: /mfi/certificate is requested only once.
+    auto cert2 = client.FetchCertificate();
+    assert(cert2.IsOk());
+    assert(server.Requests().size() == 1u);
+
+    // 3. Signing round trip, with bearer auth and a fresh requestId.
+    uint8_t challenge[20] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+    auto sig = client.SignChallenge(challenge);
+    assert(sig.IsOk());
+    assert(sig.Value() == kStubSignature);
+
+    auto requests = server.Requests();
+    assert(requests.size() == 2u);
+    const StubHttpRequest& sign_req = requests[1];
+    assert(sign_req.method == "POST");
+    assert(sign_req.path == "/mfi/sign");
+    assert(sign_req.headers.find("Authorization: Bearer secret-token") != std::string::npos);
+    assert(sign_req.body.find("\"challenge\"") != std::string::npos);
+    const std::size_t id_pos = sign_req.body.find("\"requestId\":\"");
+    assert(id_pos != std::string::npos);
+    assert(sign_req.body.size() >= id_pos + 13u + 36u);
+    const std::string id0 = sign_req.body.substr(id_pos + 13, 36);
+    assert(id0[8] == '-' && id0[13] == '-' && id0[18] == '-' && id0[23] == '-');
+    assert(id0[14] == '4');  // UUID v4
+
+    // 4. A second sign must use a different requestId (server replay cache).
+    auto sig2 = client.SignChallenge(challenge);
+    assert(sig2.IsOk());
+    auto requests2 = server.Requests();
+    assert(requests2.size() == 3u);
+    const std::size_t p1 = requests[1].body.find("\"requestId\":\"") + 13;
+    const std::size_t p2 = requests2[2].body.find("\"requestId\":\"") + 13;
+    assert(requests[1].body.compare(p1, 36, requests2[2].body, p2, 36) != 0);
+
+    // 5. InvalidateCache forces a re-fetch.
+    client.InvalidateCache();
+    auto cert3 = client.FetchCertificate();
+    assert(cert3.IsOk());
+    assert(server.Requests().size() == 4u);
+
+    // 6. Shutdown makes the signer unusable.
+    assert(!client.IsShutdown());
+    client.Shutdown();
+    assert(client.IsShutdown());
+    auto after = client.SignChallenge(challenge);
+    assert(after.IsError());
+    assert(after.Error().Code() == Common::StatusCode::InvalidState);
+
+    std::cout << "[Test] RemoteMfiHttpClient success transactions passed.\n";
+}
+
+void TestRemoteMfiHttpClientErrors() {
+    std::cout << "[Test] Running RemoteMfiHttpClient error mapping...\n";
+
+    // 1. 401 -> AuthenticationFailed (no retry).
+    {
+        MockHttpMfiServer server([](const StubHttpRequest&) -> StubHttpResponse {
+            return StubHttpResponse{401, "{\"detail\":\"invalid bearer token\"}"};
+        });
+        RemoteMfiHttpClient::Options opt;
+        opt.host = "127.0.0.1";
+        opt.port = server.GetPort();
+        RemoteMfiHttpClient client(opt);
+        auto cert = client.FetchCertificate();
+        assert(cert.IsError());
+        assert(cert.Error().Code() == Common::StatusCode::AuthenticationFailed);
+        assert(cert.Error().Message().find("invalid bearer token") != std::string::npos);
+        assert(server.Requests().size() == 1u);
+    }
+
+    // 2. 503 (chip gate busy) is retried, then reported as unavailable.
+    {
+        MockHttpMfiServer server([](const StubHttpRequest&) -> StubHttpResponse {
+            return StubHttpResponse{503, "{\"detail\":\"mfi chip busy\"}"};
+        });
+        RemoteMfiHttpClient::Options opt;
+        opt.host = "127.0.0.1";
+        opt.port = server.GetPort();
+        opt.max_retries = 1;
+        opt.retry_delay = std::chrono::milliseconds(10);
+        RemoteMfiHttpClient client(opt);
+        auto cert = client.FetchCertificate();
+        assert(cert.IsError());
+        assert(cert.Error().Code() == Common::StatusCode::DeviceUnavailable);
+        assert(server.Requests().size() == 2u);
+    }
+
+    // 3. Malformed payloads -> ProtocolError.
+    {
+        MockHttpMfiServer server([](const StubHttpRequest&) -> StubHttpResponse {
+            return StubHttpResponse{200, "{\"type\":\"not-mfi\"}"};
+        });
+        RemoteMfiHttpClient::Options opt;
+        opt.host = "127.0.0.1";
+        opt.port = server.GetPort();
+        RemoteMfiHttpClient client(opt);
+        auto cert = client.FetchCertificate();
+        assert(cert.IsError());
+        assert(cert.Error().Code() == Common::StatusCode::ProtocolError);
+    }
+    {
+        MockHttpMfiServer server([](const StubHttpRequest&) -> StubHttpResponse {
+            return StubHttpResponse{200, "not json at all"};
+        });
+        RemoteMfiHttpClient::Options opt;
+        opt.host = "127.0.0.1";
+        opt.port = server.GetPort();
+        RemoteMfiHttpClient client(opt);
+        auto cert = client.FetchCertificate();
+        assert(cert.IsError());
+        assert(cert.Error().Code() == Common::StatusCode::ProtocolError);
+    }
+
+    // 4. Nothing listening -> DeviceUnavailable.
+    {
+        RemoteMfiHttpClient::Options opt;
+        opt.host = "127.0.0.1";
+        opt.port = 1;  // nothing bound here
+        opt.max_retries = 0;
+        opt.connect_timeout = std::chrono::milliseconds(500);
+        RemoteMfiHttpClient client(opt);
+        assert(!client.IsReachable());
+        auto cert = client.FetchCertificate();
+        assert(cert.IsError());
+        assert(cert.Error().Code() == Common::StatusCode::DeviceUnavailable);
+    }
+
+    // 5. https is not implemented by this client.
+    {
+        RemoteMfiHttpClient::Options opt;
+        opt.use_tls = true;
+        RemoteMfiHttpClient client(opt);
+        auto cert = client.FetchCertificate();
+        assert(cert.IsError());
+        assert(cert.Error().Code() == Common::StatusCode::NotSupported);
+    }
+
+    // 6. Challenge length is validated client-side before any request.
+    {
+        RemoteMfiHttpClient::Options opt;
+        opt.host = "127.0.0.1";
+        opt.port = 1;
+        opt.max_retries = 0;
+        RemoteMfiHttpClient client(opt);
+        Common::ByteBuffer empty;
+        auto bad = client.SignChallenge(empty);
+        assert(bad.IsError());
+        assert(bad.Error().Code() == Common::StatusCode::InvalidArgument);
+    }
+
+    std::cout << "[Test] RemoteMfiHttpClient error mapping passed.\n";
+}
+
+void TestRemoteMfiHttpClientHealthAndReset() {
+    std::cout << "[Test] Running RemoteMfiHttpClient health/reset...\n";
+
+    MockHttpMfiServer server([](const StubHttpRequest& req) -> StubHttpResponse {
+        if (req.path == "/healthz") {
+            return StubHttpResponse{200, "{\"ok\":true,\"chip\":\"ready\",\"reason\":\"\"}"};
+        }
+        if (req.path == "/mfi/reset") {
+            assert(req.body == "{}");
+            return StubHttpResponse{200, "{\"detail\":\"\"}"};
+        }
+        if (req.path == "/mfi/certificate") {
+            return StubHttpResponse{200,
+                "{\"type\":\"mfi\",\"protocolMajor\":2,\"certificate\":\"" +
+                std::string(kStubCertBase64) + "\"}"};
+        }
+        return StubHttpResponse{404, "{\"detail\":\"unknown path\"}"};
+    });
+
+    RemoteMfiHttpClient::Options opt;
+    opt.host = "127.0.0.1";
+    opt.port = server.GetPort();
+    RemoteMfiHttpClient client(opt);
+
+    assert(client.IsReachable());
+    auto health = client.GetHealth();
+    assert(health.IsOk());
+    assert(health->ok);
+    assert(health->chip == "ready");
+
+    // A certificate fetch primes the chip identity; protocolMajor=2 maps to v2.
+    auto cert = client.FetchCertificate();
+    assert(cert.IsOk());
+    auto info = client.GetChipInfo();
+    assert(info.present);
+    assert(info.chip_id == 0x00020000u);
+
+    // Reset drops the local cache so the next read re-queries the service.
+    assert(client.ResetChip().IsOk());
+    auto cert2 = client.FetchCertificate();
+    assert(cert2.IsOk());
+    bool saw_reset = false, saw_certificate_twice = false;
+    int cert_count = 0;
+    for (const auto& r : server.Requests()) {
+        if (r.path == "/mfi/reset") {
+            saw_reset = true;
+        }
+        if (r.path == "/mfi/certificate") {
+            ++cert_count;
+        }
+    }
+    saw_certificate_twice = cert_count >= 2;
+    assert(saw_reset);
+    assert(saw_certificate_twice);
+
+    std::cout << "[Test] RemoteMfiHttpClient health/reset passed.\n";
+}
+
 int main() {
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
@@ -637,6 +1061,9 @@ int main() {
     TestNetworkMfiClientSuccess();
     TestNetworkMfiClientTrickleAndTimeout();
     TestNetworkMfiClientRetryRecovery();
+    TestRemoteMfiHttpClientSuccess();
+    TestRemoteMfiHttpClientErrors();
+    TestRemoteMfiHttpClientHealthAndReset();
 
     // Step 2 tests
     TestCh341Protocol();

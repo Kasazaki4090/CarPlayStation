@@ -4,6 +4,8 @@
 #include <commdlg.h>
 #include <fstream>
 #include <vector>
+#include <cstdlib>
+#include <cstring>
 
 namespace CarPlayStation::UI {
 
@@ -170,6 +172,20 @@ void SetupWizard::LoadMFiSettings(Application::AppSettings& settings) const {
         settings.mfi.daemon_endpoint.port = static_cast<uint16_t>(port);
     }
 
+    // RemoteHttp endpoint.
+    std::string remote_host = ReadIniUtf8(ini, L"MFi", L"RemoteHost");
+    if (!remote_host.empty()) {
+        settings.mfi.remote_mfi.host = std::move(remote_host);
+    }
+    UINT remote_port = GetPrivateProfileIntW(L"MFi", L"RemotePort", 0, ini.c_str());
+    if (remote_port != 0) {
+        settings.mfi.remote_mfi.port = static_cast<uint16_t>(remote_port);
+    }
+    std::string remote_token = ReadIniUtf8(ini, L"MFi", L"RemoteToken");
+    if (!remote_token.empty()) {
+        settings.mfi.remote_mfi.bearer_token = std::move(remote_token);
+    }
+
     // HardwareI2C preferences.
     UINT driver = GetPrivateProfileIntW(L"MFi", L"I2cDriver", -1, ini.c_str());
     if (driver != static_cast<UINT>(-1)) {
@@ -205,6 +221,12 @@ void SetupWizard::SaveMFiSettings(const Application::AppSettings& settings) cons
     WritePrivateProfileStringW(
         L"MFi", L"DaemonPort",
         std::to_wstring(static_cast<unsigned>(mfi.daemon_endpoint.port)).c_str(), ini.c_str());
+
+    WriteIniUtf8(ini, L"MFi", L"RemoteHost", mfi.remote_mfi.host);
+    WritePrivateProfileStringW(
+        L"MFi", L"RemotePort",
+        std::to_wstring(static_cast<unsigned>(mfi.remote_mfi.port)).c_str(), ini.c_str());
+    WriteIniUtf8(ini, L"MFi", L"RemoteToken", mfi.remote_mfi.bearer_token);
 
     WritePrivateProfileStringW(
         L"MFi", L"I2cDriver",
@@ -437,12 +459,23 @@ struct MfiWizardDialogContext {
     HWND hwnd_rad_file{nullptr};
     HWND hwnd_rad_net{nullptr};
     HWND hwnd_rad_hw{nullptr};
+    HWND hwnd_rad_http{nullptr};
     HWND hwnd_btn_browse_cert{nullptr};
     HWND hwnd_btn_browse_key{nullptr};
     HWND hwnd_lbl_cert{nullptr};
     HWND hwnd_lbl_key{nullptr};
-    std::string cert_path;   // chosen certificate file (UTF-8)
-    std::string key_path;    // chosen private key file (UTF-8)
+    HWND hwnd_edit_daemon_host{nullptr};
+    HWND hwnd_edit_daemon_port{nullptr};
+    HWND hwnd_edit_remote_host{nullptr};
+    HWND hwnd_edit_remote_port{nullptr};
+    HWND hwnd_edit_remote_token{nullptr};
+    std::string cert_path;      // chosen certificate file (UTF-8)
+    std::string key_path;       // chosen private key file (UTF-8)
+    std::string daemon_host;    // NetworkDaemon endpoint (prefilled from settings)
+    std::string daemon_port;
+    std::string remote_host;    // RemoteHttp endpoint (typed by the user)
+    std::string remote_port;
+    std::string remote_token;
 };
 
 // Open a Win32 file picker; returns the chosen path as UTF-8 (empty on cancel).
@@ -479,6 +512,63 @@ static void SetLabelFromUtf8(HWND label, const std::string& utf8_path) {
     SetWindowTextW(label, wpath.c_str());
 }
 
+// Convert a UTF-8 string to a wide string (for pre-filling edit controls).
+static std::wstring Utf8ToWideLocal(const std::string& utf8_value) {
+    if (utf8_value.empty()) {
+        return {};
+    }
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8_value.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) {
+        return {};
+    }
+    std::wstring wvalue(static_cast<size_t>(wlen), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8_value.c_str(), -1, wvalue.data(), wlen);
+    return wvalue;
+}
+
+// Read the current text of an edit control as UTF-8, trimmed of ASCII spaces.
+static std::string GetEditUtf8(HWND edit) {
+    if (!edit) {
+        return {};
+    }
+    int len = GetWindowTextLengthW(edit);
+    if (len <= 0) {
+        return {};
+    }
+    std::wstring wtext(static_cast<size_t>(len), L'\0');
+    GetWindowTextW(edit, wtext.data(), len + 1);
+    int u8len = WideCharToMultiByte(CP_UTF8, 0, wtext.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (u8len <= 0) {
+        return {};
+    }
+    std::string utf8(static_cast<size_t>(u8len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wtext.c_str(), -1, utf8.data(), u8len, nullptr, nullptr);
+    utf8.resize(strlen(utf8.c_str()));
+    size_t b = utf8.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) {
+        return {};
+    }
+    size_t e = utf8.find_last_not_of(" \t\r\n");
+    return utf8.substr(b, e - b + 1);
+}
+
+// Validate a decimal port string; returns the port, or 0 when out of range.
+static int ParsePortField(const std::string& text) {
+    if (text.empty() || text.size() > 5) {
+        return 0;
+    }
+    for (char c : text) {
+        if (c < '0' || c > '9') {
+            return 0;
+        }
+    }
+    long value = std::strtol(text.c_str(), nullptr, 10);
+    if (value < 1 || value > 65535) {
+        return 0;
+    }
+    return static_cast<int>(value);
+}
+
 static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* ctx = reinterpret_cast<MfiWizardDialogContext*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
@@ -508,13 +598,69 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 hwnd, (HMENU)201, GetModuleHandleW(nullptr), nullptr
             );
 
-            // Radio 2: Network Daemon
+            // Local-file import: browse buttons + path labels (only meaningful
+            // when the LocalFile backend is selected).
+            ctx->hwnd_btn_browse_cert = CreateWindowExW(
+                0, L"BUTTON",
+                L"选择证书文件 (.p7b)…",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+                40, 116, 150, 26,
+                hwnd, (HMENU)210, GetModuleHandleW(nullptr), nullptr
+            );
+            ctx->hwnd_lbl_cert = CreateWindowExW(
+                0, L"STATIC",
+                L"(未选择证书文件)",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                196, 120, 348, 20,
+                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+            );
+
+            ctx->hwnd_btn_browse_key = CreateWindowExW(
+                0, L"BUTTON",
+                L"选择私钥文件 (.pk8)…",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+                40, 146, 150, 26,
+                hwnd, (HMENU)211, GetModuleHandleW(nullptr), nullptr
+            );
+            ctx->hwnd_lbl_key = CreateWindowExW(
+                0, L"STATIC",
+                L"(未选择私钥文件)",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                196, 150, 348, 20,
+                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+            );
+
+            // Radio 2: Network Daemon (binary TCP signing daemon, host/port editable)
             ctx->hwnd_rad_net = CreateWindowExW(
                 0, L"BUTTON",
-                L"2. TCP 网络签名守护服务 (NetworkDaemon: 默认 127.0.0.1:9000)",
+                L"2. TCP 网络签名守护服务 (NetworkDaemon: 二进制协议, 默认端口 9000)",
                 WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                24, 116, 500, 24,
+                24, 176, 500, 24,
                 hwnd, (HMENU)202, GetModuleHandleW(nullptr), nullptr
+            );
+            CreateWindowExW(
+                0, L"STATIC", L"服务地址:",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                40, 206, 56, 20,
+                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+            );
+            ctx->hwnd_edit_daemon_host = CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+                100, 204, 200, 22,
+                hwnd, (HMENU)220, GetModuleHandleW(nullptr), nullptr
+            );
+            CreateWindowExW(
+                0, L"STATIC", L"端口:",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                312, 206, 36, 20,
+                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+            );
+            ctx->hwnd_edit_daemon_port = CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP,
+                350, 204, 60, 22,
+                hwnd, (HMENU)221, GetModuleHandleW(nullptr), nullptr
             );
 
             // Radio 3: Hardware I2C Bridge
@@ -522,51 +668,88 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 0, L"BUTTON",
                 L"3. 物理 USB-to-I2C 桥接芯片 (HardwareI2C: CH341/CH347/FTDI)",
                 WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                24, 144, 500, 24,
+                24, 234, 500, 24,
                 hwnd, (HMENU)203, GetModuleHandleW(nullptr), nullptr
             );
 
-            // Select Radio 1 by default
-            SendMessageW(ctx->hwnd_rad_file, BM_SETCHECK, BST_CHECKED, 0);
-
-            // Local-file import: browse buttons + path labels (only meaningful
-            // when the LocalFile backend is selected).
-            ctx->hwnd_btn_browse_cert = CreateWindowExW(
+            // Radio 4: Remote MFi HTTP backend (host/port/token typed by the user)
+            ctx->hwnd_rad_http = CreateWindowExW(
                 0, L"BUTTON",
-                L"选择证书文件 (.p7b)…",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                24, 172, 150, 28,
-                hwnd, (HMENU)210, GetModuleHandleW(nullptr), nullptr
+                L"4. 远程 MFi HTTP 认证服务 (RemoteHttp: remote-mfi 风格 HTTP API)",
+                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                24, 262, 500, 24,
+                hwnd, (HMENU)204, GetModuleHandleW(nullptr), nullptr
             );
-            ctx->hwnd_lbl_cert = CreateWindowExW(
-                0, L"STATIC",
-                L"(未选择证书文件)",
+            CreateWindowExW(
+                0, L"STATIC", L"服务地址:",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                184, 176, 360, 20,
+                40, 292, 56, 20,
+                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+            );
+            ctx->hwnd_edit_remote_host = CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+                100, 290, 200, 22,
+                hwnd, (HMENU)230, GetModuleHandleW(nullptr), nullptr
+            );
+            CreateWindowExW(
+                0, L"STATIC", L"端口:",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                312, 292, 36, 20,
+                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+            );
+            ctx->hwnd_edit_remote_port = CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP,
+                350, 290, 60, 22,
+                hwnd, (HMENU)231, GetModuleHandleW(nullptr), nullptr
+            );
+            CreateWindowExW(
+                0, L"STATIC", L"Bearer Token:",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                40, 320, 80, 20,
+                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+            );
+            ctx->hwnd_edit_remote_token = CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP,
+                124, 318, 286, 22,
+                hwnd, (HMENU)232, GetModuleHandleW(nullptr), nullptr
+            );
+            CreateWindowExW(
+                0, L"STATIC",
+                L"提示: 远程服务由 remote-mfi 之类的程序提供 (GET /mfi/certificate, POST /mfi/sign)。",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                40, 346, 500, 20,
                 hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
             );
 
-            ctx->hwnd_btn_browse_key = CreateWindowExW(
-                0, L"BUTTON",
-                L"选择私钥文件 (.pk8)…",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                24, 204, 150, 28,
-                hwnd, (HMENU)211, GetModuleHandleW(nullptr), nullptr
-            );
-            ctx->hwnd_lbl_key = CreateWindowExW(
-                0, L"STATIC",
-                L"(未选择私钥文件)",
-                WS_CHILD | WS_VISIBLE | SS_LEFT,
-                184, 208, 360, 20,
-                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
-            );
+            // Pre-fill the endpoint fields from the current settings.
+            SetWindowTextW(ctx->hwnd_edit_daemon_host, Utf8ToWideLocal(ctx->daemon_host).c_str());
+            SetWindowTextW(ctx->hwnd_edit_daemon_port, Utf8ToWideLocal(ctx->daemon_port).c_str());
+            SetWindowTextW(ctx->hwnd_edit_remote_host, Utf8ToWideLocal(ctx->remote_host).c_str());
+            SetWindowTextW(ctx->hwnd_edit_remote_port, Utf8ToWideLocal(ctx->remote_port).c_str());
+            SetWindowTextW(ctx->hwnd_edit_remote_token, Utf8ToWideLocal(ctx->remote_token).c_str());
+            SetLabelFromUtf8(ctx->hwnd_lbl_cert, ctx->cert_path.empty() ? "(未选择证书文件)" : ctx->cert_path);
+            SetLabelFromUtf8(ctx->hwnd_lbl_key, ctx->key_path.empty() ? "(未选择私钥文件)" : ctx->key_path);
+
+            // Restore the previously selected backend.
+            HWND initial = ctx->hwnd_rad_file;
+            switch (ctx->selected_type) {
+                case Application::MFiBackendType::NetworkDaemon: initial = ctx->hwnd_rad_net; break;
+                case Application::MFiBackendType::HardwareI2C: initial = ctx->hwnd_rad_hw; break;
+                case Application::MFiBackendType::RemoteHttp: initial = ctx->hwnd_rad_http; break;
+                case Application::MFiBackendType::LocalFile:
+                default: break;
+            }
+            SendMessageW(initial, BM_SETCHECK, BST_CHECKED, 0);
 
             // Confirm button
             CreateWindowExW(
                 0, L"BUTTON",
                 L"确定并进入",
-                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                380, 240, 140, 32,
+                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
+                380, 384, 140, 32,
                 hwnd, (HMENU)IDOK, GetModuleHandleW(nullptr), nullptr
             );
 
@@ -600,7 +783,32 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                     ctx->selected_type = Application::MFiBackendType::NetworkDaemon;
                 } else if (SendMessageW(ctx->hwnd_rad_hw, BM_GETCHECK, 0, 0) == BST_CHECKED) {
                     ctx->selected_type = Application::MFiBackendType::HardwareI2C;
+                } else if (SendMessageW(ctx->hwnd_rad_http, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                    ctx->selected_type = Application::MFiBackendType::RemoteHttp;
                 }
+
+                // Read the endpoint fields. Only validate the group that was
+                // selected, so unrelated blank fields never block the wizard.
+                ctx->daemon_host = GetEditUtf8(ctx->hwnd_edit_daemon_host);
+                ctx->daemon_port = GetEditUtf8(ctx->hwnd_edit_daemon_port);
+                ctx->remote_host = GetEditUtf8(ctx->hwnd_edit_remote_host);
+                ctx->remote_port = GetEditUtf8(ctx->hwnd_edit_remote_port);
+                ctx->remote_token = GetEditUtf8(ctx->hwnd_edit_remote_token);
+
+                if (ctx->selected_type == Application::MFiBackendType::NetworkDaemon) {
+                    if (ctx->daemon_host.empty() || ParsePortField(ctx->daemon_port) == 0) {
+                        MessageBoxW(hwnd, L"请填写 TCP 签名服务的地址与端口 (端口范围 1-65535)。",
+                                    L"参数无效", MB_OK | MB_ICONWARNING);
+                        return 0;
+                    }
+                } else if (ctx->selected_type == Application::MFiBackendType::RemoteHttp) {
+                    if (ctx->remote_host.empty() || ParsePortField(ctx->remote_port) == 0) {
+                        MessageBoxW(hwnd, L"请填写远程 MFi HTTP 服务的主机与端口 (端口范围 1-65535)。",
+                                    L"参数无效", MB_OK | MB_ICONWARNING);
+                        return 0;
+                    }
+                }
+
                 ctx->confirmed = true;
                 DestroyWindow(hwnd);
                 return 0;
@@ -641,6 +849,15 @@ bool SetupWizard::ShowMFiWizard(HWND parent, Application::AppSettings& settings,
     RegisterClassExW(&wc);
 
     MfiWizardDialogContext ctx;
+    // Pre-fill the dialog from the current settings so the user edits real values.
+    ctx.selected_type = settings.mfi.backend_type;
+    ctx.cert_path = settings.mfi.certificate_path;
+    ctx.key_path = settings.mfi.private_key_path;
+    ctx.daemon_host = settings.mfi.daemon_endpoint.address;
+    ctx.daemon_port = std::to_string(settings.mfi.daemon_endpoint.port);
+    ctx.remote_host = settings.mfi.remote_mfi.host;
+    ctx.remote_port = std::to_string(settings.mfi.remote_mfi.port);
+    ctx.remote_token = settings.mfi.remote_mfi.bearer_token;
 
     RECT parentRc = { 0 };
     if (parent) {
@@ -653,7 +870,7 @@ bool SetupWizard::ShowMFiWizard(HWND parent, Application::AppSettings& settings,
     }
 
     int width = 570;
-    int height = 300;
+    int height = 452;
     int posX = parentRc.left + ((parentRc.right - parentRc.left) - width) / 2;
     int posY = parentRc.top + ((parentRc.bottom - parentRc.top) - height) / 2;
 
@@ -694,8 +911,19 @@ bool SetupWizard::ShowMFiWizard(HWND parent, Application::AppSettings& settings,
         if (!ctx.key_path.empty()) {
             settings.mfi.private_key_path = ctx.key_path;
         }
+        // Persist the typed endpoints (only used by the matching backend).
+        if (int port = ParsePortField(ctx.daemon_port); !ctx.daemon_host.empty() && port != 0) {
+            settings.mfi.daemon_endpoint.address = ctx.daemon_host;
+            settings.mfi.daemon_endpoint.port = static_cast<uint16_t>(port);
+        }
+        if (int port = ParsePortField(ctx.remote_port); !ctx.remote_host.empty() && port != 0) {
+            settings.mfi.remote_mfi.host = ctx.remote_host;
+            settings.mfi.remote_mfi.port = static_cast<uint16_t>(port);
+            settings.mfi.remote_mfi.bearer_token = ctx.remote_token;
+        }
         preferences_.first_run_completed = true;
         SavePreferences();
+        SaveMFiSettings(settings);
     }
 
     return ctx.confirmed;

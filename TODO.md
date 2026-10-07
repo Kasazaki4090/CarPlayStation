@@ -164,6 +164,7 @@ Tasks below reflect the initial master planning. Remaining items have been conso
 - [x] P0 [Concluded: Partition 3] Implement accessory identification and wireless session start/stop (handling Wi-Fi/BT declare flags). (BuildIdentifyInfo + Iap2SessionManager)
 - [x] P0 Implement pluggable MFi authentication backend for USB-to-I2C bridge chips (CH341, CH347, FTDI, etc.) for local hardware MFi coprocessors (DEC-003, DEC-007).
 - [x] P0 Implement pluggable MFi authentication backend over configurable network daemon / proxy endpoint (`127.0.0.1:9000` / TCP RPC) for remote signing / daemon services (DEC-003, DEC-005).
+- [x] P0 Implement pluggable MFi authentication backend over the Remote MFi HTTP JSON API, with the host, port and bearer token entered in the setup wizard (DEC-011). (RemoteMfiHttpClient)
 - [x] P1 [Concluded: Partition 3] Implement the `IdentificationRejected` retry behaviour (carplayd doc 23) once a reject can be reproduced. (First-reject → RetryIdentify, second-reject → Abort)
 - [ ] P1 Establish a single source of truth for message ids, directions, parameters and enums, mirroring `crates/iap2-core/src/spec.rs`, and a generator or checked-in table derived from Apple's authoritative spec.
 - [ ] P2 Implement notification/transcript handling for accessory information and vehicle identity data.
