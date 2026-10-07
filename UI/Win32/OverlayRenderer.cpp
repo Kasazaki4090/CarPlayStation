@@ -7,6 +7,21 @@ using Microsoft::WRL::ComPtr;
 
 namespace CarPlayStation::UI {
 
+namespace {
+// UTF-8 (std::string from Application/Core) -> UTF-16 for Direct2D text.
+std::wstring Utf8ToWide(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(),
+                                         static_cast<int>(utf8.size()), nullptr, 0);
+    std::wstring wide(static_cast<std::size_t>(wlen), L'\0');
+    if (wlen > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()),
+                            wide.data(), wlen);
+    }
+    return wide;
+}
+}  // namespace
+
 OverlayRenderer::OverlayRenderer() {
     auto now = std::chrono::steady_clock::now().time_since_epoch();
     last_mouse_interaction_tick_ = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
@@ -401,10 +416,23 @@ void OverlayRenderer::DrawStatusPill(float width, float height) {
             break;
         case Core::Session::SessionState::AirPlayStreaming: {
             std::wstring dev = ui_state_.connected_device_name.empty() ? L"iPhone" :
-                std::wstring(ui_state_.connected_device_name.begin(), ui_state_.connected_device_name.end());
+                Utf8ToWide(ui_state_.connected_device_name);
+            // 分辨率/帧率/编码优先显示 Core 实际在推的码流（由
+            // ApplicationService::SnapshotVideoFacts 回填）。Core 还没给出码流时
+            // 退回设置里的有效分辨率，编码显示「检测中」。
+            uint32_t w = ui_state_.current_video_width;
+            uint32_t h = ui_state_.current_video_height;
+            uint32_t fps = ui_state_.current_video_fps;
+            if (w == 0 || h == 0) {
+                auto [dw, dh] = settings_.video.GetEffectiveDimensions();
+                w = dw;
+                h = dh;
+            }
+            std::wstring codec = Utf8ToWide(ui_state_.current_video_codec);
+            if (codec.empty()) codec = L"检测中";
             statusText = L"已连接: " + dev + L" | " +
-                std::to_wstring(ui_state_.current_video_width) + L"x" +
-                std::to_wstring(ui_state_.current_video_height) + L" (60 FPS)";
+                std::to_wstring(w) + L"x" + std::to_wstring(h) + L" @ " +
+                std::to_wstring(fps ? fps : settings_.video.fps) + L" FPS " + codec;
             dotBrush = brush_status_green_.Get();
             break;
         }
@@ -415,11 +443,26 @@ void OverlayRenderer::DrawStatusPill(float width, float height) {
             break;
     }
 
-    // Pill geometry
-    float pillWidth = 420.0f;
+    // Pill geometry. The width follows the measured status text so the longer
+    // "WxH @ fps CODEC" string still fits; it never grows into the gear button.
     float pillHeight = 32.0f;
     float pillX = 16.0f;
     float pillY = 16.0f;
+    float textWidth = 0.0f;
+    if (dwrite_factory_ && tf_normal_) {
+        ComPtr<IDWriteTextLayout> layout;
+        if (SUCCEEDED(dwrite_factory_->CreateTextLayout(
+                statusText.c_str(), static_cast<UINT32>(statusText.size()),
+                tf_normal_.Get(), 2000.0f, 64.0f, &layout))) {
+            DWRITE_TEXT_METRICS metrics{};
+            if (SUCCEEDED(layout->GetMetrics(&metrics))) {
+                textWidth = metrics.widthIncludingTrailingWhitespace;
+            }
+        }
+    }
+    float pillWidth = std::max(420.0f, textWidth + 62.0f);
+    const float maxPillWidth = width - 76.0f - pillX;  // keep clear of the gear button
+    if (maxPillWidth > 200.0f && pillWidth > maxPillWidth) pillWidth = maxPillWidth;
 
     D2D1_ROUNDED_RECT pillRect = D2D1::RoundedRect(
         D2D1::RectF(pillX, pillY, pillX + pillWidth, pillY + pillHeight),
@@ -592,8 +635,8 @@ void OverlayRenderer::DrawSettingsDrawer(float width, float height) {
         }
     }
 
-    // --- Section 2: 音频与音量控制 ---
-    std::wstring audioSecTitle = L"音频与音量调节 (WASAPI 3-Lane):";
+    // --- Section 2: 音量控制 ---
+    std::wstring audioSecTitle = L"音量调节 (WASAPI 3-Lane，采样率跟随系统):";
     D2D1_RECT_F audioSecRect = D2D1::RectF(drawerX + 16.0f, curY, drawerX + drawerW - 16.0f, curY + 18.0f);
     d2d_render_target_->DrawText(
         audioSecTitle.c_str(),
@@ -609,7 +652,6 @@ void OverlayRenderer::DrawSettingsDrawer(float width, float height) {
     sliders_.push_back({ L"媒体音乐音量 (MainMedia)", &settings_.audio.media_volume, 0.0f, 1.0f, {}, false });
     sliders_.push_back({ L"导航播报音量 (AltNav)", &settings_.audio.navigation_volume, 0.0f, 1.0f, {}, false });
     sliders_.push_back({ L"通话/Siri音量 (Telephony)", &settings_.audio.telephony_volume, 0.0f, 1.0f, {}, false });
-    sliders_.push_back({ L"智能压音比率 (Ducking)", &settings_.audio.ducking_ratio, 0.0f, 1.0f, {}, false });
 
     for (size_t i = 0; i < sliders_.size(); ++i) {
         auto& sl = sliders_[i];

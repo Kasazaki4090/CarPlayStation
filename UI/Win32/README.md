@@ -38,6 +38,54 @@ compiled-in defaults, so a fresh install keeps the documented defaults. A legacy
 `BackendType=1` (the removed TCP signing daemon) is migrated to `RemoteHttp` on
 read.
 
+### `[Video]` / `[Audio]`
+
+The settings drawer (`F2`) writes these on change (debounced, and flushed on
+exit), and they are read back **before the window is created**, so the window
+opens at the saved size. Changing them takes effect on the next start.
+
+| Key | Meaning |
+| :--- | :--- |
+| `ResolutionPreset` | `0`=720p `1`=1080p `2`=1440p `3`=2160p `4`=Auto (desktop) `5`=Custom |
+| `CustomWidth` / `CustomHeight` | Frame size used with `ResolutionPreset=5` |
+| `Fps` | `30` or `60` |
+| `PreferredCodec` | `0`=H.264 `1`=HEVC (H.265) `2`=Auto |
+| `DisplayMode` | `0`=Windowed `1`=Borderless fullscreen |
+| `MediaVolume` / `NavigationVolume` / `TelephonyVolume` | Per-lane volume, whole percent `0`–`100` |
+
+Audio has no other keys. The output sample rate always follows the Windows
+default render endpoint (shared mode / mix format), the encode bitrate is fixed
+at 320 kbps, and ducking is driven by the sender — so a `SampleRate`,
+`BitrateKbps` or `DuckingRatio` left over from an older version is ignored.
+
+Hand-editing the file is supported, which is how you try a resolution the drawer
+does not offer — write `ResolutionPreset=5` plus the size you want:
+
+```ini
+[Video]
+ResolutionPreset=5
+CustomWidth=1920
+CustomHeight=720
+PreferredCodec=1
+```
+
+Odd sizes are accepted and rounded up to whole even pixels (`1921x721` becomes
+`1922x722`); anything outside 320–4096 on either axis is treated as a typo,
+logged as `Ignoring out-of-range custom resolution`, and falls back to 720p. The
+renderer aspect-fits the stream, so non-standard aspect ratios letterbox rather
+than distort.
+
+`PreferredCodec` is a request, not a decision. Choosing HEVC makes the receiver
+announce it during AirPlay discovery (`hevcInfo = {}` in the `/info` reply plus
+`hevc` in the phase‑1 `enabledFeatures` list) — the phone only sends H.265 when
+both halves are present. The phone then picks the codec, and the first
+`VideoConfig` packet tells us which one it chose; if that differs from what we
+asked for, the receiver logs `Sender codec differs from the configured spec` and
+reconfigures the decoder to match the actual bitstream, so a mismatch degrades
+gracefully instead of producing a black window. Watch `SETUP Phase 1 response
+body keys=…, enabledFeatures=on, hevc=on` and the `MpvVideoPlayer DIAG` line's
+`video-codec=` / `decodedSize=` fields to confirm which codec is really flowing.
+
 ## Boundaries & Isolation
 
 The UI must not access directly:

@@ -104,6 +104,11 @@ private:
     // Render thread main loop.
     void RenderThreadMain();
 
+    // Init() body with mutex_ already held (shared by Init and Reconfigure).
+    [[nodiscard]] Common::Status InitLocked(const Common::VideoStreamSpec& spec);
+    // Shutdown() body with mutex_ already held (shared by Shutdown and Reconfigure).
+    void StopLocked();
+
     // D3D11 shared texture setup for handing decoded frames to the renderer.
     [[nodiscard]] Common::Status ConfigureD3D11SharedSurfaces();
     void ReleaseD3D11SharedSurfaces();

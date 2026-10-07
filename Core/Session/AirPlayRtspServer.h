@@ -5,6 +5,7 @@
 #include "Core/Session/Pairing/PairSetup.h"
 #include "Core/Session/Pairing/PairVerify.h"
 #include "Core/Common/Result.h"
+#include "Core/Common/Config.h"
 #include <functional>
 #include <memory>
 #include <string>
@@ -55,6 +56,19 @@ public:
         // list to hand the car's Bluetooth radio over for calls, and the audio-routing decision
         // appears to depend on that being known.
         bool advertise_bluetooth{true};
+        // Offer HEVC to the iPhone. Off by default: the phone encodes H.264 unless the
+        // receiver claims HEVC, and the codec the phone then uses is what the video
+        // receiver must decode.
+        //
+        // Both halves are required together (the two working references do exactly this):
+        //   * `hevcInfo = {}` in /info — a presence-only empty dict.
+        //   * `"hevc"` in the phase-1 SETUP response's `enabledFeatures`.
+        // The Rust reference's notes (Reference/carplayd/docs/05_HEVC_AND_MODULAR.md) are
+        // explicit that `hevcInfo` alone only works when iOS's negotiated feature list also
+        // carries `hevc`, that `"hevc"` in `extendedFeatures` is a category error, that
+        // `enabledFeatures` is not a valid /info key, and that the base `features` u64 has
+        // no HEVC bit at all. Wireless is the proven transport, which is the one we use.
+        bool advertise_hevc{false};
         // Which `audioFormats`/`audioLatencies` shape the advert carries.
         //
         // true (default) = the C reference's set: eight entries, all AAC, no
@@ -176,6 +190,29 @@ public:
      * @brief Manually update or preset negotiated parameters.
      */
     void SetNegotiatedParams(NegotiatedMediaParams params);
+
+    /**
+     * @brief Set the display geometry advertised to the iPhone.
+     *
+     * The /info `displays` dictionary (widthPixels/heightPixels/widthPhysical/
+     * heightPhysical/viewAreas) and the HID touchscreen scaling both come from
+     * these values, so the phone lays out and encodes the screen at this size.
+     * Call before the session starts; a phone that already fetched /info keeps
+     * its current layout until the next session.
+     */
+    void SetDisplayGeometry(uint32_t width, uint32_t height, uint32_t fps);
+
+    /**
+     * @brief Turn the HEVC capability advertisement on or off.
+     *
+     * HEVC is not a bit in the base `features` mask: the receiver has to say so
+     * twice, by putting an empty `hevcInfo` dictionary in the /info response and
+     * by adding the literal string "hevc" to the `enabledFeatures` array of the
+     * SETUP phase 1 response. The iPhone only encodes H.265 when it sees both.
+     * Call before the session starts; a phone that already fetched /info keeps
+     * H.264 until the next session.
+     */
+    void SetVideoCodec(Common::VideoCodec codec);
 
     /**
      * @brief Send a HID input report to the active AirPlay event channel.

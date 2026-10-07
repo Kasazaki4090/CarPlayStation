@@ -200,6 +200,6 @@ Configuration is split by ownership, per `DECISIONS.md` DEC-004:
   * `VideoStreamSpec` — negotiated codec / width / height / fps (concrete values, no `"Auto"`).
   * `AudioOutputFormat` — sample rate / channels / bit depth.
   * `DeviceIdentity` + `NetworkEndpoints`, combined as `CoreEnvironmentConfig`.
-* **Application** (`Application/AppSettings.h`) owns all user-tunable preferences: resolution presets, codec preference, window display mode, preferred sample rate, bitrate request, per-lane volumes and ducking ratio, device identity strings.
+* **Application** (`Application/AppSettings.h`) owns all user-tunable preferences: resolution presets, codec preference, window display mode, per-lane volumes, device identity strings. The output sample rate is not a preference — the audio pipeline follows the OS default render endpoint's mix format — and the encode bitrate and ducking are fixed/protocol-driven.
 
-The Application layer resolves preferences into concrete Core parameters at the boundary (e.g. `Auto` preset → actual dimensions). Runtime controls such as lane volume and ducking ratio are exposed directly on `IAudioPipeline` (`SetLaneVolume`, `SetDuckingRatio`) instead of living in a config blob.
+The Application layer resolves preferences into concrete Core parameters at the boundary (e.g. `Auto` preset → actual dimensions). Runtime controls such as lane volume and ducking ratio are exposed directly on `IAudioPipeline` (`SetLaneVolume`, `SetDuckingRatio`) instead of living in a config blob; only the lane volumes are driven from the settings UI.

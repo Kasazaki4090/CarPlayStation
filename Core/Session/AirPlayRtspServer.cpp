@@ -908,6 +908,22 @@ public:
         params_ = std::move(params);
     }
 
+    void SetDisplayGeometry(uint32_t width, uint32_t height, uint32_t fps) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (width == 0 || height == 0) return;
+        options_.default_video_width = width;
+        options_.default_video_height = height;
+        if (fps != 0) options_.default_fps = fps;
+        params_.video_width = options_.default_video_width;
+        params_.video_height = options_.default_video_height;
+        params_.fps = options_.default_fps;
+    }
+
+    void SetVideoCodec(Common::VideoCodec codec) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        options_.advertise_hevc = codec == Common::VideoCodec::HEVC;
+    }
+
     int hid_touch_contacts() const noexcept {
         return options_.hid_touch_contacts >= 2 ? 2 : 1;
     }
@@ -1566,6 +1582,16 @@ private:
         ext_arr.push_back(BplistValue("enhancedRequestCarUI"));
         root.emplace_back("extendedFeatures", BplistValue(ext_arr));
 
+        // hevcInfo: presence-only. HEVC has no bit in the `features` mask above and
+        // does not belong in `extendedFeatures` (those are capability names such as
+        // vocoderInfo); the receiver announces H.265 by adding an empty dictionary
+        // under this key, and by adding the literal string "hevc" to the
+        // `enabledFeatures` array of the SETUP phase 1 response. iOS only encodes
+        // HEVC when it sees both halves.
+        if (options_.advertise_hevc) {
+            root.emplace_back("hevcInfo", BplistValue(BplistDict{}));
+        }
+
         // displays
         BplistDict disp;
         disp.emplace_back("uuid", BplistValue("E0CB6FB0-0000-0000-0000-0000C0FFEE01"));
@@ -2077,12 +2103,17 @@ private:
                 BplistArray enabled;
                 enabled.push_back(BplistValue("iAPChannel"));
                 if (options_.display_view_areas) enabled.push_back(BplistValue("viewAreas"));
+                // "hevc" is the second half of the HEVC advertisement (the first half is
+                // the empty hevcInfo dictionary in /info). The iPhone proposes hevc in its
+                // own SETUP feature list; this is what accepts it.
+                if (options_.advertise_hevc) enabled.push_back(BplistValue("hevc"));
                 resp_dict.emplace_back("enabledFeatures", BplistValue(enabled));
             }
 
             CPS_LOG_INFO("AirPlayRtsp", "SETUP Phase 1 response body keys=",
                          std::to_string(resp_dict.size()),
-                         ", enabledFeatures=", options_.phase1_enabled_features ? "on" : "off");
+                         ", enabledFeatures=", options_.phase1_enabled_features ? "on" : "off",
+                         ", hevc=", options_.advertise_hevc ? "on" : "off");
 
             auto bplist = BplistEncoder::Encode(BplistValue(resp_dict));
             auto resp = AirPlayRtspCodec::MakeOkResponse(cseq);
@@ -2180,6 +2211,14 @@ NegotiatedMediaParams AirPlayRtspServer::GetNegotiatedParams() const noexcept {
 
 void AirPlayRtspServer::SetNegotiatedParams(NegotiatedMediaParams params) {
     impl_->SetNegotiatedParams(std::move(params));
+}
+
+void AirPlayRtspServer::SetDisplayGeometry(uint32_t width, uint32_t height, uint32_t fps) {
+    impl_->SetDisplayGeometry(width, height, fps);
+}
+
+void AirPlayRtspServer::SetVideoCodec(Common::VideoCodec codec) {
+    impl_->SetVideoCodec(codec);
 }
 
 Common::Status AirPlayRtspServer::SendHidReport(uint32_t deviceUid, Common::ByteSpan report) {

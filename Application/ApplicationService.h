@@ -59,6 +59,13 @@ public:
     [[nodiscard]] std::shared_ptr<Core::Service::ICarPlayCoreApi> GetCoreApi() const { return core_api_; }
 
 private:
+    void ApplyMfiSigner(const AppSettings& settings);
+    // Resolve the UI's video preferences into the concrete stream spec Core needs.
+    static Core::Common::VideoStreamSpec ResolveVideoSpec(const AppSettings& settings);
+    // Fill the read-only video facts in a UI state snapshot from Core, so the HUD
+    // reports the spec actually in effect instead of the settings' guess. Takes no
+    // lock: callers must not hold mutex_ across it.
+    void SnapshotVideoFacts(AppUiState& state) const;
     void OnCoreEvent(const Core::Service::CoreEvent& event);
     void NotifyUiState(const AppUiState& state);
     void ResolveSettingsToCore(const AppSettings& settings);
@@ -66,7 +73,7 @@ private:
     // Build the MFi signer from the settings' MFi preferences and inject it
     // into the Core service so the selected backend (LocalFile / Network /
     // HardwareI2C) is actually used for MFi authentication.
-    void ApplyMfiSigner(const AppSettings& settings);
+
 
     // Ask a hardware-backed signer once whether its coprocessor answers on the
     // bus, so a wiring/address problem is visible at startup instead of only

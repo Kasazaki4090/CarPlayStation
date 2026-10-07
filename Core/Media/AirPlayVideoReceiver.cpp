@@ -212,12 +212,15 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
 
     if (decoder_ && !decoder_initialized_.exchange(true)) {
         Common::VideoStreamSpec spec;
-        spec.width = 1280;
-        spec.height = 720;
-        spec.fps = 60;
-        spec.codec = Common::VideoCodec::H264;
+        {
+            std::lock_guard<std::mutex> lock(client_mutex_);
+            spec = default_spec_;
+        }
         auto initSt = decoder_->Init(spec);
-        CPS_LOG_INFO("VideoReceiver", "Decoder initialized with 1280x720@60 H.264: ", initSt.IsOk() ? "OK" : initSt.Message());
+        CPS_LOG_INFO("VideoReceiver", "Decoder initialized with ",
+                     std::to_string(spec.width), "x", std::to_string(spec.height), "@",
+                     std::to_string(spec.fps), " ", std::string(Common::VideoCodecToString(spec.codec)),
+                     ": ", initSt.IsOk() ? "OK" : initSt.Message());
     }
 
     auto cleanupSock = [&]() {
@@ -422,6 +425,24 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
                 }
                 if (memcmp(body.data() + i, "avcC", 4) == 0) {
                     avcc_pos = i + 4;
+                }
+            }
+
+            // The sender picks the codec, not us: it may answer H.264 even when we
+            // asked for H.265. The decoder's demuxer format is fixed at Init, so
+            // follow the bitstream here, before any parameter set is fed.
+            {
+                std::lock_guard<std::mutex> lock(client_mutex_);
+                const Common::VideoCodec want =
+                    is_hevc ? Common::VideoCodec::HEVC : Common::VideoCodec::H264;
+                if (decoder_ && default_spec_.codec != want) {
+                    CPS_LOG_WARN("VideoReceiver", "Sender used ",
+                                 std::string(Common::VideoCodecToString(want)),
+                                 " but decoder was seeded for ",
+                                 std::string(Common::VideoCodecToString(default_spec_.codec)),
+                                 "; reconfiguring decoder");
+                    default_spec_.codec = want;
+                    decoder_->Reconfigure(default_spec_);
                 }
             }
 

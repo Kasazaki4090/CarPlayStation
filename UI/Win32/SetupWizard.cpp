@@ -1,4 +1,6 @@
 #include "SetupWizard.h"
+#include "Core/Common/Logging.h"
+#include <algorithm>
 #include <commctrl.h>
 #include <shlobj.h>
 #include <commdlg.h>
@@ -232,6 +234,117 @@ void SetupWizard::SaveMFiSettings(const Application::AppSettings& settings) cons
     WritePrivateProfileStringW(
         L"MFi", L"I2cResetGpioPin",
         std::to_wstring(static_cast<unsigned>(mfi.hardware_i2c.reset_gpio_pin)).c_str(), ini.c_str());
+}
+
+// --- Video / audio settings persistence ------------------------------------
+// The settings drawer edits these at runtime, so they must survive a restart.
+// Volumes are stored as whole percentages (0..100) instead of floats: the Win32
+// profile API only has integer and string accessors, and an integer is far
+// easier to hand-edit in the file. Resolution keys are read verbatim so an
+// odd size typed into the file (1920x720 for instance) is honoured.
+
+namespace {
+
+// Smallest / largest custom frame we accept from the INI. Anything outside this
+// range is treated as a typo and falls back to the built-in default.
+constexpr uint32_t kMinCustomDimension = 320;
+constexpr uint32_t kMaxCustomDimension = 4096;
+
+// Read an integer percentage and turn it into a 0..1 volume. Absent key -> default.
+float ReadIniPercentAsUnit(const std::wstring& ini, const wchar_t* section, const wchar_t* key,
+                          int default_percent) {
+    const int raw = static_cast<int>(GetPrivateProfileIntW(section, key, default_percent, ini.c_str()));
+    // GetPrivateProfileIntW hands the default back as a UINT, so the "not present"
+    // sentinel (-1) arrives as 0xFFFFFFFF. Report that as a negative value before
+    // clamping so callers can restore their built-in default.
+    if (raw < 0) return -1.0f;
+    return static_cast<float>(std::clamp(raw, 0, 100)) / 100.0f;
+}
+
+// Write a 0..1 volume as a whole percentage.
+void WriteUnitAsIniPercent(const std::wstring& ini, const wchar_t* section, const wchar_t* key, float value) {
+    const int percent = static_cast<int>(std::clamp(value, 0.0f, 1.0f) * 100.0f + 0.5f);
+    WritePrivateProfileStringW(section, key, std::to_wstring(percent).c_str(), ini.c_str());
+}
+
+} // namespace
+
+void SetupWizard::LoadVideoAudioSettings(Application::AppSettings& settings) const {
+    const auto& ini = preferences_.config_file_path;
+
+    // --- [Video] ---
+    UINT preset = GetPrivateProfileIntW(L"Video", L"ResolutionPreset", -1, ini.c_str());
+    if (preset != static_cast<UINT>(-1) && preset <= 5) {
+        settings.video.resolution_preset = static_cast<Application::VideoResolutionPreset>(preset);
+    }
+
+    // A hand-written custom size is accepted as-is, then clamped into a legal
+    // range and aligned to even pixels (what every hardware decoder wants).
+    UINT cw = GetPrivateProfileIntW(L"Video", L"CustomWidth", 0, ini.c_str());
+    UINT ch = GetPrivateProfileIntW(L"Video", L"CustomHeight", 0, ini.c_str());
+    if (cw > 0 && ch > 0) {
+        if (cw >= kMinCustomDimension && cw <= kMaxCustomDimension &&
+            ch >= kMinCustomDimension && ch <= kMaxCustomDimension) {
+            settings.video.custom_width = (cw + 1) & ~1u;
+            settings.video.custom_height = (ch + 1) & ~1u;
+        } else {
+            // Out-of-range typo: keep the app usable rather than opening a
+            // window the compositor will refuse.
+            CPS_LOG_WARN("Settings",
+                "Ignoring out-of-range custom resolution ", std::to_string(cw), "x", std::to_string(ch));
+            settings.video.resolution_preset = Application::VideoResolutionPreset::Res720P;
+        }
+    }
+
+    UINT fps = GetPrivateProfileIntW(L"Video", L"Fps", 0, ini.c_str());
+    if (fps == 30 || fps == 60) {
+        settings.video.fps = fps;
+    }
+    UINT codec = GetPrivateProfileIntW(L"Video", L"PreferredCodec", -1, ini.c_str());
+    if (codec != static_cast<UINT>(-1) && codec <= 2) {
+        settings.video.preferred_codec = static_cast<Application::VideoCodecPreference>(codec);
+    }
+    UINT display_mode = GetPrivateProfileIntW(L"Video", L"DisplayMode", -1, ini.c_str());
+    if (display_mode != static_cast<UINT>(-1) && display_mode <= 2) {
+        settings.video.display_mode = static_cast<Application::WindowDisplayMode>(display_mode);
+    }
+
+    // --- [Audio] ---
+    // Only the three lane volumes are settings. Any SampleRate / BitrateKbps /
+    // DuckingRatio left in an older ini is ignored: the sample rate follows the
+    // Windows default endpoint, the bitrate is fixed at 320 kbps, and ducking is
+    // driven by the sender.
+    settings.audio.media_volume = ReadIniPercentAsUnit(ini, L"Audio", L"MediaVolume", -1);
+    settings.audio.navigation_volume = ReadIniPercentAsUnit(ini, L"Audio", L"NavigationVolume", -1);
+    settings.audio.telephony_volume = ReadIniPercentAsUnit(ini, L"Audio", L"TelephonyVolume", -1);
+    // GetPrivateProfileIntW returns the default when the key is missing, so the
+    // -1 default above means "not present": restore the built-in value instead.
+    if (settings.audio.media_volume < 0.0f) settings.audio.media_volume = Application::AudioPreferences{}.media_volume;
+    if (settings.audio.navigation_volume < 0.0f) settings.audio.navigation_volume = Application::AudioPreferences{}.navigation_volume;
+    if (settings.audio.telephony_volume < 0.0f) settings.audio.telephony_volume = Application::AudioPreferences{}.telephony_volume;
+}
+
+void SetupWizard::SaveVideoAudioSettings(const Application::AppSettings& settings) const {
+    const auto& ini = preferences_.config_file_path;
+    const auto& video = settings.video;
+    const auto& audio = settings.audio;
+
+    WritePrivateProfileStringW(L"Video", L"ResolutionPreset",
+        std::to_wstring(static_cast<unsigned>(video.resolution_preset)).c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"Video", L"CustomWidth",
+        std::to_wstring(video.custom_width).c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"Video", L"CustomHeight",
+        std::to_wstring(video.custom_height).c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"Video", L"Fps",
+        std::to_wstring(video.fps).c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"Video", L"PreferredCodec",
+        std::to_wstring(static_cast<unsigned>(video.preferred_codec)).c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"Video", L"DisplayMode",
+        std::to_wstring(static_cast<unsigned>(video.display_mode)).c_str(), ini.c_str());
+
+    WriteUnitAsIniPercent(ini, L"Audio", L"MediaVolume", audio.media_volume);
+    WriteUnitAsIniPercent(ini, L"Audio", L"NavigationVolume", audio.navigation_volume);
+    WriteUnitAsIniPercent(ini, L"Audio", L"TelephonyVolume", audio.telephony_volume);
 }
 
 // --- Recorded device (iPhone) address persistence ---------------------------

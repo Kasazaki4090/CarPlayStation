@@ -353,9 +353,7 @@ void TestApplicationServiceWithMocks() {
     Application::AppSettings settings;
     settings.device.device_name = "TestCar";
     settings.video.resolution_preset = Application::VideoResolutionPreset::Res1080P;
-    settings.audio.sample_rate = 48000;
     settings.audio.media_volume = 0.8f;
-    settings.audio.ducking_ratio = 0.3f;
 
     auto status = app_service.StartCarPlay(settings);
     assert(status.IsOk());
@@ -367,8 +365,9 @@ void TestApplicationServiceWithMocks() {
 
     // Apply settings (hot update)
     Application::AppSettings new_settings = settings;
-    new_settings.audio.sample_rate = 96000;
     new_settings.audio.media_volume = 0.5f;
+    new_settings.audio.navigation_volume = 0.4f;
+    new_settings.audio.telephony_volume = 0.6f;
     new_settings.video.resolution_preset = Application::VideoResolutionPreset::Res720P;
 
     status = app_service.ApplySettings(new_settings);
@@ -379,11 +378,12 @@ void TestApplicationServiceWithMocks() {
     assert(mock_decoder->GetSpec().width == 1280);
     assert(mock_decoder->GetSpec().height == 720);
 
-    // Verify the mock audio pipeline was reconfigured
-    assert(mock_audio->GetReconfigureCount() >= 1);
-    assert(mock_audio->GetFormat().sample_rate == 96000);
+    // Only the lane volumes may be touched. The output format is the Windows
+    // mix format and is never reconfigured from the settings.
+    assert(mock_audio->GetReconfigureCount() == 0);
     assert(mock_audio->GetLaneVolume(Core::Media::AudioLane::MainMedia) == 0.5f);
-    assert(mock_audio->GetDuckingRatio() == 0.3f);
+    assert(mock_audio->GetLaneVolume(Core::Media::AudioLane::AltNavigation) == 0.4f);
+    assert(mock_audio->GetLaneVolume(Core::Media::AudioLane::SiriTelephony) == 0.6f);
 
     // Forward input events
     Core::Input::TouchPoint point{1, 0.5f, 0.5f};

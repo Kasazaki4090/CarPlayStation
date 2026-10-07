@@ -121,8 +121,12 @@ void TestConfigSeparation() {
 
     settings.video.display_mode = WindowDisplayMode::BorderlessFullscreen;
     settings.video.preferred_codec = VideoCodecPreference::HEVC;
-    settings.audio.sample_rate = 48000;
-    settings.audio.ducking_ratio = 0.25f;
+    // Audio settings are the three lane volumes only: the sample rate follows the
+    // Windows default endpoint and the bitrate is fixed at 320 kbps.
+    settings.audio.media_volume = 0.5f;
+    settings.audio.navigation_volume = 0.4f;
+    settings.audio.telephony_volume = 0.6f;
+    assert(settings.audio.media_volume == 0.5f);
     assert(settings.video.preferred_codec == VideoCodecPreference::HEVC);
 
     std::cout << "[PASS] TestConfigSeparation\n";

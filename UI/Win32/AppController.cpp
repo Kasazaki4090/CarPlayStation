@@ -23,8 +23,58 @@ Core::Common::Status AppController::Initialize(
     app_api_ = std::move(appApi);
     headless_ = headless;
 
-    // 1. Create native Win32 window
-    auto winStatus = window_.Create(winConfig);
+    // 1. Restore persisted settings, then create the native Win32 window.
+    //
+    // The order matters: the saved video mode decides the window's client area,
+    // so the client size, the swapchain and the geometry advertised to the phone
+    // in the RTSP /info response all agree. Changing the resolution therefore
+    // takes effect on the next start of the app.
+    wizard_.LoadMFiSettings(settings_);
+    wizard_.LoadVideoAudioSettings(settings_);
+
+    // Write the loaded values straight back (headless runs never touch the disk).
+    // This makes the [Video] / [Audio] keys exist in the file, so a resolution
+    // can be hand typed in and picked up on the next start.
+    if (!headless_) {
+        wizard_.SaveVideoAudioSettings(settings_);
+    }
+
+    WindowConfig config = winConfig;
+    if (!headless_) {
+        uint32_t winW = 0;
+        uint32_t winH = 0;
+        if (settings_.video.resolution_preset == Application::VideoResolutionPreset::Custom) {
+            // A hand written size (e.g. 1920x720) is used as is. The renderer
+            // letterboxes to the video aspect, so an off aspect window is safe.
+            winW = settings_.video.custom_width;
+            winH = settings_.video.custom_height;
+        } else if (settings_.video.resolution_preset == Application::VideoResolutionPreset::Auto) {
+            winW = static_cast<uint32_t>(::GetSystemMetrics(SM_CXSCREEN));
+            winH = static_cast<uint32_t>(::GetSystemMetrics(SM_CYSCREEN));
+        } else {
+            auto dims = settings_.video.GetEffectiveDimensions();
+            winW = dims.first;
+            winH = dims.second;
+        }
+
+        // Never ask for a window that is bigger than the desktop.
+        const uint32_t maxW = static_cast<uint32_t>(::GetSystemMetrics(SM_CXSCREEN));
+        const uint32_t maxH = static_cast<uint32_t>(::GetSystemMetrics(SM_CYSCREEN));
+        if (winW == 0 || winW > maxW || winH == 0 || winH > maxH) {
+            CPS_LOG_WARN("AppController", "Ignoring unusable window size ", winW, "x", winH,
+                         " (desktop ", maxW, "x", maxH, ")");
+            winW = 1280;
+            winH = 720;
+        }
+        config.client_width = winW;
+        config.client_height = winH;
+        CPS_LOG_INFO("AppController", "Window client area from settings: ", winW, "x", winH,
+                     " preset=", static_cast<unsigned>(settings_.video.resolution_preset),
+                     " codec=", static_cast<unsigned>(settings_.video.preferred_codec),
+                     " fps=", settings_.video.fps);
+    }
+
+    auto winStatus = window_.Create(config);
     if (winStatus.IsError()) {
         return winStatus;
     }
@@ -38,10 +88,6 @@ Core::Common::Status AppController::Initialize(
                 "User rejected safety disclaimer");
         }
     }
-
-    // Restore any persisted MFi backend selection before deciding whether the
-    // first-run wizard must be shown again (e.g. missing cert/key files).
-    wizard_.LoadMFiSettings(settings_);
 
     // Restore the last recorded phone (iPhone) addresses so the device is
     // recognized on the next launch (continuous broadcasting / no re-pairing).
@@ -118,6 +164,12 @@ Core::Common::Status AppController::Initialize(
 
     // 7. Show Window immediately so user gets instant visual feedback
     if (!headless_) {
+        // A saved fullscreen preference is applied here (after the renderer and
+        // the overlay resize callback are wired, so the WM_SIZE this triggers can
+        // rebuild the swapchain and the D2D target).
+        if (settings_.video.display_mode != Application::WindowDisplayMode::Windowed) {
+            window_.SetDisplayMode(WindowDisplayMode::BorderlessFullscreen);
+        }
         window_.Show();
     }
 
@@ -184,11 +236,58 @@ bool AppController::Step() {
     // immediately and the loop would otherwise spin.
     (void)renderer_.Present();
 
+    // 4. Write back settings the user changed in the drawer (debounced).
+    FlushPendingSettings();
+
+    // 5. Keep the HUD's video readout current. Core events only arrive on
+    //    connection/media changes, so poll the state snapshot once a second to
+    //    pick up the codec correction from the first VideoConfig.
+    RefreshUiState();
+
     if (::IsIconic(window_.GetHwnd())) {
         ::Sleep(16);
     }
 
     return true;
+}
+
+void AppController::FlushPendingSettings() {
+    if (!settings_dirty_) {
+        return;
+    }
+    const uint64_t now = ::GetTickCount64();
+    if (now - settings_dirty_tick_ < kSettingsSaveQuietMs) {
+        return;
+    }
+    settings_dirty_ = false;
+    wizard_.SaveVideoAudioSettings(settings_);
+}
+
+void AppController::RefreshUiState() {
+    if (!app_api_) {
+        return;
+    }
+    const uint64_t now = ::GetTickCount64();
+    if (now - ui_refresh_tick_ < kUiRefreshMs) {
+        return;
+    }
+    ui_refresh_tick_ = now;
+    // Cheap: ApplicationService copies its own snapshot and asks Core for the
+    // video spec currently in effect. Only forward the state when the video
+    // facts actually changed, so the overlay's fade timer is not reset each
+    // second.
+    auto state = app_api_->GetCurrentState();
+    if (state.current_video_width == pushed_video_width_ &&
+        state.current_video_height == pushed_video_height_ &&
+        state.current_video_fps == pushed_video_fps_ &&
+        state.current_video_codec == pushed_video_codec_) {
+        return;
+    }
+    pushed_video_width_ = state.current_video_width;
+    pushed_video_height_ = state.current_video_height;
+    pushed_video_fps_ = state.current_video_fps;
+    pushed_video_codec_ = state.current_video_codec;
+    OnUiStateChanged(state);
 }
 
 void AppController::Shutdown() {
@@ -197,6 +296,12 @@ void AppController::Shutdown() {
     }
 
     is_running_ = false;
+
+    // Do not lose a resolution / volume change made moments before closing.
+    if (settings_dirty_) {
+        settings_dirty_ = false;
+        wizard_.SaveVideoAudioSettings(settings_);
+    }
 
     if (app_api_) {
         app_api_->StopCarPlay();
@@ -211,6 +316,10 @@ void AppController::Shutdown() {
 
 void AppController::OnUiStateChanged(const Application::AppUiState& state) {
     overlay_.UpdateUiState(state);
+    pushed_video_width_ = state.current_video_width;
+    pushed_video_height_ = state.current_video_height;
+    pushed_video_fps_ = state.current_video_fps;
+    pushed_video_codec_ = state.current_video_codec;
 
     // Persist the recorded phone (iPhone) addresses to the INI so the device
     // does not need to be re-paired on the next launch. Only write when the
@@ -229,13 +338,28 @@ void AppController::OnSettingsChanged(const Application::AppSettings& newSetting
     bool mfi_changed = (newSettings.mfi.backend_type != settings_.mfi.backend_type ||
                         newSettings.mfi.certificate_path != settings_.mfi.certificate_path ||
                         newSettings.mfi.private_key_path != settings_.mfi.private_key_path);
+    bool video_audio_changed = (newSettings.video.resolution_preset != settings_.video.resolution_preset ||
+                                newSettings.video.custom_width != settings_.video.custom_width ||
+                                newSettings.video.custom_height != settings_.video.custom_height ||
+                                newSettings.video.fps != settings_.video.fps ||
+                                newSettings.video.preferred_codec != settings_.video.preferred_codec ||
+                                newSettings.video.display_mode != settings_.video.display_mode ||
+                                newSettings.audio.media_volume != settings_.audio.media_volume ||
+                                newSettings.audio.navigation_volume != settings_.audio.navigation_volume ||
+                                newSettings.audio.telephony_volume != settings_.audio.telephony_volume);
     settings_ = newSettings;
     if (app_api_) {
         (void)app_api_->ApplySettings(settings_);
     }
-    // Avoid synchronous disk writes during slider drags — only persist if MFi config changed
     if (mfi_changed) {
         wizard_.SaveMFiSettings(settings_);
+    }
+    // The drawer fires this callback on every slider drag frame, so the video and
+    // audio settings are written to the INI only once the values go quiet
+    // (see FlushPendingSettings).
+    if (video_audio_changed) {
+        settings_dirty_ = true;
+        settings_dirty_tick_ = ::GetTickCount64();
     }
 }
 

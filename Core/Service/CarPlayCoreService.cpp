@@ -783,6 +783,14 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
 
         Session::AirPlayRtspServer::Options rtsp_opts{};
         rtsp_opts.port = session_config.rtsp_port;
+        // The display geometry advertised in /info comes from the host's configured
+        // resolution, so the phone lays out and encodes at the size we asked for.
+        rtsp_opts.default_video_width = video_spec_.width;
+        rtsp_opts.default_video_height = video_spec_.height;
+        rtsp_opts.default_fps = video_spec_.fps;
+        // HEVC is only ever sent when we ask for it: the iPhone proposes the codec
+        // but the receiver has to accept it in /info and in SETUP phase 1.
+        rtsp_opts.advertise_hevc = video_spec_.codec == Common::VideoCodec::HEVC;
         // How many contacts the touchscreen HID report may carry is a property of
         // this machine's hardware, not a setting: only hosts with a display
         // digitizer can produce a second contact, and the descriptor advertised
@@ -858,11 +866,7 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
         rtsp_server_->SetStreamingStartedCallback([this](const Session::NegotiatedMediaParams& params) {
             CPS_LOG_INFO("CoreService", "AirPlay streaming started, configuring video decoder & receiver");
             if (video_decoder_) {
-                Common::VideoStreamSpec spec;
-                spec.width = 1280;
-                spec.height = 720;
-                spec.fps = 60;
-                spec.codec = Common::VideoCodec::H264;
+                Common::VideoStreamSpec spec = video_spec_;
                 auto st = video_decoder_->Init(spec);
                 CPS_LOG_INFO("CoreService", "Video decoder initialized: ", st.IsOk() ? "OK" : st.Message());
             }
@@ -1026,6 +1030,7 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
         video_decoder_ = std::make_shared<Media::MpvVideoPlayer>();
     }
     video_receiver_ = std::make_shared<Media::AirPlayVideoReceiver>(video_decoder_, static_cast<uint16_t>(7100));
+    video_receiver_->SetDefaultStreamSpec(video_spec_);
 
     if (deps_.audio_pipeline) {
         audio_pipeline_ = deps_.audio_pipeline;
@@ -1156,6 +1161,33 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
     Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
         "Initialized with env: ", env.identity.device_name);
     return Common::Status::Ok();
+}
+
+void CarPlayCoreService::SetVideoStreamSpec(const Common::VideoStreamSpec& spec) {
+    if (spec.width == 0 || spec.height == 0) return;
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    video_spec_ = spec;
+    // The RTSP advert is what tells the iPhone how big to lay out and encode the
+    // screen; the video receiver seeds the decoder with the same geometry.
+    if (rtsp_server_) rtsp_server_->SetDisplayGeometry(spec.width, spec.height, spec.fps);
+    if (rtsp_server_) rtsp_server_->SetVideoCodec(spec.codec);
+    if (video_receiver_) video_receiver_->SetDefaultStreamSpec(spec);
+    CPS_LOG_INFO("CoreService", "Video stream spec set to ",
+                 std::to_string(spec.width), "x", std::to_string(spec.height), "@",
+                 std::to_string(spec.fps), " ", std::string(Common::VideoCodecToString(spec.codec)));
+}
+
+Common::VideoStreamSpec CarPlayCoreService::GetActiveVideoStreamSpec() const {
+    std::shared_ptr<Media::AirPlayVideoReceiver> receiver;
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        receiver = video_receiver_;
+    }
+    // The receiver owns the truth: its spec is seeded from the settings and its
+    // codec is corrected from the sender's first VideoConfig.
+    if (receiver) return receiver->GetActiveStreamSpec();
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return video_spec_;
 }
 
 Common::Status CarPlayCoreService::UpdateEnvironment(const Common::CoreEnvironmentConfig& env) {

@@ -72,6 +72,8 @@ public:
     // --- ICarPlayCoreApi Implementation ---
     [[nodiscard]] Common::Status Initialize(const Common::CoreEnvironmentConfig& env) override;
     [[nodiscard]] Common::Status UpdateEnvironment(const Common::CoreEnvironmentConfig& env) override;
+    void SetVideoStreamSpec(const Common::VideoStreamSpec& spec) override;
+    [[nodiscard]] Common::VideoStreamSpec GetActiveVideoStreamSpec() const override;
     [[nodiscard]] Common::Status Start() override;
     void Stop() override;
 
@@ -147,6 +149,11 @@ private:
     std::shared_ptr<Session::AccessoryIdentityStore> accessory_identity_;
 
     Common::CoreEnvironmentConfig env_config_;
+    // Display geometry the host wants (from Application settings). It is what the
+    // /info advert carries and what the decoder is seeded with, so the phone's
+    // layout, the encoder and the decoder all agree. Defaults to the geometry the
+    // service used before it was configurable.
+    Common::VideoStreamSpec video_spec_{Common::VideoCodec::H264, 1280, 720, 60, 0};
     // Real device identity (Bluetooth MAC string) used for the mDNS
     // AirPlay-Receiver-Device-ID so the iPhone accepts the connection.
     std::string device_id_;

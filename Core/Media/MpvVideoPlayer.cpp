@@ -112,7 +112,11 @@ Common::Status MpvVideoPlayer::Init(const Common::VideoStreamSpec& spec) {
     if (initialized_) {
         return Common::MakeError(Common::StatusCode::InvalidState, "Decoder already initialized");
     }
+    return InitLocked(spec);
+}
 
+// Body of Init(); caller must hold mutex_.
+Common::Status MpvVideoPlayer::InitLocked(const Common::VideoStreamSpec& spec) {
     if (!LoadMpvLibrary()) {
         return Common::MakeError(Common::StatusCode::MediaPipelineError, "Failed to load libmpv");
     }
@@ -628,14 +632,33 @@ void MpvVideoPlayer::UploadFrameToSharedTexture(const uint8_t* bgraData, uint32_
 Common::Status MpvVideoPlayer::Reconfigure(const Common::VideoStreamSpec& spec) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!initialized_) {
-        return Common::MakeError(Common::StatusCode::InvalidState, "Decoder not initialized");
+        return InitLocked(spec);
     }
-    // For now, Reconfigure is a no-op (the stream spec is fixed during a
-    // session). A full reconfigure would require restarting mpv.
-    spec_ = spec;
-    CPS_LOG_INFO("MpvVideoPlayer", "Reconfigure to ", Common::VideoCodecToString(spec.codec), " ",
-                 spec.width, "x", spec.height, " @", spec.fps, "fps (no-op)");
-    return Common::Status::Ok();
+    if (spec.codec == spec_.codec && spec.width == spec_.width &&
+        spec.height == spec_.height && spec.fps == spec_.fps) {
+        return Common::Status::Ok();
+    }
+
+    // The demuxer format and the SW frame buffers are chosen when mpv is created,
+    // so following the actual bitstream (the sender may pick a different codec than
+    // the one we asked for) means restarting the player.
+    CPS_LOG_INFO("MpvVideoPlayer", "Reconfigure: ",
+                 Common::VideoCodecToString(spec_.codec), " ", spec_.width, "x", spec_.height,
+                 " @", spec_.fps, "fps -> ", Common::VideoCodecToString(spec.codec), " ",
+                 spec.width, "x", spec.height, " @", spec.fps, "fps (restarting player)");
+
+    // The renderer owns the injected D3D11 device; ReleaseD3D11SharedSurfaces()
+    // drops it, so stash it and hand it back before the new instance creates its
+    // shared texture. Otherwise the texture lands on a different device and the
+    // renderer samples nothing (frozen first frame).
+    ID3D11Device* device = injected_device_;
+    ID3D11DeviceContext* context = injected_context_;
+
+    StopLocked();
+
+    injected_device_ = device;
+    injected_context_ = context;
+    return InitLocked(spec);
 }
 
 Common::Status MpvVideoPlayer::DecodeAccessUnit(Common::ByteSpan nalData, uint64_t ptsUs) {
@@ -732,6 +755,11 @@ void MpvVideoPlayer::Flush() {
 
 void MpvVideoPlayer::Shutdown() {
     std::lock_guard<std::mutex> lock(mutex_);
+    StopLocked();
+}
+
+// Body of Shutdown(); caller must hold mutex_.
+void MpvVideoPlayer::StopLocked() {
     if (!initialized_) {
         return;
     }

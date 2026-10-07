@@ -23,6 +23,17 @@ public:
     // Hot-update runtime environment configuration (e.g. RTSP bind port, SoftAP credentials)
     [[nodiscard]] virtual Common::Status UpdateEnvironment(const Common::CoreEnvironmentConfig& env) = 0;
 
+    // Advertise the host display geometry / frame rate to the iPhone (the /info and
+    // SETUP displays dictionaries) and seed the video decoder with the matching
+    // stream spec. Call before Start(); a later call takes effect on the next session.
+    virtual void SetVideoStreamSpec(const Common::VideoStreamSpec& spec) = 0;
+
+    // The spec actually in effect: the geometry advertised to the phone, with
+    // the codec replaced by whatever the sender really put on the wire once the
+    // first VideoConfig arrives. Read-only; the UI uses it for its status
+    // readout so the pill can report facts instead of the settings' guesses.
+    [[nodiscard]] virtual Common::VideoStreamSpec GetActiveVideoStreamSpec() const = 0;
+
     // Start CarPlay advertising and discovery
     [[nodiscard]] virtual Common::Status Start() = 0;
 

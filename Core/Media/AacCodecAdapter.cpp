@@ -331,9 +331,12 @@ bool AacAudioEncoder::Open(const AudioStreamFormat& format) {
     set_param(AACENC_SAMPLERATE, static_cast<UINT>(format.sample_rate));
     set_param(AACENC_CHANNELMODE, format.channels == 1 ? static_cast<UINT>(MODE_1)
                                                       : static_cast<UINT>(MODE_2));
+    // bitrate_bps is always set by the caller today; the fallback is the fixed
+    // 320 kbps we standardise on for stereo (the voice uplink stays at its
+    // 24 kbps, which is what AAC-ELD 16 kHz mono needs).
     set_param(AACENC_BITRATE,
               static_cast<UINT>(format.bitrate_bps ? format.bitrate_bps
-                                                   : (format.channels == 1 ? 24000 : 96000)));
+                                                   : (format.channels == 1 ? 24000 : 320000)));
     set_param(AACENC_TRANSMUX, static_cast<UINT>(TT_MP4_RAW)); // raw access units, no ADTS framing
     set_param(AACENC_AFTERBURNER, 0);
     if (eld) {

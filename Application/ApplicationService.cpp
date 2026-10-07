@@ -40,6 +40,14 @@ Core::Common::Status ApplicationService::StartCarPlay(const AppSettings& setting
     // Network endpoints use their defaults (0.0.0.0:5000, etc.) —
     // they are environment facts, not user preferences (DEC-004).
 
+    // Hand Core the display geometry before Initialize(): the RTSP /info advert is
+    // built during Initialize, and it is what tells the iPhone what size to lay
+    // out and encode.
+    core_api_->SetVideoStreamSpec(ResolveVideoSpec(settings));
+    // Seed the UI's video readout with the spec just handed down; the codec in
+    // it is corrected later from the sender's first VideoConfig.
+    SnapshotVideoFacts(ui_state_);
+
     auto status = core_api_->Initialize(env);
     if (status.IsError()) {
         Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Error, "AppService",
@@ -140,43 +148,31 @@ Core::Common::Status ApplicationService::ApplySettings(const AppSettings& newSet
     ApplyMfiSigner(newSettings);
 
     // Reconfigure video decoder if resolution/codec changed.
-    if (auto decoder = core_api_->GetVideoDecoder()) {
-        auto [width, height] = newSettings.video.GetEffectiveDimensions();
-        Core::Common::VideoStreamSpec spec;
-        spec.width = width;
-        spec.height = height;
-        spec.fps = newSettings.video.fps;
-        // Codec preference is advisory; the session negotiates the final codec.
-        switch (newSettings.video.preferred_codec) {
-            case VideoCodecPreference::H264:  spec.codec = Core::Common::VideoCodec::H264; break;
-            case VideoCodecPreference::HEVC:  spec.codec = Core::Common::VideoCodec::HEVC; break;
-            case VideoCodecPreference::Auto:  spec.codec = Core::Common::VideoCodec::H264; break;
+    {
+        auto spec = ResolveVideoSpec(newSettings);
+        // Keep the advertised geometry in sync for the next session; a phone that
+        // already fetched /info keeps its current layout until then.
+        core_api_->SetVideoStreamSpec(spec);
+        if (auto decoder = core_api_->GetVideoDecoder()) {
+            auto reconfig_status = decoder->Reconfigure(spec);
+            if (reconfig_status.IsError()) {
+                Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Warn, "AppService",
+                    "Video decoder reconfigure failed: ", reconfig_status.Message());
+            }
         }
-        auto reconfig_status = decoder->Reconfigure(spec);
-        if (reconfig_status.IsError()) {
-            Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Warn, "AppService",
-                "Video decoder reconfigure failed: ", reconfig_status.Message());
-        }
+        // The HUD follows the settings immediately; the codec is corrected later
+        // from what the sender actually sends.
+        SnapshotVideoFacts(ui_state_);
     }
 
-    // Reconfigure audio pipeline if sample rate / volumes changed.
+    // Apply the lane volumes. Only the volumes are user settings: the output
+    // sample rate is the Windows render endpoint's mix format (the pipeline
+    // already adapted to it when it started, so there is nothing to reconfigure),
+    // the encode bitrate is fixed, and ducking is driven by the sender.
     if (auto audio = core_api_->GetAudioPipeline()) {
-        Core::Common::AudioOutputFormat fmt;
-        fmt.sample_rate = newSettings.audio.sample_rate;
-        fmt.channels = 2;
-        fmt.bit_depth = 16;
-        fmt.sample_type = Core::Common::AudioSampleType::PcmInt16;
-        auto reconfig_status = audio->Reconfigure(fmt);
-        if (reconfig_status.IsError()) {
-            Core::Common::Logger::Instance().Log(Core::Common::LogLevel::Warn, "AppService",
-                "Audio pipeline reconfigure failed: ", reconfig_status.Message());
-        }
-
-        // Apply lane volumes and ducking ratio.
         audio->SetLaneVolume(Core::Media::AudioLane::MainMedia, newSettings.audio.media_volume);
         audio->SetLaneVolume(Core::Media::AudioLane::AltNavigation, newSettings.audio.navigation_volume);
         audio->SetLaneVolume(Core::Media::AudioLane::SiriTelephony, newSettings.audio.telephony_volume);
-        audio->SetTargetDuckingRatio(newSettings.audio.ducking_ratio);
     }
 
     ui_state_.active_settings = newSettings;
@@ -349,6 +345,16 @@ void ApplicationService::OnCoreEvent(const Core::Service::CoreEvent& event) {
         state_snapshot = ui_state_;
     }
 
+    // Refresh the video facts outside the lock (this calls into Core).
+    SnapshotVideoFacts(state_snapshot);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ui_state_.current_video_width = state_snapshot.current_video_width;
+        ui_state_.current_video_height = state_snapshot.current_video_height;
+        ui_state_.current_video_fps = state_snapshot.current_video_fps;
+        ui_state_.current_video_codec = state_snapshot.current_video_codec;
+    }
+
     // Notify UI callbacks outside the lock.
     std::vector<UiStateChangeCallback> cbs;
     {
@@ -376,6 +382,34 @@ void ApplicationService::ResolveSettingsToCore(const AppSettings& settings) {
     // needs to resolve settings into Core parameters beyond what
     // StartCarPlay / ApplySettings already do.
     (void)settings;
+}
+
+void ApplicationService::SnapshotVideoFacts(AppUiState& state) const {
+    if (!core_api_) return;
+    // Core owns the truth: the geometry it advertises to the phone plus the codec
+    // it actually sees on the wire. The UI must report that, not the settings.
+    auto spec = core_api_->GetActiveVideoStreamSpec();
+    if (spec.width == 0 || spec.height == 0) return;
+    state.current_video_width = spec.width;
+    state.current_video_height = spec.height;
+    state.current_video_fps = spec.fps;
+    state.current_video_codec = std::string(Core::Common::VideoCodecToString(spec.codec));
+}
+
+Core::Common::VideoStreamSpec ApplicationService::ResolveVideoSpec(const AppSettings& settings) {
+    Core::Common::VideoStreamSpec spec;
+    auto [width, height] = settings.video.GetEffectiveDimensions();
+    spec.width = width;
+    spec.height = height;
+    spec.fps = settings.video.fps;
+    // Codec preference is advisory; the session negotiates the final codec and the
+    // decoder reconfigures itself from the VideoConfig packet (avcC/hvcC).
+    switch (settings.video.preferred_codec) {
+        case VideoCodecPreference::H264:  spec.codec = Core::Common::VideoCodec::H264; break;
+        case VideoCodecPreference::HEVC:  spec.codec = Core::Common::VideoCodec::HEVC; break;
+        case VideoCodecPreference::Auto:  spec.codec = Core::Common::VideoCodec::H264; break;
+    }
+    return spec;
 }
 
 void ApplicationService::ApplyMfiSigner(const AppSettings& settings) {

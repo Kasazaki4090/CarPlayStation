@@ -43,6 +43,23 @@ public:
     void SaveMFiSettings(const Application::AppSettings& settings) const;
 
     /**
+     * @brief Load the [Video] / [Audio] sections into the given settings.
+     *
+     * Only keys that are actually present override the in-memory defaults, so a
+     * hand-written config (including odd resolutions such as 1920x720) is
+     * honoured while a missing section keeps the built-in defaults. Values read
+     * back are clamped into a legal range; an unusable custom size falls back
+     * to 720P. These sections are only read at startup, so changes take effect
+     * after an app restart.
+     */
+    void LoadVideoAudioSettings(Application::AppSettings& settings) const;
+
+    /**
+     * @brief Persist the video and audio settings to the [Video] / [Audio] sections.
+     */
+    void SaveVideoAudioSettings(const Application::AppSettings& settings) const;
+
+    /**
      * @brief Load the last recorded phone (iPhone) addresses from disk.
      *
      * Reads the [Device] section (BluetoothMac / WifiMac) of the INI. Empty

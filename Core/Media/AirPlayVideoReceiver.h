@@ -35,6 +35,25 @@ public:
         decoder_ = std::move(decoder);
     }
 
+    // Spec used to initialize the decoder when the first video connection arrives.
+    // The host's configured display geometry, not a fixed 1280x720: the phone
+    // encodes at whatever it was told in /info, so the decoder must be seeded to
+    // match. The codec stays a guess - the real one comes from the VideoConfig
+    // packet (hvcC/avcC) which reconfigures the decoder.
+    void SetDefaultStreamSpec(const Common::VideoStreamSpec& spec) {
+        std::lock_guard<std::mutex> lock(client_mutex_);
+        default_spec_ = spec;
+    }
+
+    // Spec actually in effect: the geometry this receiver asked for, with the
+    // codec replaced by whatever the sender really put on the wire (see the
+    // hvcC/avcC handling in the TCP worker). Polled by the UI for its status
+    // readout, so it must never be read without the lock.
+    Common::VideoStreamSpec GetActiveStreamSpec() const {
+        std::lock_guard<std::mutex> lock(client_mutex_);
+        return default_spec_;
+    }
+
     // Deliberately does *not* reset the AEAD frame counter: the counter is per TCP connection
     // (reset in TcpClientWorker) and must keep tracking the iPhone's counter. A later audio-only
     // SETUP re-applies the key; resetting the counter there desynchronises every video frame.
@@ -51,6 +70,7 @@ private:
 
     std::shared_ptr<IVideoDecoder> decoder_;
     AirPlayVideoDemuxer demuxer_;
+    Common::VideoStreamSpec default_spec_{};
     uint16_t port_{7100};
     std::atomic<bool> running_{false};
     std::atomic<uint64_t> received_frames_{0};
@@ -68,7 +88,7 @@ private:
     std::thread udp_thread_;
     std::vector<std::thread> client_threads_;
     std::vector<uintptr_t> client_sockets_;
-    std::mutex client_mutex_;
+    mutable std::mutex client_mutex_;
 };
 
 } // namespace CarPlayStation::Core::Media

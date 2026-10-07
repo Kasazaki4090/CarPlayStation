@@ -61,15 +61,17 @@ struct VideoPreferences {
     }
 };
 
+// Audio preferences: only the three lane volumes are user settings.
+//
+// The output sample rate is never chosen here - the audio pipeline opens the
+// Windows default render endpoint in shared mode and follows its mix format, so
+// the rate always matches whatever the OS is already running. The encode bitrate
+// is fixed at 320 kbps. Ducking is driven by the sender (RTSP `duckAudio`) and
+// by the receiver's own voice detector, not by the user.
 struct AudioPreferences {
-    uint32_t sample_rate{48000};  // Preferred output sample rate (44100 / 48000 / 96000)
-    uint32_t bitrate_kbps{320};   // Requested stream bitrate (advisory; final value negotiated)
     float media_volume{1.0f};     // 0.0 to 1.0
     float navigation_volume{1.0f};// 0.0 to 1.0
     float telephony_volume{1.0f}; // 0.0 to 1.0
-    float ducking_ratio{0.20f};   // Media volume multiplier during navigation prompt
-                                  // (0.2 = -14 dB, the value carplayd and the
-                                  // CarPlay reference receivers use)
 };
 
 struct DevicePreferences {

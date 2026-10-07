@@ -59,6 +59,19 @@ public:
 private:
     void OnUiStateChanged(const Application::AppUiState& state);
     void OnSettingsChanged(const Application::AppSettings& newSettings);
+
+    // Write the debounced [Video] / [Audio] settings back to the INI. Called
+    // from Step() once the user has stopped dragging a slider, and from
+    // Shutdown() so nothing is lost on exit.
+    void FlushPendingSettings();
+
+    // Push the current UI state to the overlay once a second so the HUD's video
+    // readout follows what Core is actually streaming (Core events only cover
+    // connection/media changes, not the codec correction from the first
+    // VideoConfig). Only pushes when the facts changed, so the overlay's fade
+    // timer is not reset every second.
+    void RefreshUiState();
+
     MainWindow window_;
     D3D11Renderer renderer_;
     OverlayRenderer overlay_;
@@ -71,6 +84,21 @@ private:
     // Last recorded phone addresses persisted to the INI (to avoid redundant writes).
     std::string persisted_bt_mac_;
     std::string persisted_wifi_mac_;
+
+    // The settings drawer fires its callback on every slider drag frame, so the
+    // video/audio settings are written to the INI only after the values have
+    // been stable for kSettingsSaveQuietMs.
+    static constexpr uint64_t kSettingsSaveQuietMs = 500;
+    bool settings_dirty_{false};
+    uint64_t settings_dirty_tick_{0};
+
+    // Video facts last pushed to the overlay (see RefreshUiState).
+    static constexpr uint64_t kUiRefreshMs = 1000;
+    uint64_t ui_refresh_tick_{0};
+    uint32_t pushed_video_width_{0};
+    uint32_t pushed_video_height_{0};
+    uint32_t pushed_video_fps_{0};
+    std::string pushed_video_codec_;
 
     bool is_initialized_{false};
     bool is_running_{false};

@@ -15,8 +15,10 @@ struct AppUiState {
     Core::Session::SessionState session_state{Core::Session::SessionState::Idle};
     std::string connected_device_name;
     bool is_streaming{false};
-    uint32_t current_video_width{1280};   // Runtime fact: actual negotiated resolution
-    uint32_t current_video_height{720};  // Runtime fact: actual negotiated resolution
+    uint32_t current_video_width{0};   // Runtime fact: spec actually in effect
+    uint32_t current_video_height{0};  // Runtime fact: spec actually in effect
+    uint32_t current_video_fps{0};     // Runtime fact: frame rate advertised to the phone
+    std::string current_video_codec;   // Runtime fact: codec on the wire ("H264" / "HEVC" / ...)
     std::string status_message;
     // Recorded phone addresses (runtime facts) so the UI can persist them.
     std::string connected_device_bt_mac;   // iPhone Bluetooth MAC
