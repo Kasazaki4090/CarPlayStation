@@ -961,17 +961,24 @@ required hand-editing a config file.
    linked by the network daemon client, so this adds no dependency. `Options::use_tls` defaults to false and, if set,
    every call returns `NotSupported` rather than silently sending plaintext to a TLS endpoint.
 3. **The endpoint is typed by the user, never hardcoded.** `Application::RemoteMfiPreferences{host,port,bearer_token}`
-   is persisted in the `.ini` (`RemoteHost`, `RemotePort`, `RemoteToken`) and edited in the MFi setup wizard, which
-   now has edit controls for the daemon host/port and for the remote host/port/token (the token field is
-   `ES_PASSWORD`). The default port is the service's own default listen port, 8972. The wizard validates the host as
-   a bare name or `host:port`, the port as `1..65535`, and rejects a host containing a URL scheme.
-4. **`protocolMajor` is mapped onto the existing chip-identity fields.** `MFiChipInfo` has no protocol field, and
+   is persisted in the `.ini` (`RemoteHost`, `RemotePort`, `RemoteToken`) and edited in the MFi setup wizard.
+   The default port is the service's own default listen port, 8972. The wizard validates the host as a bare name or
+   `host:port`, the port as `1..65535`, and rejects a host containing a URL scheme.
+4. **The wizard offers one network option, not two.** The TCP signing daemon and the Remote MFi HTTP service are the
+   same thing from the user's point of view — a signing service reached over the network — so the first-run wizard
+   shows a single "网络 MFi 认证服务" radio with one shared address/port/token field set and a nested protocol
+   sub-selector (HTTP JSON API by default, binary TCP daemon still selectable). The sub-selector only decides which
+   `MFiBackendType` the wizard writes back (`RemoteHttp` or `NetworkDaemon`) and which settings struct the typed
+   endpoint is persisted into; the enum, factory, `.ini` keys and tests are unchanged. Switching protocol refills an
+   empty or default port field with that protocol's default (8972 / 9000) and hides the bearer-token field, which the
+   binary protocol has no use for.
+5. **`protocolMajor` is mapped onto the existing chip-identity fields.** `MFiChipInfo` has no protocol field, and
    `Core/Session/Pairing/AuthSetup.h` selects the v2 vs v3 digest from `chip_id` bits 16-23 or from substrings of
    `firmware_version`. So `protocolMajor:2` becomes `chip_id = 0x00020000` / `firmware_version = "remote-mfi 2.0"`,
    `3` becomes `0x00030000` / `"remote-mfi 3.0"`, and an unknown value leaves both at the neutral `"remote-mfi"`,
    which lets the certificate-driven heuristic decide. `FetchCertificate()` also sets `MFiChipInfo::present = true`,
    which the startup self-probe in `ApplicationService` gates its logging on.
-5. **Certificates are cached, connect failures and `503` are retried.** One `GET /mfi/certificate` per session until
+6. **Certificates are cached, connect failures and `503` are retried.** One `GET /mfi/certificate` per session until
    `ResetChip()` or `InvalidateCache()` drops it. `RequestWithRetry` retries only connect failures and `503` (the
    service holds a chip gate for up to eight seconds and answers `503` while it does), `max_retries + 1` attempts
    with `retry_delay` between them; `400`/`401`/`404` are returned immediately. A fresh `requestId` is generated per

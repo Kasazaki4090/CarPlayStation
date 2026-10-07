@@ -453,29 +453,39 @@ bool SetupWizard::ShowSafetyDisclaimer(HWND parent, bool headless) {
 // First-Run MFi Setup Wizard Modal Implementation
 // ============================================================================
 
+// Which wire protocol the single "network MFi service" option should use.
+enum class NetworkProtocolChoice {
+    Http,       // remote-mfi style HTTP JSON API (default)
+    BinaryTcp,  // framed binary signing daemon
+};
+
+// Default ports offered when the port field is left empty.
+constexpr int kHttpDefaultPort = 8972;
+constexpr int kTcpDefaultPort = 9000;
+
 struct MfiWizardDialogContext {
     bool confirmed{false};
     Application::MFiBackendType selected_type{Application::MFiBackendType::LocalFile};
     HWND hwnd_rad_file{nullptr};
     HWND hwnd_rad_net{nullptr};
     HWND hwnd_rad_hw{nullptr};
-    HWND hwnd_rad_http{nullptr};
+    HWND hwnd_rad_proto_http{nullptr};
+    HWND hwnd_rad_proto_tcp{nullptr};
     HWND hwnd_btn_browse_cert{nullptr};
     HWND hwnd_btn_browse_key{nullptr};
     HWND hwnd_lbl_cert{nullptr};
     HWND hwnd_lbl_key{nullptr};
-    HWND hwnd_edit_daemon_host{nullptr};
-    HWND hwnd_edit_daemon_port{nullptr};
-    HWND hwnd_edit_remote_host{nullptr};
-    HWND hwnd_edit_remote_port{nullptr};
-    HWND hwnd_edit_remote_token{nullptr};
+    HWND hwnd_lbl_token{nullptr};
+    HWND hwnd_edit_host{nullptr};
+    HWND hwnd_edit_port{nullptr};
+    HWND hwnd_edit_token{nullptr};
+    HWND hwnd_hint_net{nullptr};
     std::string cert_path;      // chosen certificate file (UTF-8)
     std::string key_path;       // chosen private key file (UTF-8)
-    std::string daemon_host;    // NetworkDaemon endpoint (prefilled from settings)
-    std::string daemon_port;
-    std::string remote_host;    // RemoteHttp endpoint (typed by the user)
-    std::string remote_port;
-    std::string remote_token;
+    NetworkProtocolChoice protocol{NetworkProtocolChoice::Http};
+    std::string host;           // shared endpoint (prefilled from settings)
+    std::string port;
+    std::string token;          // optional bearer token (HTTP protocol only)
 };
 
 // Open a Win32 file picker; returns the chosen path as UTF-8 (empty on cancel).
@@ -569,6 +579,23 @@ static int ParsePortField(const std::string& text) {
     return static_cast<int>(value);
 }
 
+// Reflect the chosen wire protocol in the dialog: the bearer token only applies
+// to the HTTP API, and an empty/default port field follows the protocol default.
+static void ApplyProtocolChoice(MfiWizardDialogContext* ctx) {
+    const bool http = ctx->protocol == NetworkProtocolChoice::Http;
+    EnableWindow(ctx->hwnd_edit_token, http);
+    ShowWindow(ctx->hwnd_lbl_token, http ? SW_SHOW : SW_HIDE);
+    int current = ParsePortField(GetEditUtf8(ctx->hwnd_edit_port));
+    if (current == 0 || current == kTcpDefaultPort || current == kHttpDefaultPort) {
+        SetWindowTextW(ctx->hwnd_edit_port,
+                      Utf8ToWideLocal(std::to_string(http ? kHttpDefaultPort : kTcpDefaultPort)).c_str());
+    }
+    SetWindowTextW(ctx->hwnd_hint_net,
+                   http
+                       ? L"提示: HTTP 协议由 remote-mfi 之类的服务提供 (GET /mfi/certificate, POST /mfi/sign)。"
+                       : L"提示: TCP 协议为本项目的二进制签名守护服务 (帧协议, 见 NetworkMfiClient)。");
+}
+
 static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* ctx = reinterpret_cast<MfiWizardDialogContext*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
@@ -630,126 +657,114 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
             );
 
-            // Radio 2: Network Daemon (binary TCP signing daemon, host/port editable)
+            // Radio 2: one network signing service. Both wire protocols share the
+            // same address/port fields; the sub-radios only pick the protocol.
             ctx->hwnd_rad_net = CreateWindowExW(
                 0, L"BUTTON",
-                L"2. TCP 网络签名守护服务 (NetworkDaemon: 二进制协议, 默认端口 9000)",
+                L"2. 网络 MFi 认证服务 (远程签名服务, 需填写服务地址与端口)",
                 WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
                 24, 176, 500, 24,
                 hwnd, (HMENU)202, GetModuleHandleW(nullptr), nullptr
             );
+            ctx->hwnd_rad_proto_http = CreateWindowExW(
+                0, L"BUTTON",
+                L"协议: HTTP JSON API (remote-mfi 风格, 默认端口 8972)",
+                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+                40, 204, 480, 22,
+                hwnd, (HMENU)220, GetModuleHandleW(nullptr), nullptr
+            );
+            ctx->hwnd_rad_proto_tcp = CreateWindowExW(
+                0, L"BUTTON",
+                L"协议: TCP 二进制签名守护服务 (默认端口 9000)",
+                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+                40, 228, 480, 22,
+                hwnd, (HMENU)221, GetModuleHandleW(nullptr), nullptr
+            );
             CreateWindowExW(
                 0, L"STATIC", L"服务地址:",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                40, 206, 56, 20,
+                40, 258, 56, 20,
                 hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
             );
-            ctx->hwnd_edit_daemon_host = CreateWindowExW(
+            ctx->hwnd_edit_host = CreateWindowExW(
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-                100, 204, 200, 22,
-                hwnd, (HMENU)220, GetModuleHandleW(nullptr), nullptr
+                100, 256, 200, 22,
+                hwnd, (HMENU)222, GetModuleHandleW(nullptr), nullptr
             );
             CreateWindowExW(
                 0, L"STATIC", L"端口:",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                312, 206, 36, 20,
+                312, 258, 36, 20,
                 hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
             );
-            ctx->hwnd_edit_daemon_port = CreateWindowExW(
+            ctx->hwnd_edit_port = CreateWindowExW(
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP,
-                350, 204, 60, 22,
-                hwnd, (HMENU)221, GetModuleHandleW(nullptr), nullptr
+                350, 256, 60, 22,
+                hwnd, (HMENU)223, GetModuleHandleW(nullptr), nullptr
+            );
+            ctx->hwnd_lbl_token = CreateWindowExW(
+                0, L"STATIC", L"令牌(可选):",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                40, 288, 80, 20,
+                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+            );
+            ctx->hwnd_edit_token = CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP,
+                124, 286, 286, 22,
+                hwnd, (HMENU)224, GetModuleHandleW(nullptr), nullptr
+            );
+            ctx->hwnd_hint_net = CreateWindowExW(
+                0, L"STATIC",
+                L"提示: HTTP 协议由 remote-mfi 之类的服务提供 (GET /mfi/certificate, POST /mfi/sign)。",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                40, 314, 500, 20,
+                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
             );
 
             // Radio 3: Hardware I2C Bridge
             ctx->hwnd_rad_hw = CreateWindowExW(
                 0, L"BUTTON",
                 L"3. 物理 USB-to-I2C 桥接芯片 (HardwareI2C: CH341/CH347/FTDI)",
-                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                24, 234, 500, 24,
+                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+                24, 340, 500, 24,
                 hwnd, (HMENU)203, GetModuleHandleW(nullptr), nullptr
             );
 
-            // Radio 4: Remote MFi HTTP backend (host/port/token typed by the user)
-            ctx->hwnd_rad_http = CreateWindowExW(
-                0, L"BUTTON",
-                L"4. 远程 MFi HTTP 认证服务 (RemoteHttp: remote-mfi 风格 HTTP API)",
-                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                24, 262, 500, 24,
-                hwnd, (HMENU)204, GetModuleHandleW(nullptr), nullptr
-            );
-            CreateWindowExW(
-                0, L"STATIC", L"服务地址:",
-                WS_CHILD | WS_VISIBLE | SS_LEFT,
-                40, 292, 56, 20,
-                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
-            );
-            ctx->hwnd_edit_remote_host = CreateWindowExW(
-                WS_EX_CLIENTEDGE, L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-                100, 290, 200, 22,
-                hwnd, (HMENU)230, GetModuleHandleW(nullptr), nullptr
-            );
-            CreateWindowExW(
-                0, L"STATIC", L"端口:",
-                WS_CHILD | WS_VISIBLE | SS_LEFT,
-                312, 292, 36, 20,
-                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
-            );
-            ctx->hwnd_edit_remote_port = CreateWindowExW(
-                WS_EX_CLIENTEDGE, L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP,
-                350, 290, 60, 22,
-                hwnd, (HMENU)231, GetModuleHandleW(nullptr), nullptr
-            );
-            CreateWindowExW(
-                0, L"STATIC", L"Bearer Token:",
-                WS_CHILD | WS_VISIBLE | SS_LEFT,
-                40, 320, 80, 20,
-                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
-            );
-            ctx->hwnd_edit_remote_token = CreateWindowExW(
-                WS_EX_CLIENTEDGE, L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP,
-                124, 318, 286, 22,
-                hwnd, (HMENU)232, GetModuleHandleW(nullptr), nullptr
-            );
-            CreateWindowExW(
-                0, L"STATIC",
-                L"提示: 远程服务由 remote-mfi 之类的程序提供 (GET /mfi/certificate, POST /mfi/sign)。",
-                WS_CHILD | WS_VISIBLE | SS_LEFT,
-                40, 346, 500, 20,
-                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
-            );
-
             // Pre-fill the endpoint fields from the current settings.
-            SetWindowTextW(ctx->hwnd_edit_daemon_host, Utf8ToWideLocal(ctx->daemon_host).c_str());
-            SetWindowTextW(ctx->hwnd_edit_daemon_port, Utf8ToWideLocal(ctx->daemon_port).c_str());
-            SetWindowTextW(ctx->hwnd_edit_remote_host, Utf8ToWideLocal(ctx->remote_host).c_str());
-            SetWindowTextW(ctx->hwnd_edit_remote_port, Utf8ToWideLocal(ctx->remote_port).c_str());
-            SetWindowTextW(ctx->hwnd_edit_remote_token, Utf8ToWideLocal(ctx->remote_token).c_str());
+            SetWindowTextW(ctx->hwnd_edit_host, Utf8ToWideLocal(ctx->host).c_str());
+            SetWindowTextW(ctx->hwnd_edit_port, Utf8ToWideLocal(ctx->port).c_str());
+            SetWindowTextW(ctx->hwnd_edit_token, Utf8ToWideLocal(ctx->token).c_str());
             SetLabelFromUtf8(ctx->hwnd_lbl_cert, ctx->cert_path.empty() ? "(未选择证书文件)" : ctx->cert_path);
             SetLabelFromUtf8(ctx->hwnd_lbl_key, ctx->key_path.empty() ? "(未选择私钥文件)" : ctx->key_path);
 
-            // Restore the previously selected backend.
+            // Restore the previously selected backend. Both network backends land
+            // on the same radio; the stored type only picks the protocol.
             HWND initial = ctx->hwnd_rad_file;
             switch (ctx->selected_type) {
-                case Application::MFiBackendType::NetworkDaemon: initial = ctx->hwnd_rad_net; break;
+                case Application::MFiBackendType::NetworkDaemon:
+                case Application::MFiBackendType::RemoteHttp:
+                    initial = ctx->hwnd_rad_net;
+                    break;
                 case Application::MFiBackendType::HardwareI2C: initial = ctx->hwnd_rad_hw; break;
-                case Application::MFiBackendType::RemoteHttp: initial = ctx->hwnd_rad_http; break;
                 case Application::MFiBackendType::LocalFile:
                 default: break;
             }
             SendMessageW(initial, BM_SETCHECK, BST_CHECKED, 0);
+            SendMessageW(
+                ctx->protocol == NetworkProtocolChoice::BinaryTcp ? ctx->hwnd_rad_proto_tcp
+                                                                 : ctx->hwnd_rad_proto_http,
+                BM_SETCHECK, BST_CHECKED, 0);
+            ApplyProtocolChoice(ctx);
 
             // Confirm button
             CreateWindowExW(
                 0, L"BUTTON",
                 L"确定并进入",
                 WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
-                380, 384, 140, 32,
+                380, 372, 140, 32,
                 hwnd, (HMENU)IDOK, GetModuleHandleW(nullptr), nullptr
             );
 
@@ -776,34 +791,38 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 }
                 return 0;
             }
+            // Protocol sub-radios of the network option.
+            if (LOWORD(wParam) == 220) {
+                ctx->protocol = NetworkProtocolChoice::Http;
+                ApplyProtocolChoice(ctx);
+                return 0;
+            }
+            if (LOWORD(wParam) == 221) {
+                ctx->protocol = NetworkProtocolChoice::BinaryTcp;
+                ApplyProtocolChoice(ctx);
+                return 0;
+            }
             if (LOWORD(wParam) == IDOK) {
                 if (SendMessageW(ctx->hwnd_rad_file, BM_GETCHECK, 0, 0) == BST_CHECKED) {
                     ctx->selected_type = Application::MFiBackendType::LocalFile;
                 } else if (SendMessageW(ctx->hwnd_rad_net, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-                    ctx->selected_type = Application::MFiBackendType::NetworkDaemon;
+                    ctx->selected_type = ctx->protocol == NetworkProtocolChoice::BinaryTcp
+                                             ? Application::MFiBackendType::NetworkDaemon
+                                             : Application::MFiBackendType::RemoteHttp;
                 } else if (SendMessageW(ctx->hwnd_rad_hw, BM_GETCHECK, 0, 0) == BST_CHECKED) {
                     ctx->selected_type = Application::MFiBackendType::HardwareI2C;
-                } else if (SendMessageW(ctx->hwnd_rad_http, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-                    ctx->selected_type = Application::MFiBackendType::RemoteHttp;
                 }
 
-                // Read the endpoint fields. Only validate the group that was
-                // selected, so unrelated blank fields never block the wizard.
-                ctx->daemon_host = GetEditUtf8(ctx->hwnd_edit_daemon_host);
-                ctx->daemon_port = GetEditUtf8(ctx->hwnd_edit_daemon_port);
-                ctx->remote_host = GetEditUtf8(ctx->hwnd_edit_remote_host);
-                ctx->remote_port = GetEditUtf8(ctx->hwnd_edit_remote_port);
-                ctx->remote_token = GetEditUtf8(ctx->hwnd_edit_remote_token);
+                // Read the shared endpoint fields. Only the network option needs
+                // them, so blank fields never block the other backends.
+                ctx->host = GetEditUtf8(ctx->hwnd_edit_host);
+                ctx->port = GetEditUtf8(ctx->hwnd_edit_port);
+                ctx->token = GetEditUtf8(ctx->hwnd_edit_token);
 
-                if (ctx->selected_type == Application::MFiBackendType::NetworkDaemon) {
-                    if (ctx->daemon_host.empty() || ParsePortField(ctx->daemon_port) == 0) {
-                        MessageBoxW(hwnd, L"请填写 TCP 签名服务的地址与端口 (端口范围 1-65535)。",
-                                    L"参数无效", MB_OK | MB_ICONWARNING);
-                        return 0;
-                    }
-                } else if (ctx->selected_type == Application::MFiBackendType::RemoteHttp) {
-                    if (ctx->remote_host.empty() || ParsePortField(ctx->remote_port) == 0) {
-                        MessageBoxW(hwnd, L"请填写远程 MFi HTTP 服务的主机与端口 (端口范围 1-65535)。",
+                if (ctx->selected_type == Application::MFiBackendType::NetworkDaemon ||
+                    ctx->selected_type == Application::MFiBackendType::RemoteHttp) {
+                    if (ctx->host.empty() || ParsePortField(ctx->port) == 0) {
+                        MessageBoxW(hwnd, L"请填写网络 MFi 认证服务的地址与端口 (端口范围 1-65535)。",
                                     L"参数无效", MB_OK | MB_ICONWARNING);
                         return 0;
                     }
@@ -853,11 +872,17 @@ bool SetupWizard::ShowMFiWizard(HWND parent, Application::AppSettings& settings,
     ctx.selected_type = settings.mfi.backend_type;
     ctx.cert_path = settings.mfi.certificate_path;
     ctx.key_path = settings.mfi.private_key_path;
-    ctx.daemon_host = settings.mfi.daemon_endpoint.address;
-    ctx.daemon_port = std::to_string(settings.mfi.daemon_endpoint.port);
-    ctx.remote_host = settings.mfi.remote_mfi.host;
-    ctx.remote_port = std::to_string(settings.mfi.remote_mfi.port);
-    ctx.remote_token = settings.mfi.remote_mfi.bearer_token;
+    ctx.protocol = settings.mfi.backend_type == Application::MFiBackendType::NetworkDaemon
+                       ? NetworkProtocolChoice::BinaryTcp
+                       : NetworkProtocolChoice::Http;
+    if (ctx.protocol == NetworkProtocolChoice::BinaryTcp) {
+        ctx.host = settings.mfi.daemon_endpoint.address;
+        ctx.port = std::to_string(settings.mfi.daemon_endpoint.port);
+    } else {
+        ctx.host = settings.mfi.remote_mfi.host;
+        ctx.port = std::to_string(settings.mfi.remote_mfi.port);
+        ctx.token = settings.mfi.remote_mfi.bearer_token;
+    }
 
     RECT parentRc = { 0 };
     if (parent) {
@@ -870,7 +895,7 @@ bool SetupWizard::ShowMFiWizard(HWND parent, Application::AppSettings& settings,
     }
 
     int width = 570;
-    int height = 452;
+    int height = 440;
     int posX = parentRc.left + ((parentRc.right - parentRc.left) - width) / 2;
     int posY = parentRc.top + ((parentRc.bottom - parentRc.top) - height) / 2;
 
@@ -911,15 +936,17 @@ bool SetupWizard::ShowMFiWizard(HWND parent, Application::AppSettings& settings,
         if (!ctx.key_path.empty()) {
             settings.mfi.private_key_path = ctx.key_path;
         }
-        // Persist the typed endpoints (only used by the matching backend).
-        if (int port = ParsePortField(ctx.daemon_port); !ctx.daemon_host.empty() && port != 0) {
-            settings.mfi.daemon_endpoint.address = ctx.daemon_host;
-            settings.mfi.daemon_endpoint.port = static_cast<uint16_t>(port);
-        }
-        if (int port = ParsePortField(ctx.remote_port); !ctx.remote_host.empty() && port != 0) {
-            settings.mfi.remote_mfi.host = ctx.remote_host;
-            settings.mfi.remote_mfi.port = static_cast<uint16_t>(port);
-            settings.mfi.remote_mfi.bearer_token = ctx.remote_token;
+        // Persist the typed endpoint into whichever settings struct matches the
+        // protocol that was chosen.
+        if (int port = ParsePortField(ctx.port); !ctx.host.empty() && port != 0) {
+            if (ctx.selected_type == Application::MFiBackendType::NetworkDaemon) {
+                settings.mfi.daemon_endpoint.address = ctx.host;
+                settings.mfi.daemon_endpoint.port = static_cast<uint16_t>(port);
+            } else if (ctx.selected_type == Application::MFiBackendType::RemoteHttp) {
+                settings.mfi.remote_mfi.host = ctx.host;
+                settings.mfi.remote_mfi.port = static_cast<uint16_t>(port);
+                settings.mfi.remote_mfi.bearer_token = ctx.token;
+            }
         }
         preferences_.first_run_completed = true;
         SavePreferences();
