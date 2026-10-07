@@ -164,7 +164,9 @@ private:
     Common::Result<Common::ByteBuffer> HandleRegisterRead(uint8_t reg, size_t length) {
         Common::ByteBuffer buf(length, 0);
 
-        if (reg == 0x02) { // PROTOCOL_MAJOR
+        if (reg == 0x00) { // DEVICE_VERSION
+            if (length >= 1) buf[0] = 0x07; // Standard CP 2.0C/3.0
+        } else if (reg == 0x02) { // PROTOCOL_MAJOR
             if (length >= 1) buf[0] = protocol_major_;
         } else if (reg == 0x05) { // ERROR_CODE
             if (length >= 1) buf[0] = error_code_;
@@ -185,7 +187,7 @@ private:
                 buf[0] = static_cast<uint8_t>((cert_len >> 8) & 0xFF);
                 buf[1] = static_cast<uint8_t>(cert_len & 0xFF);
             }
-        } else if (reg == 0x31) { // CERTIFICATE_DATA windows
+        } else if (reg >= 0x31 && reg <= 0x3F) { // CERTIFICATE_DATA windows
             // The coprocessor exposes the certificate as sequential 128-byte
             // register windows: 0x31 is bytes 0..127, 0x32 bytes 128..255, ...
             size_t offset = static_cast<size_t>(reg - 0x31) * kRegisterWindowBytes;

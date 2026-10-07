@@ -190,7 +190,7 @@ void TestCh341Protocol() {
     auto rst_stream = Ch341Protocol::EncodeResetPulse(0, true);
     assert(!rst_stream.empty());
     assert(rst_stream.front() == Ch341Protocol::CMD_UIO_STREAM);
-    assert(rst_stream.back() == Ch341Protocol::CMD_STREAM_END);
+    assert(rst_stream.back() == Ch341Protocol::UIO_END);
 
     std::cout << "[Test] Ch341Protocol encoding tests passed.\n";
 }

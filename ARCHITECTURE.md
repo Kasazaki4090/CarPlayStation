@@ -34,12 +34,15 @@ CarPlayStation is divided into five major parts:
 │                                               │
 │  System APIs / WASAPI (platform APIs)         │
 │  libmpv (third-party video decoding)          │
+│  fdk-aac (third-party audio decoding)         │
+│  WCH / FTDI USB-I2C driver libraries          │
 └───────────────────────────────────────────────┘
 
 ┌───────────────────────────────────────────────┐
 │                 Reference                     │
 │                                               │
-│  XcertPLay / Carplayd                         │
+│  XcertPLay / Carplayd / DiPlay                │
+│  remote-mfi-for-xcertplay                     │
 │  Protocol and behavior reference only         │
 └───────────────────────────────────────────────┘
 ```
@@ -93,6 +96,8 @@ Examples:
 * WASAPI
 * USB APIs
 * libmpv (video decoding, see `DEC-009`)
+* fdk-aac (audio decoding, see `DEC-010`)
+* WCH CH341/CH347 and FTDI D2XX driver libraries (MFi authentication over USB-I2C, see `DEC-011`)
 
 Third-party libraries should not leak unnecessary implementation details into Core.
 
@@ -102,6 +107,8 @@ Reference implementations and research material.
 
 * XcertPLay
 * Carplayd
+* DiPlay
+* remote-mfi-for-xcertplay
 
 These projects are used for protocol, behavior and implementation research only.
 

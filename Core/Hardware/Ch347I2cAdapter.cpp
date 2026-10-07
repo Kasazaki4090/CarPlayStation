@@ -15,15 +15,32 @@
 namespace CarPlayStation::Core::Hardware {
 
 #ifdef _WIN32
-using PFN_CH347OpenDevice   = HANDLE(WINAPI*)(ULONG iIndex);
-using PFN_CH347CloseDevice  = BOOL(WINAPI*)(ULONG iIndex);
-using PFN_CH347I2C_Init     = BOOL(WINAPI*)(ULONG iIndex, ULONG iClockFreq);
-using PFN_CH347StreamI2C    = BOOL(WINAPI*)(ULONG iIndex, ULONG iWriteLength, PVOID iWriteBuffer, ULONG iReadLength, PVOID oReadBuffer);
-using PFN_CH347GPIO_Set     = BOOL(WINAPI*)(ULONG iIndex, UCHAR iEnable, UCHAR iSetDirOut, UCHAR iSetDataOut);
+using PFN_CH347OpenDevice       = HANDLE(WINAPI*)(ULONG iIndex);
+using PFN_CH347CloseDevice      = BOOL(WINAPI*)(ULONG iIndex);
+using PFN_CH347SetTimeout       = BOOL(WINAPI*)(ULONG iIndex, ULONG iWriteTimeout, ULONG iReadTimeout);
+using PFN_CH347I2C_Set          = BOOL(WINAPI*)(ULONG iIndex, ULONG iMode);
+using PFN_CH347I2C_SetStretch   = BOOL(WINAPI*)(ULONG iIndex, BOOL iEnable);
+using PFN_CH347StreamI2C        = BOOL(WINAPI*)(ULONG iIndex, ULONG iWriteLength, PVOID iWriteBuffer, ULONG iReadLength, PVOID oReadBuffer);
+using PFN_CH347StreamI2C_RetACK = BOOL(WINAPI*)(ULONG iIndex, ULONG iWriteLength, PVOID iWriteBuffer, ULONG iReadLength, PVOID oReadBuffer, PULONG rAckCount);
+using PFN_CH347GPIO_Set         = BOOL(WINAPI*)(ULONG iIndex, UCHAR iEnable, UCHAR iSetDirOut, UCHAR iSetDataOut);
 #endif
 
-// Bus idle gap held before a pure read. See the comment in Transaction().
+// Bus idle gap held before a pure read (matching xcertplay / MFi coprocessor requirement).
 static constexpr std::chrono::milliseconds kSelectToReadGap{5};
+
+static std::string ToHex(const uint8_t* data, size_t length) {
+    std::string out;
+    out.reserve(length * 3);
+    for (size_t i = 0; i < length; ++i) {
+        char buf[4];
+        std::snprintf(buf, sizeof(buf), "%02X ", data[i]);
+        out += buf;
+    }
+    if (!out.empty() && out.back() == ' ') {
+        out.pop_back();
+    }
+    return out;
+}
 
 // The WCH CH347 driver ships in DriverStore\FileRepository\ch341wdm.inf_* (the
 // same INF covers the CH347), which is not on the default DLL search path, and
@@ -45,12 +62,15 @@ public:
         for (const auto& candidate : BuildCh347DllCandidates()) {
             h_dll_ = LoadLibraryA(candidate.c_str());
             if (!h_dll_) continue;
-            fn_open_device_  = reinterpret_cast<PFN_CH347OpenDevice>(GetProcAddress(h_dll_, "CH347OpenDevice"));
-            fn_close_device_ = reinterpret_cast<PFN_CH347CloseDevice>(GetProcAddress(h_dll_, "CH347CloseDevice"));
-            fn_i2c_init_     = reinterpret_cast<PFN_CH347I2C_Init>(GetProcAddress(h_dll_, "CH347I2C_Init"));
-            fn_stream_i2c_   = reinterpret_cast<PFN_CH347StreamI2C>(GetProcAddress(h_dll_, "CH347StreamI2C"));
-            fn_gpio_set_     = reinterpret_cast<PFN_CH347GPIO_Set>(GetProcAddress(h_dll_, "CH347GPIO_Set"));
-            if (fn_open_device_ && fn_close_device_ && fn_stream_i2c_) {
+            fn_open_device_         = reinterpret_cast<PFN_CH347OpenDevice>(GetProcAddress(h_dll_, "CH347OpenDevice"));
+            fn_close_device_        = reinterpret_cast<PFN_CH347CloseDevice>(GetProcAddress(h_dll_, "CH347CloseDevice"));
+            fn_set_timeout_         = reinterpret_cast<PFN_CH347SetTimeout>(GetProcAddress(h_dll_, "CH347SetTimeout"));
+            fn_i2c_set_             = reinterpret_cast<PFN_CH347I2C_Set>(GetProcAddress(h_dll_, "CH347I2C_Set"));
+            fn_i2c_set_stretch_     = reinterpret_cast<PFN_CH347I2C_SetStretch>(GetProcAddress(h_dll_, "CH347I2C_SetStretch"));
+            fn_stream_i2c_          = reinterpret_cast<PFN_CH347StreamI2C>(GetProcAddress(h_dll_, "CH347StreamI2C"));
+            fn_stream_i2c_ret_ack_  = reinterpret_cast<PFN_CH347StreamI2C_RetACK>(GetProcAddress(h_dll_, "CH347StreamI2C_RetACK"));
+            fn_gpio_set_            = reinterpret_cast<PFN_CH347GPIO_Set>(GetProcAddress(h_dll_, "CH347GPIO_Set"));
+            if (fn_open_device_ && fn_close_device_ && (fn_stream_i2c_ || fn_stream_i2c_ret_ack_)) {
                 loaded_path_ = candidate;
                 break;
             }
@@ -58,7 +78,8 @@ public:
             h_dll_ = nullptr;
         }
         if (IsValid()) {
-            CPS_LOG_INFO("Ch347I2c", "CH347 driver loaded from: ", loaded_path_);
+            CPS_LOG_INFO("Ch347I2c", "CH347 driver loaded from: ", loaded_path_,
+                         " (has_ret_ack=", (fn_stream_i2c_ret_ack_ != nullptr), ")");
         } else {
             CPS_LOG_WARN("Ch347I2c", "CH347 driver DLL not found in any candidate location "
                 "(exe dir, System32, DriverStore ch341wdm.inf_*). Install the WCH CH347 driver "
@@ -78,7 +99,7 @@ public:
 
     [[nodiscard]] bool IsValid() const noexcept {
 #ifdef _WIN32
-        return h_dll_ && fn_open_device_ && fn_close_device_ && fn_stream_i2c_;
+        return h_dll_ && fn_open_device_ && fn_close_device_ && (fn_stream_i2c_ || fn_stream_i2c_ret_ack_);
 #else
         return false;
 #endif
@@ -87,11 +108,14 @@ public:
 #ifdef _WIN32
     HMODULE h_dll_{nullptr};
     std::string loaded_path_;
-    PFN_CH347OpenDevice  fn_open_device_{nullptr};
-    PFN_CH347CloseDevice fn_close_device_{nullptr};
-    PFN_CH347I2C_Init    fn_i2c_init_{nullptr};
-    PFN_CH347StreamI2C   fn_stream_i2c_{nullptr};
-    PFN_CH347GPIO_Set    fn_gpio_set_{nullptr};
+    PFN_CH347OpenDevice       fn_open_device_{nullptr};
+    PFN_CH347CloseDevice      fn_close_device_{nullptr};
+    PFN_CH347SetTimeout       fn_set_timeout_{nullptr};
+    PFN_CH347I2C_Set          fn_i2c_set_{nullptr};
+    PFN_CH347I2C_SetStretch   fn_i2c_set_stretch_{nullptr};
+    PFN_CH347StreamI2C        fn_stream_i2c_{nullptr};
+    PFN_CH347StreamI2C_RetACK fn_stream_i2c_ret_ack_{nullptr};
+    PFN_CH347GPIO_Set         fn_gpio_set_{nullptr};
 #endif
 };
 
@@ -127,6 +151,14 @@ Common::Result<void> Ch347I2cAdapter::Open(uint32_t device_index) {
 
     device_index_ = device_index;
     is_open_ = true;
+
+    if (driver_->fn_set_timeout_) {
+        driver_->fn_set_timeout_(device_index_, 500, 500);
+    }
+
+    if (driver_->fn_i2c_set_stretch_) {
+        driver_->fn_i2c_set_stretch_(device_index_, TRUE);
+    }
 
     ApplySpeedLocked();
     return Common::Result<void>::Ok();
@@ -164,17 +196,17 @@ void Ch347I2cAdapter::ApplySpeedLocked() {
     if (!is_open_) return;
 
 #ifdef _WIN32
-    if (driver_->IsValid() && driver_->fn_i2c_init_) {
-        // CH347 iClockFreq: 0=20KHz, 1=100KHz, 2=400KHz, 3=750KHz, 4=1MHz
-        ULONG freq = 1;
+    if (driver_->IsValid() && driver_->fn_i2c_set_) {
+        // CH347 iMode: lower 2 bits: 00=20KHz, 01=100KHz, 10=400KHz, 11=750KHz
+        ULONG mode = 1;
         switch (speed_) {
-            case I2cClockSpeed::Khz20:   freq = 0; break;
-            case I2cClockSpeed::Khz100:  freq = 1; break;
-            case I2cClockSpeed::Khz400:  freq = 2; break;
-            case I2cClockSpeed::Khz750:  freq = 3; break;
-            case I2cClockSpeed::Khz1000: freq = 4; break;
+            case I2cClockSpeed::Khz20:   mode = 0; break;
+            case I2cClockSpeed::Khz100:  mode = 1; break;
+            case I2cClockSpeed::Khz400:  mode = 2; break;
+            case I2cClockSpeed::Khz750:  mode = 3; break;
+            case I2cClockSpeed::Khz1000: mode = 3; break;
         }
-        driver_->fn_i2c_init_(device_index_, freq);
+        driver_->fn_i2c_set_(device_index_, mode);
     }
 #endif
 }
@@ -204,39 +236,96 @@ Common::Result<Common::ByteBuffer> Ch347I2cAdapter::Transaction(uint8_t address7
         return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "CH347 driver unavailable.");
     }
 
-    // See the comment in Ch341I2cAdapter::Transaction(): a pure read still
-    // needs an address byte on the wire, so send the read address byte when
-    // there is no register write to precede it.
-    Common::ByteBuffer write_buf;
-    if (writeData.empty() && readLength > 0) {
-        write_buf.reserve(1);
-        write_buf.push_back(Ch341Protocol::MakeAddressByte(address7Bit, true));
-    } else {
+    ApplySpeedLocked();
+
+    auto execute_stream = [this](ULONG write_len, PVOID p_write, ULONG read_len, PVOID p_read, ULONG expected_ack_min) -> Common::Result<void> {
+        if (driver_->fn_stream_i2c_ret_ack_) {
+            ULONG ack_count = 0;
+            BOOL ok = driver_->fn_stream_i2c_ret_ack_(device_index_, write_len, p_write, read_len, p_read, &ack_count);
+            if (!ok) {
+                return Common::Status::Error(Common::StatusCode::HardwareError, "CH347StreamI2C_RetACK call failed.");
+            }
+            if (expected_ack_min > 0 && ack_count < expected_ack_min) {
+                return Common::Status::Error(Common::StatusCode::DeviceUnavailable,
+                    "CH347 reported I2C NACK (expected at least " + std::to_string(expected_ack_min) +
+                    " ACKs, received " + std::to_string(ack_count) + ")");
+            }
+            return Common::Result<void>::Ok();
+        } else if (driver_->fn_stream_i2c_) {
+            BOOL ok = driver_->fn_stream_i2c_(device_index_, write_len, p_write, read_len, p_read);
+            if (!ok) {
+                return Common::Status::Error(Common::StatusCode::HardwareError, "CH347StreamI2C call failed.");
+            }
+            return Common::Result<void>::Ok();
+        }
+        return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "No CH347 stream transfer function available.");
+    };
+
+    // Case 1: Pure write (readLength == 0)
+    if (!writeData.empty() && readLength == 0) {
+        Common::ByteBuffer write_buf;
         write_buf.reserve(1 + writeData.size());
         write_buf.push_back(Ch341Protocol::MakeAddressByte(address7Bit, false));
         write_buf.insert(write_buf.end(), writeData.begin(), writeData.end());
+
+        auto res = execute_stream(static_cast<ULONG>(write_buf.size()), write_buf.data(), 0, nullptr, static_cast<ULONG>(write_buf.size()));
+        if (res.IsError()) {
+            return res.Error();
+        }
+        return Common::ByteBuffer{};
     }
 
-    Common::ByteBuffer read_buf(readLength, 0);
-
-    // Hold the bus idle across the STOP/START boundary of a register read so
-    // the coprocessor has time to prepare for the read address.
+    // Case 2: Pure read (writeData is empty, readLength > 0)
     if (writeData.empty() && readLength > 0) {
         std::this_thread::sleep_for(kSelectToReadGap);
+
+        uint8_t addr_r = Ch341Protocol::MakeAddressByte(address7Bit, true);
+        Common::ByteBuffer read_buf(readLength, 0);
+
+        auto res = execute_stream(1, &addr_r, static_cast<ULONG>(readLength), read_buf.data(), 1);
+        if (res.IsError()) {
+            return res.Error();
+        }
+
+        size_t shown = (readLength < 16) ? readLength : 16;
+        CPS_LOG_DEBUG("Ch347I2c", "addr 0x", ToHex(&address7Bit, 1),
+                      " read ", readLength, " bytes: ",
+                      ToHex(read_buf.data(), shown));
+        return read_buf;
     }
 
-    ULONG write_len = static_cast<ULONG>(write_buf.size());
-    ULONG read_len = static_cast<ULONG>(readLength);
+    // Case 3: Combined Write-then-Read (both writeData and readLength > 0)
+    // Follow LIVI / xcertplay contract: execute write with STOP, hold bus idle
+    // for at least 5 ms, then execute pure read with STOP.
+    if (!writeData.empty() && readLength > 0) {
+        Common::ByteBuffer write_buf;
+        write_buf.reserve(1 + writeData.size());
+        write_buf.push_back(Ch341Protocol::MakeAddressByte(address7Bit, false));
+        write_buf.insert(write_buf.end(), writeData.begin(), writeData.end());
 
-    PVOID p_write = write_len > 0 ? write_buf.data() : nullptr;
-    PVOID p_read = read_len > 0 ? read_buf.data() : nullptr;
+        auto write_res = execute_stream(static_cast<ULONG>(write_buf.size()), write_buf.data(), 0, nullptr, static_cast<ULONG>(write_buf.size()));
+        if (write_res.IsError()) {
+            return write_res.Error();
+        }
 
-    BOOL ok = driver_->fn_stream_i2c_(device_index_, write_len, p_write, read_len, p_read);
-    if (!ok) {
-        return Common::Status::Error(Common::StatusCode::HardwareError, "CH347StreamI2C hardware transaction failed.");
+        std::this_thread::sleep_for(kSelectToReadGap);
+
+        uint8_t addr_r = Ch341Protocol::MakeAddressByte(address7Bit, true);
+        Common::ByteBuffer read_buf(readLength, 0);
+
+        auto read_res = execute_stream(1, &addr_r, static_cast<ULONG>(readLength), read_buf.data(), 1);
+        if (read_res.IsError()) {
+            return read_res.Error();
+        }
+
+        size_t shown = (readLength < 16) ? readLength : 16;
+        CPS_LOG_DEBUG("Ch347I2c", "addr 0x", ToHex(&address7Bit, 1),
+                      " read ", readLength, " bytes: ",
+                      ToHex(read_buf.data(), shown));
+        return read_buf;
     }
 
-    return read_buf;
+    return Common::ByteBuffer{};
 #else
     return Common::Status::Error(Common::StatusCode::NotImplemented, "CH347 only supported on Windows.");
 #endif

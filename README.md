@@ -2,49 +2,89 @@
 
 A Windows CarPlay receiver.
 
-CarPlayStation implements a CarPlay receiver on Windows: it pairs with an iPhone
-over Bluetooth (MFi) and AirPlay, carries the CarPlay session over RFCOMM /
-Wi-Fi, and renders the decrypted H.264 video stream and audio to a local window
-while forwarding touch / input back to the phone.
+CarPlayStation turns a PC into the head unit of a car. It advertises itself as a
+CarPlay accessory, pairs with an iPhone over Bluetooth (RFCOMM) and Wi-Fi
+(AirPlay), runs the full CarPlay session — iAP2 identification, MFi
+authentication, pairing, RTSP setup, stream keys — and then renders the
+encrypted H.264 video and AAC audio locally while sending touch, pointer and
+remote-control input back to the phone.
+
+Everything is native C++ (C++17) on Win32: no .NET, no Electron, no extra
+runtime to install, and no media framework beyond libmpv for video decoding and
+fdk-aac for audio decoding.
 
 ## Status
 
-Implementation in progress. The Core protocol stack (pairing, iAP2, transport,
-session) and the UI / Application layers are in place; the video path is
-currently driven by libmpv (see `Lib/`).
+Implementation in progress. The Core protocol stack (MFi auth, pairing, iAP2,
+transport, session), the media pipeline, and the UI / Application layers are in
+place and a wireless CarPlay session reaches the desktop end to end.
 
 Features:
 
 - [x] Wired CarPlay (USB / NCM)
-- [x] Wireless CarPlay (Wi-Fi / IP)
-- [x] Audio (WASAPI shared-mode pipeline + microphone uplink)
-- [x] Video (libmpv decode + D3D11 shared-texture render)
-- [x] Touch / Input (Win32 input router)
+- [x] Wireless CarPlay (Bluetooth RFCOMM + Wi-Fi hotspot, mDNS/DNS-SD)
+- [x] MFi authentication — three interchangeable backends (see below)
+- [x] Pairing / identity — `pair-setup` (SRP), `pair-verify`, `auth-setup`,
+      persistent accessory identities (`carplay_pairings.json`)
+- [x] AirPlay RTSP setup phase 1 / info / record / setup phase 2 (stream keys)
+- [x] Video — ChaCha20-Poly1305 frame decryption, libmpv decode, D3D11
+      shared-texture render (see `DEC-009`)
+- [x] Audio — three-lane WASAPI shared-mode pipeline, AAC via fdk-aac
+      (see `DEC-010`)
+- [x] Microphone uplink — WASAPI capture, sealed and sent as RTP (PT 100)
+- [x] Touch / Input — Win32 input router, single- and multi-touch HID
+- [x] First-run setup wizard and persisted UI preferences
 
 ## Architecture
 
-Five layers, top to bottom:
+Five parts, top to bottom:
 
 ```text
-UI            Win32 window, D3D11/D2D rendering, input
-Application   Application API / state / commands / events (DEC-002)
-Core          CarPlay session, pairing/auth, iAP2, transport, audio/video/input
-Lib           System APIs / WASAPI (platform APIs), libmpv
-Reference     xcertplay / carplayd / DiPlay (protocol reference only)
+UI            Win32 window, D3D11/D2D overlay, input router, setup wizard
+Application   Settings / commands / events / MFi signer factory (DEC-002)
+Core          7-layer CarPlay stack: hardware & MFi, transport, iAP2,
+              session & pairing, media, input, service facade
+Lib           System APIs / WASAPI (platform APIs), libmpv, fdk-aac,
+              WCH and FTDI USB-to-I2C driver libraries
+Reference     xcertplay / carplayd / diplay / remote-mfi-for-xcertplay
+              (protocol reference only, never linked)
 ```
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full layer responsibilities and
+`Core/` is itself a strict seven-layer stack with downward-only dependencies,
+from Layer 1 (hardware / MFi) up to Layer 7 (the service facade
+`ICarPlayCoreApi.h`). Each layer has its own README with boundaries, a file
+inventory, and an "AI Partition & Mocking Guide" for isolated development.
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full layer responsibilities,
+[Core/README.md](./Core/README.md) for the layer topology, and
 [DECISIONS.md](./DECISIONS.md) for the design decisions (DEC-xxx).
+
+## MFi Authentication Backends
+
+CarPlay requires an Apple-licensed MFi coprocessor to sign the authentication
+challenge. CarPlayStation can satisfy that requirement in three ways, chosen in
+the first-run wizard or in the settings drawer (`F2`):
+
+| Backend | What it uses | When |
+| --- | --- | --- |
+| Local file | Imported certificate + private key, signed in software | Development without hardware |
+| USB-to-I2C hardware | An MFi authentication coprocessor (CP 2.0C / 3.0) on I2C behind a WCH CH341 / CH347 or FTDI D2XX bridge | Real accessory behaviour, both MFi 2.x and 3.0 (SHA-256) certificates |
+| Remote MFi HTTP | An HTTP service that performs the signing (see `Reference/remote-mfi-for-xcertplay`, `DEC-011`) | Sharing one accessory certificate across machines |
+
+The Core never hardcodes a file path, a driver, or a server address: the
+Application layer builds the right `Core::Hardware::IMfiSigner` from
+`AppSettings` (see `DEC-004`).
 
 ## Directory Layout
 
 ```text
-Core/          CarPlayStation's own implementation (protocol, media, transport)
-Application/   Application layer between UI and Core
-UI/Win32/      Win32 window, D3D11/D2D renderer, input router
-Lib/           External libraries (libmpv) — see Lib/Readme.md
+Core/          CarPlayStation's own implementation (7 layers) — see Core/README.md
+Application/   Application layer between UI and Core (settings, signer factory)
+UI/Win32/      Win32 window, D3D11/D2D renderer, input router, setup wizard
+Lib/           External libraries — see Lib/Readme.md
 Reference/     Protocol reference projects (git submodules)
-Tests/         Unit / hardware tests
+Tests/         Per-layer unit / replay / hardware tests
+scripts/       Helper scripts (launch, firewall rules)
 ```
 
 ## Building
@@ -54,10 +94,19 @@ Prerequisites:
 - Windows 10/11 (x64)
 - Visual Studio 2022 Build Tools (C++ workload)
 - CMake 3.20+
-- A Bluetooth radio (for MFi pairing)
+- Git (for the submodules)
+- A Bluetooth radio and a Wi-Fi adapter (for wireless CarPlay)
 
-The external library under `Lib/` (libmpv) is vendored locally and
-are not committed to git. Obtain them as described in [Lib/Readme.md](./Lib/Readme.md).
+Fetch the reference submodules and the pinned fdk-aac submodule:
+
+```bat
+git submodule update --init --recursive
+```
+
+The remaining third-party packages under `Lib/` (libmpv, the WCH CH341/CH347
+driver package, the FTDI D2XX + libMPSSE package) are vendored locally and are
+not committed to git. What to download, which version, and where to place it is
+recorded in [Lib/Readme.md](./Lib/Readme.md).
 
 Build (x64, Release):
 
@@ -76,15 +125,55 @@ nmake
 
 The executable is produced at `build-release/UI/Win32/CarPlayStation.exe`.
 
+Run the test suites from the build directory:
+
+```bat
+ctest --output-on-failure
+```
+
+Each layer has its own suite (`CommonTests`, `HardwareTests`,
+`TransportTests`, `ProtocolTests`, `ProtocolReplayTests`, `SessionTests`,
+`MediaTests`, `InputTests`, `ServiceTests`, `UiTests`). They run against mock
+adapters and recorded protocol traffic, so no iPhone, USB-I2C bridge, or
+microphone is needed to run them.
+
 ## Running
 
-Run the executable. The app opens a window, starts the CarPlay core (MFi
-signer, RFCOMM server, AirPlay RTSP, video/audio receivers), and waits for an
-iPhone to connect.
+The easiest way is the launcher script:
+
+```powershell
+.\scripts\Run-CarPlayStation.ps1            # start the UI
+.\scripts\Run-CarPlayStation.ps1 -Headless  # core only, no window
+.\scripts\Run-CarPlayStation.ps1 -Debug     # prefer the build-msvc output
+```
+
+or start the executable directly:
 
 ```bat
 build-release\UI\Win32\CarPlayStation.exe
 ```
+
+First run: the app shows a safety disclaimer, then a wizard that picks the MFi
+backend (local file / USB-to-I2C hardware / remote MFi HTTP) and the video and
+audio options. Preferences are saved in `carplaystation_ui.ini` next to the
+executable when the folder is writable, otherwise in
+`%APPDATA%\CarPlayStation\`. See [UI/Win32/README.md](./UI/Win32/README.md)
+for every key.
+
+Wireless CarPlay: start the app, then on the iPhone open *Settings → CarPlay*
+and select *CarPlayStation*. The app advertises `_airplay._tcp` and
+`_carplay-ctrl._tcp` over mDNS, accepts the Bluetooth RFCOMM identification,
+brings the phone onto the Windows hotspot, and continues over Wi-Fi. If the
+phone never appears, inbound mDNS and RTSP are almost certainly blocked — the
+hotspot interface is treated as a *Public* network profile. Fix it once from an
+elevated PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\Set-UpFirewall.ps1
+```
+
+The app writes a rolling log next to the executable (`carplaystation.log`), and
+`F4` opens the in-app log panel.
 
 ## Input
 
@@ -101,8 +190,10 @@ same touchscreen device.
 | Mouse wheel | Swipe down / up (scroll) |
 | `Enter` | Tap at the centre of the screen |
 | `Space`, media keys | Play-pause / next / previous |
-| `F1`, `F3` / `F4` | Siri / call accept, reject |
+| `F1`, `F3` / `F4` | Siri / call accept, call reject |
 | `F2` | Settings drawer (local only) |
+| `F4` | Log panel (local only, when the overlay is up) |
+| `F11` | Toggle fullscreen (local only) |
 
 ### Multi-touch
 
@@ -118,13 +209,32 @@ mouse messages a touchpad produces, which is why a touchpad stays single-point.
 
 ## Documentation
 
+Root documents:
+
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — layer responsibilities and data flow
 - [DECISIONS.md](./DECISIONS.md) — design decisions (DEC-xxx)
-- [PROJECT.md](./PROJECT.md) — project overview
+- [PROJECT.md](./PROJECT.md) — goals, scope, requirements
 - [TODO.md](./TODO.md) — open work
-- [BUGS.md](./BUGS.md) — known issues
+- [BUGS.md](./BUGS.md) — known issues (BUG-xxx)
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — contribution guidelines
 - [Lib/Readme.md](./Lib/Readme.md) — external library records and policy
+- [result.md](./result.md) — phase progress and fix log (Chinese)
+
+Layer and module documents:
+
+- [Core/README.md](./Core/README.md) — the seven-layer Core topology
+- [Core/Hardware](./Core/Hardware/README.md) — MFi signers, USB-to-I2C bridges, touch capability probe
+- [Core/Transport](./Core/Transport/README.md) — RFCOMM, IP/NCM, mDNS/DNS-SD
+- [Core/Protocol](./Core/Protocol/README.md) — iAP2 framing, packet engine, wireless control plane
+- [Core/Session](./Core/Session/README.md) — CarPlay state machine, AirPlay RTSP, pairing crypto
+- [Core/Media](./Core/Media/README.md) — video and audio receivers, codecs, WASAPI pipelines
+- [Core/Input](./Core/Input/README.md) — HID input and multi-touch injection
+- [Core/Service](./Core/Service/README.md) — the `ICarPlayCoreApi` facade
+- [Application/README.md](./Application/README.md) — settings model and signer factory
+- [UI/Win32/README.md](./UI/Win32/README.md) — window, renderer, overlay, setup wizard, INI keys
+
+Every layer README ends with an "AI Partition & Mocking Guide": which interfaces
+to mock so the layer can be developed and tested in isolation.
 
 ## License
 

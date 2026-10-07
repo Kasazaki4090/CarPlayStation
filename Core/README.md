@@ -41,7 +41,7 @@ Drawing inspiration from the OSI 7-layer model and real-world CarPlay receiver p
 ║  └──────────────────────────────────┬───────────────────────────────┘  ║
 ║                                     │                                  ║
 ║  ┌──────────────────────────────────▼───────────────────────────────┐  ║
-║  │ Layer 3: Protocol (iAP2 Framing, Packet Engine, Message Catalog) │  ║
+║  │  Layer 3: Protocol (iAP2 Framing, Packet Engine, Control Plane)  │  ║
 ║  └──────────────────────────────────┬───────────────────────────────┘  ║
 ║                                     │                                  ║
 ║  ┌──────────────────────────────────▼───────────────────────────────┐  ║
@@ -49,13 +49,13 @@ Drawing inspiration from the OSI 7-layer model and real-world CarPlay receiver p
 ║  └──────────────────────────────────┬───────────────────────────────┘  ║
 ║                                     │                                  ║
 ║  ┌──────────────────────────────────▼───────────────────────────────┐  ║
-║  │ Layer 1: Hardware & MFi (CH341 I2C Driver, Remote MFi HTTP)      │  ║
+║  │    Layer 1: Hardware & MFi (File / USB-I2C / Remote MFi HTTP)    │  ║
 ║  └──────────────────────────────────────────────────────────────────┘  ║
 ╚════════════════════════════════════════════════════════════════════════╝
                                     │
 ┌───────────────────────────────────▼────────────────────────────────────┐
 │                    Platform / System APIs / Libraries                  │
-│       (Windows SDK, Direct3D 11, WASAPI, WinSock, libmpv)                │
+│      (Windows SDK, Direct3D 11, WASAPI, WinSock, libmpv, fdk-aac)      │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -65,12 +65,12 @@ Drawing inspiration from the OSI 7-layer model and real-world CarPlay receiver p
 
 | Layer | Directory | Primary Responsibilities | Key Interfaces & Components |
 | :--- | :--- | :--- | :--- |
-| **Layer 1** | [`Hardware/`](file:///d:/CarPlayStation/Core/Hardware/README.md) | Hardware Abstraction & MFi Bridges | `IMfiSigner` (CH341 USB-to-I2C driver, Remote MFi HTTP client) |
-| **Layer 2** | [`Transport/`](file:///d:/CarPlayStation/Core/Transport/README.md) | Link Layer & Wireless Channels | `BtRfcommTransport`, `WifiSoftApManager`, `MdnsAdvertiser` |
-| **Layer 3** | [`Protocol/`](file:///d:/CarPlayStation/Core/Protocol/README.md) | iAP2 Framing & Message Codecs | `Iap2LinkEngine` (`0xFF 0x5A`), `Iap2SessionManager`, Message Catalog |
-| **Layer 4** | [`Session/`](file:///d:/CarPlayStation/Core/Session/README.md) | CarPlay & AirPlay Orchestration | `CarPlaySessionStateMachine`, `AirPlayRtspServer`, `PairingStore` |
-| **Layer 5** | [`Media/`](file:///d:/CarPlayStation/Core/Media/README.md) | Low-latency Audio/Video Pipelines | `IVideoDecoder` (libmpv + D3D11), 3-Lane WASAPI Ducking, Mic Uplink |
-| **Layer 6** | [`Input/`](file:///d:/CarPlayStation/Core/Input/README.md) | Input Translation & Gesture Mapping | `MouseTouchTranslator` (Tap/Drag/Back), `KeyboardKnobTranslator` |
+| **Layer 1** | [`Hardware/`](file:///d:/CarPlayStation/Core/Hardware/README.md) | Hardware Abstraction & MFi Bridges | `IMfiSigner` (local file / CH341-CH347-FTDI USB-to-I2C coprocessor / Remote MFi HTTP client), `II2cAdapter`, `TouchscreenCapabilities` |
+| **Layer 2** | [`Transport/`](file:///d:/CarPlayStation/Core/Transport/README.md) | Link Layer & Wireless Channels | `BtRfcommTransport`, `WifiSoftApManager`, `MdnsAdvertiser` + `MdnsPacketBuilder` |
+| **Layer 3** | [`Protocol/`](file:///d:/CarPlayStation/Core/Protocol/README.md) | iAP2 Framing & Message Codecs | `Iap2LinkEngine` (`0xFF 0x5A`), `Iap2SessionManager`, Message Catalog, `Iap2WirelessControlPlane` |
+| **Layer 4** | [`Session/`](file:///d:/CarPlayStation/Core/Session/README.md) | CarPlay & AirPlay Orchestration | `CarPlaySessionStateMachine`, `AirPlayRtspServer`, `PairingStore`, `Pairing/` (Pair-Setup, Pair-Verify, SRP, Ed25519, bplist) |
+| **Layer 5** | [`Media/`](file:///d:/CarPlayStation/Core/Media/README.md) | Low-latency Audio/Video Pipelines | `IVideoDecoder` (libmpv + D3D11), `AirPlayAudioReceiver` + fdk-aac, 3-Lane WASAPI Ducking, `MicrophoneRtpSender` |
+| **Layer 6** | [`Input/`](file:///d:/CarPlayStation/Core/Input/README.md) | Input Translation & Gesture Mapping | `MouseTouchTranslator` (Tap/Drag/Back), `KeyboardKnobTranslator`, `MultiTouchInjector` |
 | **Layer 7** | [`Service/`](file:///d:/CarPlayStation/Core/Service/README.md) | Core Facade & Public C++ Contracts | `CarPlayCoreService`, `CoreEventBus`, `ICarPlayCoreApi.h` |
 
 ---
@@ -85,4 +85,4 @@ Drawing inspiration from the OSI 7-layer model and real-world CarPlay receiver p
 3. **UI Isolation (DEC-002)**:
    - Core internals never reference Windows UI constructs (`HWND`, UI message loops). Video frames are handed off as D3D11 shared texture handles or frame buffers.
 4. **Multi-AI Collaborative Safety**:
-   - Every module can be developed by independent AI agents concurrently using dedicated partition prompts and mocks. See [`AI_TASKS.md`](file:///d:/CarPlayStation/AI_TASKS.md).
+   - Every module can be developed by independent AI agents concurrently using dedicated partition prompts and mocks. Each layer README ends with an "AI Partition & Mocking Guide" section describing how to isolate that layer.

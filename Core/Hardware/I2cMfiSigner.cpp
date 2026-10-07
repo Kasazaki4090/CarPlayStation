@@ -68,7 +68,6 @@ bool IsBusIdleFill(const Common::ByteBuffer& data) {
 void ReportSlavesOnBus(II2cAdapter& adapter, uint8_t configured) {
     std::string found;
     for (uint8_t addr = 0x08; addr <= 0x77; ++addr) {
-        if (addr == configured) continue;
         if (adapter.ProbeDevice(addr)) {
             if (!found.empty()) found += ", ";
             found += HexByte(addr);
@@ -81,8 +80,9 @@ void ReportSlavesOnBus(II2cAdapter& adapter, uint8_t configured) {
     } else {
         CPS_LOG_WARN("I2cMfiSigner",
                      "I2C bus scan: slave(s) answered at ", found,
-                     " but nothing at the configured ", HexByte(configured),
-                     ". Set I2cSlaveAddress in carplaystation_ui.ini to the address that answered.");
+                     (found.find(HexByte(configured)) != std::string::npos
+                          ? " (configured address is present)"
+                          : ". Set I2cSlaveAddress in carplaystation_ui.ini to the address that answered."));
     }
 }
 } // namespace
@@ -118,28 +118,35 @@ bool I2cMfiSigner::WarmUpLocked() const {
         return warmup_ok_;
     }
 
+    // According to xcertplay (MfiDeviceScanner):
+    // Candidate addresses are 0x10 and 0x11 in LIVI probe order.
+    // Start with the configured address, followed by the alternate candidate.
+    std::vector<uint8_t> candidates = { slave_address_ };
+    uint8_t alternate = (slave_address_ == 0x11) ? 0x10 : 0x11;
+    if (std::find(candidates.begin(), candidates.end(), alternate) == candidates.end()) {
+        candidates.push_back(alternate);
+    }
+
     // The coprocessor powers up asleep on many boards and NACKs the first
     // reads; the proven reference transports read register 0x00 (DeviceVersion)
-    // once at startup so the first certificate read succeeds. Each attempt is a
-    // single-shot transaction (no retry budget) so the warm-up stays bounded;
-    // after a few attempts fall back to a GPIO reset pulse if the adapter can
-    // generate one.
-    for (int attempt = 0; attempt < 8; ++attempt) {
-        auto res = ReadRegisterOnce(REG_DEVICE_VERSION, 1);
-        if (res.IsOk() && !res.Value().empty()) {
-            warmup_ok_ = true;
-            CPS_LOG_INFO("I2cMfiSigner", "MFi coprocessor awake at ", HexByte(slave_address_),
-                         ": DeviceVersion=", HexByte(res.Value()[0]));
-            return true;
+    // to wake the chip. Try across candidate addresses.
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        for (uint8_t candidate : candidates) {
+            auto res = ReadRegisterOnce(REG_DEVICE_VERSION, 1, candidate);
+            if (res.IsOk() && !res.Value().empty() && res.Value()[0] != 0xFF && res.Value()[0] != 0x00) {
+                slave_address_ = candidate;
+                warmup_ok_ = true;
+                CPS_LOG_INFO("I2cMfiSigner", "MFi coprocessor awake at ", HexByte(slave_address_),
+                             ": DeviceVersion=", HexByte(res.Value()[0]));
+                return true;
+            }
         }
-        if (attempt == 3 && options_.auto_pulse_reset_on_failure) {
+        if (attempt == 8 && options_.auto_pulse_reset_on_failure) {
             auto pulse = adapter_->PulseReset(options_.reset_gpio_pin);
             if (pulse.IsOk()) {
                 CPS_LOG_INFO("I2cMfiSigner", "Pulsed coprocessor reset line (GPIO",
                              static_cast<int>(options_.reset_gpio_pin), ")");
             } else {
-                // Say so when no pulse was possible: without this the log would
-                // imply the reset line was driven and the chip still stayed quiet.
                 CPS_LOG_WARN("I2cMfiSigner", "Could not pulse a reset line: ",
                              pulse.Error().Message());
             }
@@ -195,19 +202,23 @@ Common::Result<void> I2cMfiSigner::WriteBigEndianShort(uint8_t reg, uint16_t val
     return WriteRegister(reg, Common::ByteSpan(data, 2));
 }
 
-Common::Result<Common::ByteBuffer> I2cMfiSigner::ReadRegisterOnce(uint8_t reg, size_t length) const {
+Common::Result<Common::ByteBuffer> I2cMfiSigner::ReadRegisterOnce(uint8_t reg, size_t length, uint8_t addr) const {
     if (!adapter_ || !adapter_->IsOpen()) {
         return Common::Status::Error(Common::StatusCode::DeviceUnavailable, "I2C adapter is not open");
     }
 
-    // Register select and read must be ONE transaction with a repeated start
-    // (START addr(W) reg RESTART addr(R) data STOP). Issuing them as two
-    // separate transactions puts a STOP between them, and the MFi coprocessor
-    // drops the selected register across that STOP: every read then comes back
-    // as bus-idle padding. The proven reference drivers use a single two-message
-    // I2C_RDWR for exactly this reason.
+    uint8_t target_addr = (addr != 0) ? addr : slave_address_;
+
+    // According to xcertplay (LIVI I2C sequence for MFi authentication coprocessor):
+    // A register read consists of a write-only register selection (with STOP),
+    // followed by a separate read transaction with a bus-idle gap.
     uint8_t reg_addr = reg;
-    auto res = adapter_->Transaction(slave_address_, Common::ByteSpan(&reg_addr, 1), length);
+    auto sel_res = adapter_->Write(target_addr, Common::ByteSpan(&reg_addr, 1));
+    if (sel_res.IsError()) {
+        return sel_res.Error();
+    }
+
+    auto res = adapter_->Read(target_addr, length);
     if (res.IsError()) {
         return res;
     }

@@ -16,6 +16,13 @@ This module is located at Layer 6 of Core. It translates PC desktop input events
   - Media & Function Hotkeys $\rightarrow$ Play/Pause, Next/Prev Track, Siri activation, Call answer/hangup.
 - **Multi-Touch Injector (`MultiTouchInjector`)**:
   - Passes native Windows pointer / multi-touch points through when running on touchscreen hardware.
+  - Two contact slots maximum: the touchscreen HID descriptor advertised in `/info` declares two
+    contacts only when `Core/Hardware/TouchscreenCapabilities` reports a display-attached
+    digitizer with two or more simultaneous contacts. On mouse / touchpad / pen-only hosts the
+    single-contact descriptor is used, so the report format never lies about what the host can
+    produce.
+  - Contacts are read from `WM_POINTER*` messages, never from the synthesized mouse messages a
+    touchpad produces, which is why a touchpad stays single-point.
 
 ---
 

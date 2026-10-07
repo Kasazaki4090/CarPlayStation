@@ -69,6 +69,8 @@ The following projects may be consulted for protocol, behavior, and implementati
 
 - XcertPLay
 - Carplayd
+- DiPlay
+- remote-mfi-for-xcertplay
 
 ## Documentation Corrections
 

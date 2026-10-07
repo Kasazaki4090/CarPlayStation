@@ -24,6 +24,21 @@ This module is located at the lowest layer of Core (Layer 1). It directly interf
 - **Radio & Adapter Helpers (`RadioAdapterHelper`)**:
   - Windows Bluetooth Radio status inquiry and power state queries.
   - Wi-Fi adapter HostedNetwork / SoftAP capability detection and 5GHz band support checks.
+- **Touchscreen Capability Probe (`TouchscreenCapabilities`)**:
+  - Reads the host's pointer devices once at startup and reports the maximum number of
+    simultaneous contacts a display-attached digitizer can produce.
+  - CarPlay has no knob device, so the contact count in the touchscreen HID descriptor advertised
+    in `/info` has to match the hardware; this probe is what decides between the one-contact and
+    two-contact descriptors. Touchpads are deliberately excluded (their input arrives as
+    `PT_TOUCHPAD`, which the UI pointer router ignores).
+- **I2C Bus Correctness (`062320e`, `7c73c88`, `822600b` / BUG-012)**:
+  - The coprocessor is woken before it is read, and bus-idle padding (`0xFF` runs) is rejected
+    rather than returned as register data.
+  - Register reads are one combined write-then-read I2C transaction instead of two separate
+    transfers, which is what the CH341/CH347/FTDI engines actually require.
+  - `II2cAdapter::ProbeDevice()` is NACK-aware: a zero-length write that the slave NACKs is no
+    longer reported as a device present, so the startup bus sweep can distinguish "wrong address"
+    from "nothing on the bus". A reset pulse is only logged when the driver confirmed one.
 
 ---
 
@@ -32,7 +47,9 @@ This module is located at the lowest layer of Core (Layer 1). It directly interf
 - **Strictly No Upward Dependencies**: Must NOT import `Protocol`, `Session`, `Media`, or `UI` logic.
 - **Public Exported Interfaces**:
   - `IMfiSigner`: Abstract pure virtual interface providing `GetCertificate()`, `GenerateSignature(challenge, out_sig)`, and status queries.
+  - `II2cAdapter`: `Read()`, `Write()`, `WriteRead()`, `ProbeDevice()`, `PulseReset()`.
   - `IRadioState`: Interface for querying Bluetooth / Wi-Fi hardware adapter readiness.
+  - `DetectTouchscreenCapabilities()` / `DetectMaxTouchContacts()`: Free functions consumed by Layer 4/6 to size the touchscreen HID descriptor.
 
 ---
 

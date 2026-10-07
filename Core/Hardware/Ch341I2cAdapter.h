@@ -43,6 +43,9 @@ private:
     // already hold mutex_ (this does not lock it, to avoid reentrant
     // self-deadlock when called from Open()/SetSpeed()).
     void ApplySpeedLocked();
+    Common::Result<Common::ByteBuffer> ExecuteStreamLocked(uint8_t address7Bit,
+                                                         Common::ByteSpan writeData,
+                                                         size_t readLength);
 
     class DriverBinding;
     std::unique_ptr<DriverBinding> driver_;

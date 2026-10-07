@@ -25,6 +25,10 @@ public:
                                                  Common::ByteSpan writeData,
                                                  size_t readLength) override;
 
+    Common::Result<void> PulseReset(uint8_t pin_index = 0,
+                                   std::chrono::milliseconds low_duration = std::chrono::milliseconds(20),
+                                   bool drive_high = true) override;
+
     [[nodiscard]] std::string GetAdapterName() const override {
         return "FTDI MPSSE USB-to-I2C Bridge";
     }

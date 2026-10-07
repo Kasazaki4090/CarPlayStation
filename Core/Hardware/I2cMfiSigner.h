@@ -18,7 +18,7 @@ public:
         std::chrono::milliseconds io_retry_delay{20};
         std::chrono::milliseconds auth_timeout{3000};
         std::chrono::milliseconds auth_poll_interval{10};
-        bool auto_pulse_reset_on_failure{true};
+        bool auto_pulse_reset_on_failure{false};
         uint8_t reset_gpio_pin{0};
     };
 
@@ -47,7 +47,7 @@ private:
     [[nodiscard]] Common::Result<Common::ByteBuffer> ReadRegister(uint8_t reg, size_t length);
     // One select/read pair, no retry loop. Used where the caller owns the retry
     // deadline (e.g. polling the coprocessor while it computes a signature).
-    [[nodiscard]] Common::Result<Common::ByteBuffer> ReadRegisterOnce(uint8_t reg, size_t length) const;
+    [[nodiscard]] Common::Result<Common::ByteBuffer> ReadRegisterOnce(uint8_t reg, size_t length, uint8_t addr = 0) const;
     [[nodiscard]] Common::Result<Common::ByteBuffer> ReadRegisterWindows(uint8_t base_reg, size_t length);
     [[nodiscard]] Common::Result<void> WriteRegister(uint8_t reg, Common::ByteSpan data);
 
@@ -63,7 +63,7 @@ private:
     [[nodiscard]] Common::Result<Common::ByteBuffer> FetchCertificateLocked();
 
     std::shared_ptr<II2cAdapter> adapter_;
-    uint8_t slave_address_{0x11};
+    mutable uint8_t slave_address_{0x11};
     Options options_{};
     mutable std::mutex mutex_;
     bool is_shutdown_{false};
