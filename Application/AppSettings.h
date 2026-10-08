@@ -46,6 +46,7 @@ struct VideoPreferences {
     uint32_t custom_height{720};
     uint32_t fps{30};                     // 30 or 60 fps
     WindowDisplayMode display_mode{WindowDisplayMode::Windowed};
+    bool hardware_decode{true};           // Enable GPU hardware video decoding
 
     // Resolve preset / custom into concrete dimensions (UI helper; stays out of Core)
     [[nodiscard]] std::pair<uint32_t, uint32_t> GetEffectiveDimensions(

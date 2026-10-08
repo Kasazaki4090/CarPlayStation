@@ -480,13 +480,16 @@ Core::Common::Status D3D11Renderer::Render(bool autoPresent) {
                 // the other (never nested), so nesting them here is safe.
                 std::lock_guard<std::mutex> bufLock(cpu_frame_buffer_->mutex);
                 if (!cpu_frame_buffer_->data.empty()) {
-                    D3D11_BOX box{};
-                    box.right = cpu_frame_width_;
-                    box.bottom = cpu_frame_height_;
-                    box.back = 1;
-                    context_->UpdateSubresource(cpu_texture_.Get(), 0, &box,
-                                                 cpu_frame_buffer_->data.data(),
-                                                 static_cast<UINT>(cpu_frame_width_ * 4), 0);
+                    if (cpu_frame_buffer_->frame_counter != last_uploaded_cpu_frame_counter_) {
+                        last_uploaded_cpu_frame_counter_ = cpu_frame_buffer_->frame_counter;
+                        D3D11_BOX box{};
+                        box.right = cpu_frame_width_;
+                        box.bottom = cpu_frame_height_;
+                        box.back = 1;
+                        context_->UpdateSubresource(cpu_texture_.Get(), 0, &box,
+                                                     cpu_frame_buffer_->data.data(),
+                                                     static_cast<UINT>(cpu_frame_width_ * 4), 0);
+                    }
                     srvToDraw = cpu_srv_.Get();
                     isCpuPath = true;
                 }

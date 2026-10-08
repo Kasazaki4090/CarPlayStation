@@ -246,6 +246,16 @@ bool AppController::Step() {
 
     if (::IsIconic(window_.GetHwnd())) {
         ::Sleep(16);
+    } else {
+        // Frame pacing safeguard: if Present(1, 0) returned without waiting
+        // (driver VSync override, occluded window, or non-vsync display),
+        // pace the loop so it does not spin at 1000+ FPS pegging the CPU at 100%.
+        auto now = std::chrono::steady_clock::now();
+        auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(now - last_step_time_).count();
+        if (elapsedUs < 8000) {
+            ::Sleep(1);
+        }
+        last_step_time_ = std::chrono::steady_clock::now();
     }
 
     return true;
@@ -280,13 +290,15 @@ void AppController::RefreshUiState() {
     if (state.current_video_width == pushed_video_width_ &&
         state.current_video_height == pushed_video_height_ &&
         state.current_video_fps == pushed_video_fps_ &&
-        state.current_video_codec == pushed_video_codec_) {
+        state.current_video_codec == pushed_video_codec_ &&
+        state.is_hardware_decode == pushed_is_hardware_decode_) {
         return;
     }
     pushed_video_width_ = state.current_video_width;
     pushed_video_height_ = state.current_video_height;
     pushed_video_fps_ = state.current_video_fps;
     pushed_video_codec_ = state.current_video_codec;
+    pushed_is_hardware_decode_ = state.is_hardware_decode;
     OnUiStateChanged(state);
 }
 

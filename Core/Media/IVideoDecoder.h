@@ -124,6 +124,9 @@ public:
     // never see the writer's updates. Must be called before Init(). Default is a
     // no-op; decoders that create their own D3D11 device override this.
     virtual void SetSharedDevice(void* device, void* context) { (void)device; (void)context; }
+
+    // Whether the decoder currently has hardware acceleration active
+    [[nodiscard]] virtual bool IsHardwareAccelerated() const { return false; }
 };
 
 } // namespace CarPlayStation::Core::Media

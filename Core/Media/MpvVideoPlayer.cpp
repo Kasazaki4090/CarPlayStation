@@ -74,6 +74,8 @@ bool MpvVideoPlayer::LoadMpvLibrary() {
     api_.mpv_stream_cb_add_ro = reinterpret_cast<decltype(api_.mpv_stream_cb_add_ro)>(get("mpv_stream_cb_add_ro"));
     api_.mpv_get_property_string = reinterpret_cast<decltype(api_.mpv_get_property_string)>(get("mpv_get_property_string"));
     api_.mpv_free = reinterpret_cast<decltype(api_.mpv_free)>(get("mpv_free"));
+    api_.mpv_request_log_messages = reinterpret_cast<decltype(api_.mpv_request_log_messages)>(get("mpv_request_log_messages"));
+    api_.mpv_wait_event = reinterpret_cast<decltype(api_.mpv_wait_event)>(get("mpv_wait_event"));
     api_.mpv_render_context_create = reinterpret_cast<decltype(api_.mpv_render_context_create)>(get("mpv_render_context_create"));
     api_.mpv_render_context_free = reinterpret_cast<decltype(api_.mpv_render_context_free)>(get("mpv_render_context_free"));
     api_.mpv_render_context_set_update_callback =
@@ -163,36 +165,41 @@ Common::Status MpvVideoPlayer::InitLocked(const Common::VideoStreamSpec& spec) {
     //    boundaries are only recognised several reads late. Feed it whole
     //    access units instead.
     const char* demuxFmt = (spec.codec == Common::VideoCodec::HEVC) ? "hevc" : "h264";
-    const char* opts[] = {
-        "vo", "libmpv",
-        "hwdec", "no",
-        "demuxer-lavf-format", demuxFmt,
-        "untimed", "yes",
-        "cache", "no",
-        "demuxer-max-bytes", "128KiB",
-        "demuxer-max-back-bytes", "0",
-        "demuxer-lavf-o", "raw_packet_size=262144",
-        "vd-lavc-threads", "1",
-        "video-timing-offset", "0",
-        "video-latency-hacks", "yes",
-        "audio", "no",
-        "sub", "no",
-        "deband", "no",
-        "keep-open", "no",
-        "terminal", "no",
-        "load-stats-overlay", "no",
-        // Keep mpv's own stall warnings ("mpv_render_context_render() not being
-        // called or stuck." / "mpv_render_report_swap() not being called.") —
-        // they are the only in-band evidence of a display-handshake stall.
-        "msg-level", "all=no,vo=v",
+    const char* hwdecVal = spec.hardware_decode ? "auto-copy" : "no";
+    std::vector<std::pair<const char*, const char*>> opts = {
+        {"vo", "libmpv"},
+        {"hwdec", hwdecVal},
+        {"hwdec-codecs", "all"},
+        {"demuxer-lavf-format", demuxFmt},
+        {"untimed", "yes"},
+        {"cache", "no"},
+        {"demuxer-max-bytes", "128KiB"},
+        {"demuxer-max-back-bytes", "0"},
+        {"demuxer-lavf-o", "raw_packet_size=262144"},
+        {"video-timing-offset", "0"},
+        {"video-latency-hacks", "yes"},
+        {"audio", "no"},
+        {"sub", "no"},
+        {"deband", "no"},
+        {"keep-open", "no"},
+        {"terminal", "no"},
+        {"load-stats-overlay", "no"},
+        {"msg-level", "all=no,vo=v,vd=v"},
     };
+    if (!spec.hardware_decode) {
+        opts.push_back({"vd-lavc-threads", "1"});
+    }
     // mpv_set_option_string takes (name, value) pairs.
-    for (size_t i = 0; i < sizeof(opts) / sizeof(opts[0]); i += 2) {
-        int r = api_.mpv_set_option_string(mpv_, opts[i], opts[i + 1]);
+    for (const auto& [name, val] : opts) {
+        int r = api_.mpv_set_option_string(mpv_, name, val);
         if (r < 0) {
-            CPS_LOG_WARN("MpvVideoPlayer", "mpv option '", opts[i], "' failed (",
+            CPS_LOG_WARN("MpvVideoPlayer", "mpv option '", name, "' failed (",
                          std::to_string(r), "); continuing");
         }
+    }
+
+    if (api_.mpv_request_log_messages) {
+        api_.mpv_request_log_messages(mpv_, "warn");
     }
 
     int r = api_.mpv_initialize(mpv_);
@@ -230,10 +237,10 @@ Common::Status MpvVideoPlayer::InitLocked(const Common::VideoStreamSpec& spec) {
     render_thread_ = std::thread(&MpvVideoPlayer::RenderThreadMain, this);
 
     initialized_ = true;
-    hardware_accelerated_ = false;
+    hardware_accelerated_ = spec.hardware_decode;
     CPS_LOG_INFO("MpvVideoPlayer", "Initialized libmpv decoder for ",
                  Common::VideoCodecToString(spec.codec), " ", spec.width, "x", spec.height,
-                 " @", spec.fps, "fps (software decode, SW render)");
+                 " @", spec.fps, "fps (hwdec=", hwdecVal, ", SW render)");
     return Common::Status::Ok();
 }
 
@@ -472,6 +479,18 @@ void MpvVideoPlayer::RenderThreadMain() {
             break;
         }
 
+        // Drain mpv log events.
+        if (api_.mpv_wait_event) {
+            while (true) {
+                mpv_event* ev = api_.mpv_wait_event(mpv_, 0.0);
+                if (!ev || ev->event_id == 0) break; // MPV_EVENT_NONE = 0
+                if (ev->event_id == 17) {            // MPV_EVENT_LOG_MESSAGE = 17
+                    auto* msg = static_cast<mpv_event_log_message*>(ev->data);
+                    CPS_LOG_WARN("libmpv", "[", msg->prefix, "] ", msg->text);
+                }
+            }
+        }
+
         // Periodic diagnostic dump (every 2s) to see mpv's demuxer/decoder state.
         auto now = std::chrono::steady_clock::now();
         if (now - lastDiag >= std::chrono::seconds(2)) {
@@ -481,11 +500,18 @@ void MpvVideoPlayer::RenderThreadMain() {
                 std::lock_guard<std::mutex> lk(stream_mutex_);
                 curAvail = ring_size_;
             }
+            std::string curHw = dumpProp("hwdec-current");
+            bool isHw = (!curHw.empty() && curHw != "no" && curHw != "(null)");
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                hardware_accelerated_ = isHw;
+            }
             // dwidth/dheight are the size of the decoded picture (after sample
             // aspect), spec is what we asked mpv to scale it into. A mismatch in
             // aspect means the SW render below is squashing the picture.
             CPS_LOG_INFO("MpvVideoPlayer", "DIAG: demuxer=", dumpProp("demuxer"),
                          " decoder=", dumpProp("decoder"),
+                         " hwdec=", curHw,
                          " video-codec=", dumpProp("video-codec"),
                          " cache=", dumpProp("demuxer-cache-duration"),
                          " ringAvail=", std::to_string(curAvail),

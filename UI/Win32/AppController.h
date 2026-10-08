@@ -7,6 +7,7 @@
 #include "OverlayRenderer.h"
 #include "SetupWizard.h"
 #include "Win32InputRouter.h"
+#include <chrono>
 #include <memory>
 #include <thread>
 
@@ -99,6 +100,8 @@ private:
     uint32_t pushed_video_height_{0};
     uint32_t pushed_video_fps_{0};
     std::string pushed_video_codec_;
+    bool pushed_is_hardware_decode_{false};
+    std::chrono::steady_clock::time_point last_step_time_{};
 
     bool is_initialized_{false};
     bool is_running_{false};

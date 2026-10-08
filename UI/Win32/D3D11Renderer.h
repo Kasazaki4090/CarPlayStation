@@ -134,6 +134,7 @@ private:
     // thread is latency we can spend elsewhere).
     Core::Media::CpuFrameBuffer* cpu_frame_buffer_{nullptr};
     uint64_t last_cpu_frame_counter_{0};
+    uint64_t last_uploaded_cpu_frame_counter_{0};
     uint32_t cpu_frame_width_{0};
     uint32_t cpu_frame_height_{0};
     Microsoft::WRL::ComPtr<ID3D11Texture2D> cpu_texture_;

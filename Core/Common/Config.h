@@ -48,6 +48,7 @@ struct VideoStreamSpec {
     uint32_t height{1080};
     uint32_t fps{60};                   // 30 or 60 fps
     uint32_t max_bitrate_kbps{0};       // 0 = automatic / unrestricted
+    bool hardware_decode{true};         // Enable GPU hardware video decoding
 };
 
 // Audio sample container type (for standard PCM integer and 32-bit floating point)

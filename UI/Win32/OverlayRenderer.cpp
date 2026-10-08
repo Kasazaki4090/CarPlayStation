@@ -430,9 +430,10 @@ void OverlayRenderer::DrawStatusPill(float width, float height) {
             }
             std::wstring codec = Utf8ToWide(ui_state_.current_video_codec);
             if (codec.empty()) codec = L"检测中";
+            std::wstring hwText = ui_state_.is_hardware_decode ? L" [硬解]" : L" [软解]";
             statusText = L"已连接: " + dev + L" | " +
                 std::to_wstring(w) + L"x" + std::to_wstring(h) + L" @ " +
-                std::to_wstring(fps ? fps : settings_.video.fps) + L" FPS " + codec;
+                std::to_wstring(fps ? fps : settings_.video.fps) + L" FPS " + codec + hwText;
             dotBrush = brush_status_green_.Get();
             break;
         }

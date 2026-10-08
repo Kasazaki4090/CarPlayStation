@@ -83,7 +83,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return initialized_;
     }
-    [[nodiscard]] bool IsHardwareAccelerated() const {
+    [[nodiscard]] bool IsHardwareAccelerated() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return hardware_accelerated_;
     }
@@ -130,6 +130,8 @@ private:
                                      mpv_stream_cb_open_ro_fn);
         char* (*mpv_get_property_string)(mpv_handle*, const char*);
         void (*mpv_free)(void*);
+        int (*mpv_request_log_messages)(mpv_handle*, const char*);
+        mpv_event* (*mpv_wait_event)(mpv_handle*, double);
         // render.h
         int (*mpv_render_context_create)(mpv_render_context**, mpv_handle*,
                                          const mpv_render_param*);

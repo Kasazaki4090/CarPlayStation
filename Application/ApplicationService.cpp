@@ -395,11 +395,13 @@ void ApplicationService::SnapshotVideoFacts(AppUiState& state) const {
     // Core owns the truth: the geometry it advertises to the phone plus the codec
     // it actually sees on the wire. The UI must report that, not the settings.
     auto spec = core_api_->GetActiveVideoStreamSpec();
-    if (spec.width == 0 || spec.height == 0) return;
     state.current_video_width = spec.width;
     state.current_video_height = spec.height;
     state.current_video_fps = spec.fps;
     state.current_video_codec = std::string(Core::Common::VideoCodecToString(spec.codec));
+    if (auto decoder = core_api_->GetVideoDecoder()) {
+        state.is_hardware_decode = decoder->IsHardwareAccelerated();
+    }
 }
 
 Core::Common::VideoStreamSpec ApplicationService::ResolveVideoSpec(const AppSettings& settings) {
@@ -408,6 +410,7 @@ Core::Common::VideoStreamSpec ApplicationService::ResolveVideoSpec(const AppSett
     spec.width = width;
     spec.height = height;
     spec.fps = settings.video.fps;
+    spec.hardware_decode = settings.video.hardware_decode;
     // Codec preference is advisory; the session negotiates the final codec and the
     // decoder reconfigures itself from the VideoConfig packet (avcC/hvcC).
     switch (settings.video.preferred_codec) {

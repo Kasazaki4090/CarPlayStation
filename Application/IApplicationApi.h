@@ -19,6 +19,7 @@ struct AppUiState {
     uint32_t current_video_height{0};  // Runtime fact: spec actually in effect
     uint32_t current_video_fps{0};     // Runtime fact: frame rate advertised to the phone
     std::string current_video_codec;   // Runtime fact: codec on the wire ("H264" / "HEVC" / ...)
+    bool is_hardware_decode{false};    // Runtime fact: whether decoder is running hardware acceleration
     std::string status_message;
     // Recorded phone addresses (runtime facts) so the UI can persist them.
     std::string connected_device_bt_mac;   // iPhone Bluetooth MAC

@@ -315,6 +315,8 @@ void SetupWizard::LoadVideoAudioSettings(Application::AppSettings& settings) con
     if (display_mode != static_cast<UINT>(-1) && display_mode <= 2) {
         settings.video.display_mode = static_cast<Application::WindowDisplayMode>(display_mode);
     }
+    UINT hwdec = GetPrivateProfileIntW(L"Video", L"HardwareDecode", 1, ini.c_str());
+    settings.video.hardware_decode = (hwdec != 0);
 
     // --- [Audio] ---
     // Volumes and ducking ratio are user settings. SampleRate follows the
@@ -349,6 +351,8 @@ void SetupWizard::SaveVideoAudioSettings(const Application::AppSettings& setting
         std::to_wstring(static_cast<unsigned>(video.preferred_codec)).c_str(), ini.c_str());
     WritePrivateProfileStringW(L"Video", L"DisplayMode",
         std::to_wstring(static_cast<unsigned>(video.display_mode)).c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"Video", L"HardwareDecode",
+        video.hardware_decode ? L"1" : L"0", ini.c_str());
 
     WriteUnitAsIniPercent(ini, L"Audio", L"MediaVolume", audio.media_volume);
     WriteUnitAsIniPercent(ini, L"Audio", L"NavigationVolume", audio.navigation_volume);
