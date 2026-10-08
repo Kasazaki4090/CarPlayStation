@@ -725,6 +725,18 @@ CarPlay video and audio pipelines on Windows face several platform-specific chal
      - Ducking Release: Smoothly restores `MainMedia` to 100% over 300ms–500ms after navigation prompts finish.
      - Soft-limiter protection preventing clipping when all 3 lanes output concurrently.
 
+### Implementation note (2026-10-08)
+
+The 3-lane mixer, the soft limiter and the resampler shipped as specified. Ducking shipped as a **hard gain step inside
+`WasapiAudioPipeline`** rather than as the attack/release curve of `AudioDuckingManager`: two independent triggers are
+OR-ed in `UpdateDuckingStateLocked` — `voiceDuckingActive_` (set on an audible navigation/voice chunk, released after
+`kDuckingHangoverMs`) and `rtspDuckingActive_` (the phone's `duckAudio`/`unduckAudio`, with a `kRtspDuckingSafetyMs`
+safety timeout) — and `ApplyDuckingGainLocked` applies the gain immediately, matching the reference host's
+`DUCK_GAIN`/`UNDUCK_GAIN` (the phone's own duck window is about 1.5 s, so a 100 ms attack is not observable).
+`Core/Media/AudioDuckingManager` still exists, still compiles and is still unit-tested, but **no production code
+constructs it**. Whether to wire it (for a smooth ramp) or delete it (component + test + this section) is an open
+decision; nothing about current behaviour depends on it.
+
 
 ### Consequences
 

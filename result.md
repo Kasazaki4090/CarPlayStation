@@ -146,7 +146,7 @@
 | README 功能清单反映真实状态（原 `TODO.md:159`） | `README.md:22-38` 已是真实的 `[x]` 清单 |
 | 编解码能力协商与运行时选择 H.264/HEVC（原 `TODO.md:202`） | `VideoCodec` 枚举（`Core/Common/Config.h:25-46`）、`advertise_hevc`（`AirPlayRtspServer.cpp:954`）、`/info` 的 `hevcInfo`（1664）、`enabledFeatures` 含 `hevc`（2182）、HEVC NAL 分类（`AirPlayVideoDemuxer.cpp:27-54`）、`VideoCodecPreference`（`Application/AppSettings.h:36-44`）与映射（`ApplicationService.cpp:421-424`）；真机日志 `Video stream spec set to 1920x1080@60 HEVC`、`Processed hvcC HEVC VideoConfig`、`video-codec=H.265 / HEVC` |
 | PROJECT.md 描述的显示模式选择器（原 `TODO.md:203`） | `MainWindow::SetDisplayMode`（`MainWindow.cpp:212-262`，Windowed ↔ BorderlessFullscreen，364/391/419 处应用）、`AppController.cpp:177-178` 从设置应用；720p/1080p/1440p/2160p/Auto/Custom/Car1280x480/Car1920x720 与 30/60 fps 预设（`AppSettings.h:17-63`） |
-| 麦克风上行接线（记录 [6] 记录的缺口已闭合） | `CarPlayCoreService.cpp:1496-1544` 构造 `MicrophoneRtpConfig`、创建 `MicrophoneRtpSender`、`AttachToUplink`、启动采集；`AirPlayRtspServer.cpp:1856-1857` / `1980-1981` 写入 `mic_audio_data_port=5002` / `control=5003`；`ProtocolReplayTests.cpp:300-301` 断言这些端口。**真机验证仍未做**（本次日志无麦克风上行 `RECORD` 记录） |
+| 麦克风上行（接线 + 真机验证，记录 [6] 记录的缺口已闭合） | `CarPlayCoreService.cpp:1496-1544` 构造 `MicrophoneRtpConfig`、创建 `MicrophoneRtpSender`、`AttachToUplink`、启动采集；`AirPlayRtspServer.cpp:1856-1857` / `1980-1981` 写入 `mic_audio_data_port=5002` / `control=5003`；`ProtocolReplayTests.cpp:300-301` 断言这些端口。**真机已验证：用户确认走的是电脑麦克风。** 注意：我核对的那份日志窗口（21:55:58–22:15:58）里没有 `type=100` 的 `RECORD`，也没有 `Microphone uplink started`，即该窗口未建立语音通道；结论以用户实测为准，日志证据待下一次会话补齐 |
 | 单实例与干净退出（`TODO.md:250` 的前半） | `MainWindow.cpp:46` 的 `CreateMutexW`；退出清理由 BUG-001 / BUG-005 修复 |
 | 三车道音量与自动闪避（`TODO.md:217` 的音量部分） | `SetLaneVolume` 三车道 + `voiceDuckingActive_` / `rtspDuckingActive_` 自动闪避（`WasapiAudioPipeline.cpp:230-280`）、INI 与 HUD 滑条、`UpdateSettings` 热更新 |
 
@@ -154,12 +154,11 @@
 
 | 项目 | 已有 | 缺 |
 | --- | --- | --- |
-| Now Playing 显示（`TODO.md:249`） | `CoreEventBus::PublishNowPlaying`（`CoreEventBus.cpp:43-56`）、`ApplicationService.cpp:338-339` 已消费 `NowPlayingEvent`、目录里有 `0x5000/0x5001/0x5002` | `PublishNowPlaying` **无调用者**；`Iap2ControlPlane.cpp` 无 `0x5001` 分支，落到 `default:`（164 行）。真机日志里 `0x5001 NowPlayingUpdate` 到达 731 次却只被记录。缺的就是"解析 `0x5001` → `PublishNowPlaying`" |
-| 通话控制（`TODO.md:242`） | 目录与订阅齐全：`StartCallState` / `CallStateUpdate` / `AcceptCall` / `EndCall` / `StartCommunications`（`Iap2ControlPlane.cpp:69-70`） | 无来电 UI、无接听/挂断动作 |
-| Siri / 导航返回（`TODO.md:242`） | 输入侧映射 `KeyboardKnobTranslator.cpp:61-62` → `ButtonType::Siri` | 协议侧语义与 iPhone 行为验证 |
+| Now Playing 显示（`TODO.md:254`） | `CoreEventBus::PublishNowPlaying`（`CoreEventBus.cpp:43-56`）、`ApplicationService.cpp:338-339` 已消费 `NowPlayingEvent`、目录里有 `0x5000/0x5001/0x5002` | `PublishNowPlaying` **无调用者**；`Iap2ControlPlane.cpp` 无 `0x5001` 分支，落到 `default:`（164 行）。真机日志里 `0x5001 NowPlayingUpdate` 到达 **1373 次**却只被记录。缺的就是"解析 `0x5001` → `PublishNowPlaying`" |
+| 通话控制（`TODO.md:242`） | 目录与订阅齐全：`StartCallState` / `CallStateUpdate` / `AcceptCall` / `EndCall` / `StartCommunications`（`Iap2ControlPlane.cpp:69-70`） | 无 `CallStateUpdate` 分支（落到 `default:`）、无来电 UI、无接听/挂断动作。真机日志里 `0x4155 CallStateUpdate` 到达 3 次但未被解析；`0x415B AcceptCall` / `0x415C EndCall` 从未发送 |
+| Siri / 通话**按键**发不出去（新增，见 5.5） | 输入侧映射存在：`Win32InputRouter.cpp:312-451`、`KeyboardKnobTranslator.cpp:61-62` → `ButtonType::Siri` / `CallAccept` / `CallReject` | `CarPlayCoreService.cpp:183-205` 只映射 PlayPause/NextTrack/PrevTrack，其余返回 `NotSupported`，且调用方 `(void)` 丢弃返回值 → 静默失效。`/info` 只广告 2 个 HID 设备（触摸屏 + 3 个媒体键），描述符里没有 Siri/通话的 consumer usage |
 | 加固（`TODO.md:250`） | 单实例、干净退出 | 系统托盘图标（无 `Shell_NotifyIcon`）、开机自启（无 `CurrentVersion\Run`） |
 | 验证基础设施（`TODO.md:258-261`） | `ProtocolReplayTests` 存在 | CI（**无 `.github/workflows`**）、mock iPhone 模拟器、设备回归脚本 |
-| 麦克风上行真机验证（`TODO.md:215` / `227`） | 代码已接线（见 5.1） | 真机验证 |
 
 ### 5.3 未实现
 
@@ -172,7 +171,7 @@
 | 会话其余平面：车辆数据、位置、目的地（`TODO.md:194`）、Modern Vehicle Data Config（`:195`） | `Iap2MessageCatalog.h` 只有 availability / Wi-Fi / NowPlaying / RouteGuidance / Call / Power 相关 id |
 | 延迟测量与丢帧重同步策略（`TODO.md:204` / `216`） | `latencyMs` 在 `Core/` 已 0 次命中 |
 | 多声道音频（`TODO.md:217`） | 无 |
-| `Core/Media/AudioDuckingManager` | 只被自己引用，未接线（死组件）—— 闪避实际在 `WasapiAudioPipeline` 内实现 |
+| `Core/Media/AudioDuckingManager` | 设计过但未接线：参与编译（`Core/CMakeLists.txt:39`）、有单元测试（`Tests/MediaTests.cpp:436`）、有文档（DEC-008、`Core/Media/README.md:35`），但**没有任何生产代码构造它**（全仓库只有自身 .cpp/.h 与测试引用它）。闪避实际在 `WasapiAudioPipeline` 内实现（见 5.5）。删除它 = 删组件 + 删测试 + 修订 DEC-008 |
 | PIP / 置顶小窗（`TODO.md:251`）、多显示器输出目标选择（`:252`） | 只有 `SetupWizard.cpp:534,949` 的 `WS_EX_TOPMOST` |
 | i18n（`TODO.md:254`） | 只有 `OverlayRenderer.cpp:81,95,106` 硬编码 `L"zh-cn"`，无检测与选择器 |
 | `ARCHITECTURE.md` 详细章节（`TODO.md:266`） | `ARCHITECTURE.md:169` "Detailed Architecture" 仍是一行占位 |
@@ -183,3 +182,32 @@
 
 * `TODO.md:143` 声称条目已并入 `TODO_missing.md`，**该文件不存在**（记录 [6] 记录过它被有意删除）。已改为直接说明条目保留在 `TODO.md` 各分区。
 * `TODO.md` 规则 5 要求"完成即删除"，但文件保留了大量 `[x]` 长块；实际做法是保留并标注 `[Concluded: DEC-xxx]` 以保留可追溯性。
+
+### 5.5 复核两处"遗留"与音频/语音实况（本轮补充）
+
+**（1）两处遗留已用代码确认，不是"待查"。**
+
+* `enablesUIAppearance` / `uiAppearanceModes`：全仓库 **0 次**代码命中（只有 `DECISIONS.md:1201`、`TODO.md`、本文件与 `Reference/carplayd/docs/APPLE_BEHAVIORAL_REFERENCE.md:203,250,252` 提到）。即 DEC-013 的这条遗留不是"没验证"，而是"从未实现"，已归入 5.3。
+* `AudioDuckingManager`：不是"没用"，而是"设计完成但未接线"。它被编译、被单测覆盖、被 DEC-008 记录，但没有任何生产代码构造它。因此"删掉它"是一个产品决定（连带删测试、修订 DEC-008），而不是清理死代码。
+
+**（2）闪避（ducking）的真实实现位置：`Core/Media/WasapiAudioPipeline.cpp`，两个独立触发源，取并集。**
+
+| 触发源 | 置位 | 释放 |
+| --- | --- | --- |
+| `voiceDuckingActive_`（本地语音闪避） | 语音车道（`SiriTelephony` / `AltNavigation`）出现**可听**音频块时置位（`WasapiAudioPipeline.cpp:423-424`） | 静默超过 `kDuckingHangoverMs` 后自动释放 |
+| `rtspDuckingActive_`（手机请求闪避） | RTSP 事件 `duckAudio`（`AirPlayRtspServer.cpp:1834`）→ `CarPlayCoreService::SetDuckingActive`（`:898`）→ `SetDuckingActive(true)` | `unduckAudio`（`:1836` / `:915`），或超过 `kRtspDuckingSafetyMs` 由安全网自动解除并告警 |
+
+`UpdateDuckingStateLocked`（245-263）把两者按 OR 合并成单一 `ducking_active_`；`ApplyDuckingGainLocked`（271-290）是**硬阶跃**（无渐变），增益与 carplayd 的 `DUCK_GAIN` / `UNDUCK_GAIN` 一致；真机手机上闪避窗口约 1.5 s。目标比例由设置 HUD 通过 `SetTargetDuckingRatio`（`ApplicationService.cpp:109,181`）热更新。测试见 `Tests/MediaTests.cpp:185,522-585`（含 RTSP 超时安全网）。
+
+**（3）Siri 是谁唤醒的：这台设备上是 iPhone 自己，不是电脑。**
+
+决定性证据（`build-release/UI/Win32/carplaystation.log`，窗口 21:55:58–22:15:58）：
+
+* HID 数据通道只有触摸屏的 down/up 报文，**没有任何按键报文**；
+* `SendButtonEvent`（`CarPlayCoreService.cpp:183-205`）只映射 PlayPause/NextTrack/PrevTrack，`Siri` / `CallAccept` / `CallReject` 返回 `NotSupported`，而 `Win32InputRouter` 与 `KeyboardKnobTranslator` 都用 `(void)` 丢弃状态，所以按快捷键是**静默无操作**；
+* `/info` 只广告两个 HID 设备：uuid=1 触摸屏、uuid=2 "CarPlay Media Buttons"（37 字节描述符，consumer usage 仅 `0x00CD` / `0x00B5` / `0x00B6`），没有 Siri 或通话键；
+* 该日志窗口内 `SETUP` 只建立了 `type=130`（数据隧道）、`110`（视频）、`102`（媒体音频）三条流，**没有 `type=100`（语音）/`101`（导航）**，也没有 `Microphone uplink started`。
+
+所以：主机既没发出过 Siri 按键，也没建立语音通道，那次"Siri 正常"只能是 iPhone 端自己唤醒（手机麦克风）。要让**电脑**唤醒 Siri，需要扩 HID 描述符 + 扩 `SendButtonEvent`，并先研究协议语义（`TODO.md` 已记为研究项）。
+
+**（4）麦克风上行**：代码路径完整（`AirPlayRtspServer.cpp:1976-1996` 解析 `streamType=100` 的 `RECORD` 协商 → `CarPlayCoreService.cpp:1488-1541` 构造 `MicrophoneRtpConfig` 并启动 `MicrophoneRtpSender`）。用户实测确认走的是电脑麦克风，故状态已按"真机已验证"记录；上面那份日志窗口未包含语音通道，属于日志采样窗口问题，不是代码缺口。

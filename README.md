@@ -194,7 +194,7 @@ same touchscreen device.
 | Mouse wheel | Swipe down / up (scroll) |
 | `Enter` | Tap at the centre of the screen |
 | `Space`, media keys | Play-pause / next / previous |
-| `F1`, `F3` / `F4` | Siri / call accept, call reject |
+| `F1`, `F3` / `F4` | Siri / call accept, call reject — **not sent**: `SendButtonEvent` only maps play-pause, next and previous, and the HID advert has no Siri or call button, so these keys do nothing today (see `TODO.md` section 8/9) |
 | `F2` | Settings drawer (local only) |
 | `F4` | Log panel (local only, when the overlay is up) |
 | `F11` | Toggle fullscreen (local only) |
