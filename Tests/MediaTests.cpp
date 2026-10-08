@@ -1179,6 +1179,25 @@ void TestMicrophoneRtpSenderAacEld() {
     std::cout << "[PASS] TestMicrophoneRtpSenderAacEld" << std::endl;
 }
 
+void TestOptimalAudioSampleRateResolution() {
+    std::cout << "[RUN] TestOptimalAudioSampleRateResolution" << std::endl;
+    using CarPlayStation::Core::Media::WasapiAudioPipeline;
+    // 44.1k family:
+    ASSERT_EQ(WasapiAudioPipeline::ResolveOptimalSampleRate(44100), 44100U);
+    ASSERT_EQ(WasapiAudioPipeline::ResolveOptimalSampleRate(88200), 44100U);
+    ASSERT_EQ(WasapiAudioPipeline::ResolveOptimalSampleRate(176400), 44100U);
+
+    // 48k family:
+    ASSERT_EQ(WasapiAudioPipeline::ResolveOptimalSampleRate(48000), 48000U);
+    ASSERT_EQ(WasapiAudioPipeline::ResolveOptimalSampleRate(96000), 48000U);
+    ASSERT_EQ(WasapiAudioPipeline::ResolveOptimalSampleRate(192000), 48000U);
+
+    // Fallbacks / edge cases:
+    ASSERT_EQ(WasapiAudioPipeline::ResolveOptimalSampleRate(0), 48000U);
+    ASSERT_EQ(WasapiAudioPipeline::ResolveOptimalSampleRate(32000), 48000U);
+    std::cout << "[PASS] TestOptimalAudioSampleRateResolution" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "  CarPlayStation Media Tests (Step 1-4) " << std::endl;
@@ -1203,6 +1222,8 @@ int main() {
 
     // Step 4: end-to-end mock integration.
     TestMockEndToEndIntegration();
+
+    TestOptimalAudioSampleRateResolution();
 
     // Step 5: 音频协商、RTP/AEAD 解封装、AAC 编解码与麦克风上行封包。
     TestAudioFormatBitmask();

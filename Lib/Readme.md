@@ -138,6 +138,8 @@ D3D11 shared texture consumed by the UI renderer.
   path and copies `Lib/mpv/libmpv-2.dll` next to the executable at build time.
 - `libmpv-2.dll` (~115 MB) and the `mpv-dev.7z` archive are not committed to
   git (see `.gitignore`); they are vendored locally under `Lib/mpv/`.
+- If missing, run `Lib/mpv/download_libmpv.bat` (or `download_libmpv.ps1`) to automatically
+  download and extract `libmpv-2.dll` from the official repository.
 - The mpv render API only exposes `MPV_RENDER_API_TYPE_OPENGL` and
   `MPV_RENDER_API_TYPE_SW` (no native D3D11), so the SW render path is used and
   the frame is uploaded to a D3D11 shared texture by CarPlayStation.

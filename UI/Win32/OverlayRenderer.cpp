@@ -506,11 +506,10 @@ void OverlayRenderer::DrawStatusPill(float width, float height) {
 }
 
 void OverlayRenderer::DrawSettingsDrawer(float width, float height) {
-    (void)height;
     float drawerW = 360.0f;
-    float drawerH = 440.0f;
+    float drawerH = (height <= 500.0f) ? (height - 20.0f) : 410.0f;
     float drawerX = width - drawerW - 16.0f;
-    float drawerY = 56.0f;
+    float drawerY = (height <= 500.0f) ? 10.0f : 56.0f;
     drawer_rect_ = D2D1::RectF(drawerX, drawerY, drawerX + drawerW, drawerY + drawerH);
 
     D2D1_ROUNDED_RECT drawerRRect = D2D1::RoundedRect(drawer_rect_, 12.0f, 12.0f);
@@ -557,15 +556,14 @@ void OverlayRenderer::DrawSettingsDrawer(float width, float height) {
             &secRect,
             brush_accent_blue_.Get()
         );
-        curY += 22.0f;
+        curY += 20.0f;
 
-        // Resolution buttons: 720P, 1080P, 2K
-        float btnW = (drawerW - 32.0f - 16.0f) / 3.0f;
-        float btnH = 26.0f;
+        // Resolution buttons Row 1: 720P, 1080P, 2K
+        float btnW3 = (drawerW - 32.0f - 16.0f) / 3.0f;
+        float btnH = 24.0f;
 
-        auto addResBtn = [&](int idx, const std::wstring& text, Application::VideoResolutionPreset preset) {
-            float bX = drawerX + 16.0f + idx * (btnW + 8.0f);
-            D2D1_RECT_F r = D2D1::RectF(bX, curY, bX + btnW, curY + btnH);
+        auto addResBtn = [&](float bX, float bY, float bW, const std::wstring& text, Application::VideoResolutionPreset preset) {
+            D2D1_RECT_F r = D2D1::RectF(bX, bY, bX + bW, bY + btnH);
             bool active = (settings_.video.resolution_preset == preset);
             drawer_buttons_.push_back({text, r, active, [this, preset]() {
                 settings_.video.resolution_preset = preset;
@@ -575,10 +573,16 @@ void OverlayRenderer::DrawSettingsDrawer(float width, float height) {
             }});
         };
 
-        addResBtn(0, L"720P", Application::VideoResolutionPreset::Res720P);
-        addResBtn(1, L"1080P", Application::VideoResolutionPreset::Res1080P);
-        addResBtn(2, L"2K", Application::VideoResolutionPreset::Res1440P);
-        curY += btnH + 10.0f;
+        addResBtn(drawerX + 16.0f + 0 * (btnW3 + 8.0f), curY, btnW3, L"720P", Application::VideoResolutionPreset::Res720P);
+        addResBtn(drawerX + 16.0f + 1 * (btnW3 + 8.0f), curY, btnW3, L"1080P", Application::VideoResolutionPreset::Res1080P);
+        addResBtn(drawerX + 16.0f + 2 * (btnW3 + 8.0f), curY, btnW3, L"2K", Application::VideoResolutionPreset::Res1440P);
+        curY += btnH + 6.0f;
+
+        // Resolution buttons Row 2: Car Ultrawide presets
+        float btnW2 = (drawerW - 32.0f - 8.0f) / 2.0f;
+        addResBtn(drawerX + 16.0f + 0 * (btnW2 + 8.0f), curY, btnW2, L"1280x480 (车机宽屏)", Application::VideoResolutionPreset::Car1280x480);
+        addResBtn(drawerX + 16.0f + 1 * (btnW2 + 8.0f), curY, btnW2, L"1920x720 (高清宽屏)", Application::VideoResolutionPreset::Car1920x720);
+        curY += btnH + 8.0f;
 
         // FPS & Codec
         std::wstring fpsTitle = L"帧率与编解码器 (FPS & Codec):";
@@ -635,8 +639,8 @@ void OverlayRenderer::DrawSettingsDrawer(float width, float height) {
         }
     }
 
-    // --- Section 2: 音量控制 ---
-    std::wstring audioSecTitle = L"音量调节 (WASAPI 3-Lane，采样率跟随系统):";
+    // --- Section 2: 音量与压音控制 ---
+    std::wstring audioSecTitle = L"音量与压音调节 (WASAPI 3-Lane，采样率跟随系统):";
     D2D1_RECT_F audioSecRect = D2D1::RectF(drawerX + 16.0f, curY, drawerX + drawerW - 16.0f, curY + 18.0f);
     d2d_render_target_->DrawText(
         audioSecTitle.c_str(),
@@ -652,6 +656,7 @@ void OverlayRenderer::DrawSettingsDrawer(float width, float height) {
     sliders_.push_back({ L"媒体音乐音量 (MainMedia)", &settings_.audio.media_volume, 0.0f, 1.0f, {}, false });
     sliders_.push_back({ L"导航播报音量 (AltNav)", &settings_.audio.navigation_volume, 0.0f, 1.0f, {}, false });
     sliders_.push_back({ L"通话/Siri音量 (Telephony)", &settings_.audio.telephony_volume, 0.0f, 1.0f, {}, false });
+    sliders_.push_back({ L"智能压音比率 (Ducking)", &settings_.audio.ducking_ratio, 0.0f, 1.0f, {}, false });
 
     for (size_t i = 0; i < sliders_.size(); ++i) {
         auto& sl = sliders_[i];

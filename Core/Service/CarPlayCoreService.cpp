@@ -791,6 +791,18 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
         // HEVC is only ever sent when we ask for it: the iPhone proposes the codec
         // but the receiver has to accept it in /info and in SETUP phase 1.
         rtsp_opts.advertise_hevc = video_spec_.codec == Common::VideoCodec::HEVC;
+
+        // Query the Windows default audio mix rate and resolve it to either 48k or 44.1k
+        // (allowing integer-only down/upsampling like 96k->48k and 88.2k->44.1k) to eliminate
+        // fractional SRC.
+        const uint32_t win_mix_rate = Media::WasapiAudioPipeline::QueryWindowsDefaultSampleRate();
+        const uint32_t optimal_audio_rate = Media::WasapiAudioPipeline::ResolveOptimalSampleRate(win_mix_rate);
+        audio_output_ = Common::AudioOutputFormat{};
+        audio_output_.sample_rate = optimal_audio_rate;
+        audio_output_.channels = 2;
+        audio_output_.bit_depth = 16;
+        audio_output_.sample_type = Common::AudioSampleType::PcmInt16;
+        rtsp_opts.default_audio_sample_rate = optimal_audio_rate;
         // How many contacts the touchscreen HID report may carry is a property of
         // this machine's hardware, not a setting: only hosts with a display
         // digitizer can produce a second contact, and the descriptor advertised
@@ -1255,15 +1267,17 @@ Common::Status CarPlayCoreService::Start() {
 
     // Start Audio Pipeline
     if (audio_pipeline_) {
-        audio_output_ = Common::AudioOutputFormat{};
-        audio_output_.sample_rate = 48000;
-        audio_output_.channels = 2;
-        audio_output_.bit_depth = 16;
-        audio_output_.sample_type = Common::AudioSampleType::PcmInt16;
+        if (audio_output_.sample_rate == 0) {
+            const uint32_t win_mix_rate = Media::WasapiAudioPipeline::QueryWindowsDefaultSampleRate();
+            audio_output_.sample_rate = Media::WasapiAudioPipeline::ResolveOptimalSampleRate(win_mix_rate);
+            audio_output_.channels = 2;
+            audio_output_.bit_depth = 16;
+            audio_output_.sample_type = Common::AudioSampleType::PcmInt16;
+        }
         auto ap_st = audio_pipeline_->Start(audio_output_);
         if (ap_st.IsOk()) {
             Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
-                "Audio Pipeline started at 48000Hz stereo");
+                "Audio Pipeline started at ", std::to_string(audio_output_.sample_rate), "Hz stereo");
         } else {
             Common::Logger::Instance().Log(Common::LogLevel::Warn, "CoreService",
                 "Failed to start Audio Pipeline: ", ap_st.Message());

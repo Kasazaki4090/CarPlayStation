@@ -121,19 +121,101 @@ void TestConfigSeparation() {
 
     settings.video.display_mode = WindowDisplayMode::BorderlessFullscreen;
     settings.video.preferred_codec = VideoCodecPreference::HEVC;
-    // Audio settings are the three lane volumes only: the sample rate follows the
-    // Windows default endpoint and the bitrate is fixed at 320 kbps.
+    // Audio settings are the three lane volumes and ducking attenuation ratio.
     settings.audio.media_volume = 0.5f;
     settings.audio.navigation_volume = 0.4f;
     settings.audio.telephony_volume = 0.6f;
+    settings.audio.ducking_ratio = 0.25f;
     assert(settings.audio.media_volume == 0.5f);
+    assert(settings.audio.ducking_ratio == 0.25f);
     assert(settings.video.preferred_codec == VideoCodecPreference::HEVC);
 
     std::cout << "[PASS] TestConfigSeparation\n";
 }
 
+#include "Core/Session/Pairing/Crypto.h"
+
+void TestCryptoPrimitives() {
+    std::cout << "[Test] Running Crypto RFC 8439 test vectors...\n";
+
+    // 1. RFC 8439 Section 2.5.2 Poly1305 test vector
+    const char* msg = "Cryptographic Forum Research Group";
+    uint8_t poly_key[32] = {
+        0x85, 0xd6, 0xbe, 0x78, 0x57, 0x55, 0x6d, 0x33,
+        0x7f, 0x44, 0x52, 0xfe, 0x42, 0xd5, 0x06, 0xa8,
+        0x01, 0x03, 0x80, 0x8a, 0xfb, 0x0d, 0xb2, 0xfd,
+        0x4a, 0xbf, 0xf6, 0xaf, 0x41, 0x49, 0xf5, 0x1b
+    };
+    uint8_t expected_poly_tag[16] = {
+        0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6,
+        0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01, 0x27, 0xa9
+    };
+    uint8_t poly_tag[16] = {};
+    pairing::Poly1305(poly_key, reinterpret_cast<const uint8_t*>(msg), strlen(msg), poly_tag);
+    for (int i = 0; i < 16; ++i) {
+        if (poly_tag[i] != expected_poly_tag[i]) {
+            std::cerr << "Poly1305 mismatch at " << i << ": got " << std::hex << (int)poly_tag[i]
+                      << " expected " << (int)expected_poly_tag[i] << std::dec << "\n";
+            assert(false);
+        }
+    }
+    std::cout << "[PASS] RFC 8439 Poly1305 test vector\n";
+
+    // 2. RFC 8439 Section 2.8.2 ChaCha20-Poly1305 AEAD test vector
+    uint8_t aead_key[32];
+    for (int i = 0; i < 32; ++i) aead_key[i] = static_cast<uint8_t>(0x80 + i);
+
+    uint8_t aead_nonce[12] = {
+        0x07, 0x00, 0x00, 0x00, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47
+    };
+    uint8_t aead_aad[12] = {
+        0x50, 0x51, 0x52, 0x53, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7
+    };
+    const char* plaintext = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+    size_t pt_len = strlen(plaintext);
+
+    auto sealed = pairing::ChaCha20Poly1305SealWithAad(
+        aead_key, aead_nonce, aead_aad, sizeof(aead_aad), reinterpret_cast<const uint8_t*>(plaintext), pt_len);
+    assert(sealed.size() == pt_len + 16);
+
+    uint8_t expected_tag[16] = {
+        0x1a, 0xe1, 0x0b, 0x59, 0x4f, 0x09, 0xe2, 0x6a,
+        0x7e, 0x90, 0x2e, 0xcb, 0xd0, 0x60, 0x06, 0x91
+    };
+    for (int i = 0; i < 16; ++i) {
+        if (sealed[pt_len + i] != expected_tag[i]) {
+            std::cerr << "AEAD Tag mismatch at " << i << ": got " << std::hex << (int)sealed[pt_len + i]
+                      << " expected " << (int)expected_tag[i] << std::dec << "\n";
+            assert(false);
+        }
+    }
+    std::cout << "[PASS] RFC 8439 ChaCha20-Poly1305 Seal test vector\n";
+
+    std::vector<uint8_t> decrypted;
+    bool open_ok = pairing::ChaCha20Poly1305OpenWithAad(
+        aead_key, aead_nonce, aead_aad, sizeof(aead_aad), sealed.data(), sealed.size(), decrypted);
+    assert(open_ok);
+    assert(decrypted.size() == pt_len);
+    assert(memcmp(decrypted.data(), plaintext, pt_len) == 0);
+    std::cout << "[PASS] RFC 8439 ChaCha20-Poly1305 Open test vector\n";
+
+    // 3. PS-Msg05 label round-trip test
+    uint8_t ps_key[32];
+    for (int i = 0; i < 32; ++i) ps_key[i] = static_cast<uint8_t>(0x10 + i);
+    std::vector<uint8_t> test_subtlv = { 0x01, 0x06, 'f', 'o', 'o', 'b', 'a', 'r' };
+    auto ps_sealed = pairing::ChaCha20Poly1305Seal(
+        ps_key, "PS-Msg05", test_subtlv.data(), test_subtlv.size());
+    assert(ps_sealed.size() == test_subtlv.size() + 16);
+    auto ps_opened = pairing::ChaCha20Poly1305Open(
+        ps_key, "PS-Msg05", ps_sealed.data(), ps_sealed.size());
+    assert(ps_opened.has_value());
+    assert(*ps_opened == test_subtlv);
+    std::cout << "[PASS] PS-Msg05 round-trip test\n";
+}
+
 int main() {
     std::cout << "--- Running CarPlayStation Foundation Unit Tests ---\n";
+    TestCryptoPrimitives();
     TestStatusAndResult();
     TestEndianConversions();
     TestTypesAndFormatting();

@@ -274,7 +274,7 @@ void SetupWizard::LoadVideoAudioSettings(Application::AppSettings& settings) con
 
     // --- [Video] ---
     UINT preset = GetPrivateProfileIntW(L"Video", L"ResolutionPreset", -1, ini.c_str());
-    if (preset != static_cast<UINT>(-1) && preset <= 5) {
+    if (preset != static_cast<UINT>(-1) && preset <= 7) {
         settings.video.resolution_preset = static_cast<Application::VideoResolutionPreset>(preset);
     }
 
@@ -287,6 +287,13 @@ void SetupWizard::LoadVideoAudioSettings(Application::AppSettings& settings) con
             ch >= kMinCustomDimension && ch <= kMaxCustomDimension) {
             settings.video.custom_width = (cw + 1) & ~1u;
             settings.video.custom_height = (ch + 1) & ~1u;
+
+            // If the user specified a custom dimension in the INI file and preset
+            // was set to Custom (5) or not specified, ensure Custom mode is active.
+            if (preset == static_cast<UINT>(Application::VideoResolutionPreset::Custom) ||
+                (preset == static_cast<UINT>(-1) && (cw != 1280 || ch != 720))) {
+                settings.video.resolution_preset = Application::VideoResolutionPreset::Custom;
+            }
         } else {
             // Out-of-range typo: keep the app usable rather than opening a
             // window the compositor will refuse.
@@ -310,18 +317,19 @@ void SetupWizard::LoadVideoAudioSettings(Application::AppSettings& settings) con
     }
 
     // --- [Audio] ---
-    // Only the three lane volumes are settings. Any SampleRate / BitrateKbps /
-    // DuckingRatio left in an older ini is ignored: the sample rate follows the
-    // Windows default endpoint, the bitrate is fixed at 320 kbps, and ducking is
-    // driven by the sender.
+    // Volumes and ducking ratio are user settings. SampleRate follows the
+    // Windows default endpoint (with integer multiple downsampling to reduce SRC),
+    // and bitrate is fixed at default 320 kbps.
     settings.audio.media_volume = ReadIniPercentAsUnit(ini, L"Audio", L"MediaVolume", -1);
     settings.audio.navigation_volume = ReadIniPercentAsUnit(ini, L"Audio", L"NavigationVolume", -1);
     settings.audio.telephony_volume = ReadIniPercentAsUnit(ini, L"Audio", L"TelephonyVolume", -1);
+    settings.audio.ducking_ratio = ReadIniPercentAsUnit(ini, L"Audio", L"DuckingRatio", -1);
     // GetPrivateProfileIntW returns the default when the key is missing, so the
     // -1 default above means "not present": restore the built-in value instead.
     if (settings.audio.media_volume < 0.0f) settings.audio.media_volume = Application::AudioPreferences{}.media_volume;
     if (settings.audio.navigation_volume < 0.0f) settings.audio.navigation_volume = Application::AudioPreferences{}.navigation_volume;
     if (settings.audio.telephony_volume < 0.0f) settings.audio.telephony_volume = Application::AudioPreferences{}.telephony_volume;
+    if (settings.audio.ducking_ratio < 0.0f) settings.audio.ducking_ratio = Application::AudioPreferences{}.ducking_ratio;
 }
 
 void SetupWizard::SaveVideoAudioSettings(const Application::AppSettings& settings) const {
@@ -345,6 +353,7 @@ void SetupWizard::SaveVideoAudioSettings(const Application::AppSettings& setting
     WriteUnitAsIniPercent(ini, L"Audio", L"MediaVolume", audio.media_volume);
     WriteUnitAsIniPercent(ini, L"Audio", L"NavigationVolume", audio.navigation_volume);
     WriteUnitAsIniPercent(ini, L"Audio", L"TelephonyVolume", audio.telephony_volume);
+    WriteUnitAsIniPercent(ini, L"Audio", L"DuckingRatio", audio.ducking_ratio);
 }
 
 // --- Recorded device (iPhone) address persistence ---------------------------

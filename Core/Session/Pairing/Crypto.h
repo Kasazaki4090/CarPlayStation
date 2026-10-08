@@ -173,14 +173,14 @@ inline void ChaCha20Encrypt(const uint8_t key[32], const uint8_t nonce[12],
                             const uint8_t* input, size_t len, uint8_t* output) {
     auto rotl = [](uint32_t v, int n) { return (v << n) | (v >> (32 - n)); };
     auto qr = [&rotl](uint32_t s[16], int a, int b, int c, int d) {
-        s[a] += s[b]; s[c] ^= s[a]; s[c] = rotl(s[c], 16);
-        s[d] += s[c]; s[a] ^= s[d]; s[a] = rotl(s[a], 12);
-        s[b] += s[a]; s[d] ^= s[b]; s[d] = rotl(s[d], 8);
-        s[c] += s[d]; s[a] ^= s[c]; s[a] = rotl(s[a], 7);
+        s[a] += s[b]; s[d] ^= s[a]; s[d] = rotl(s[d], 16);
+        s[c] += s[d]; s[b] ^= s[c]; s[b] = rotl(s[b], 12);
+        s[a] += s[b]; s[d] ^= s[a]; s[d] = rotl(s[d], 8);
+        s[c] += s[d]; s[b] ^= s[c]; s[b] = rotl(s[b], 7);
     };
 
     uint32_t init[16];
-    init[0] = 0x61707865; init[1] = 0x3320646e; init[2] = 0x79622d32; init[3] = 0x73636174;
+    init[0] = 0x61707865; init[1] = 0x3320646e; init[2] = 0x79622d32; init[3] = 0x6b206574;
     for (int i = 0; i < 8; ++i)
         init[4 + i] = key[i * 4] | (key[i * 4 + 1] << 8) | (key[i * 4 + 2] << 16) | (key[i * 4 + 3] << 24);
     init[12] = 0; // counter
@@ -230,167 +230,170 @@ inline std::vector<uint8_t> ChaCha20Decrypt(const uint8_t key[32], const char* l
 
 // ─── Poly1305 (RFC 8439) ─────────────────────────────────────────────────────
 
-// 128-bit little-endian integer (lo, hi) with carry-aware add/sub.
-struct Poly1305Acc {
-    uint64_t lo = 0, hi = 0;
-};
+inline void Poly1305(const uint8_t key[32], const uint8_t* msg, size_t len, uint8_t tag[16]) {
+    auto load32 = [](const uint8_t* p) -> uint32_t {
+        return static_cast<uint32_t>(p[0]) |
+              (static_cast<uint32_t>(p[1]) << 8) |
+              (static_cast<uint32_t>(p[2]) << 16) |
+              (static_cast<uint32_t>(p[3]) << 24);
+    };
 
-// r = a + b (mod 2^128), with the Poly1305 "mod 2^130 - 5" reduction applied.
-inline Poly1305Acc PolyAdd(Poly1305Acc a, Poly1305Acc b) {
-    Poly1305Acc r;
-    r.lo = a.lo + b.lo;
-    r.hi = a.hi + b.hi + (r.lo < a.lo ? 1 : 0);
-    return r;
+    uint32_t t0 = load32(key + 0);
+    uint32_t t1 = load32(key + 4);
+    uint32_t t2 = load32(key + 8);
+    uint32_t t3 = load32(key + 12);
+
+    // r &= 0x0ffffffc0ffffffc0ffffffc0fffffff (RFC 8439 clamping)
+    uint32_t r0 = (t0                    ) & 0x3ffffff;
+    uint32_t r1 = ((t0 >> 26) | (t1 <<  6)) & 0x3ffff03;
+    uint32_t r2 = ((t1 >> 20) | (t2 << 12)) & 0x3ffc0ff;
+    uint32_t r3 = ((t2 >> 14) | (t3 << 18)) & 0x3f03fff;
+    uint32_t r4 = ((t3 >>  8)             ) & 0x00fffff;
+
+    uint32_t s1 = r1 * 5;
+    uint32_t s2 = r2 * 5;
+    uint32_t s3 = r3 * 5;
+    uint32_t s4 = r4 * 5;
+
+    uint32_t h0 = 0, h1 = 0, h2 = 0, h3 = 0, h4 = 0;
+
+    auto process_block = [&](const uint8_t* m, uint32_t hibit) {
+        uint32_t m0 = load32(m + 0);
+        uint32_t m1 = load32(m + 4);
+        uint32_t m2 = load32(m + 8);
+        uint32_t m3 = load32(m + 12);
+
+        h0 += (m0                    ) & 0x3ffffff;
+        h1 += ((m0 >> 26) | (m1 <<  6)) & 0x3ffffff;
+        h2 += ((m1 >> 20) | (m2 << 12)) & 0x3ffffff;
+        h3 += ((m2 >> 14) | (m3 << 18)) & 0x3ffffff;
+        h4 += ((m3 >>  8)             ) | (hibit << 24);
+
+        uint64_t d0 = static_cast<uint64_t>(h0) * r0 +
+                      static_cast<uint64_t>(h1) * s4 +
+                      static_cast<uint64_t>(h2) * s3 +
+                      static_cast<uint64_t>(h3) * s2 +
+                      static_cast<uint64_t>(h4) * s1;
+        uint64_t d1 = static_cast<uint64_t>(h0) * r1 +
+                      static_cast<uint64_t>(h1) * r0 +
+                      static_cast<uint64_t>(h2) * s4 +
+                      static_cast<uint64_t>(h3) * s3 +
+                      static_cast<uint64_t>(h4) * s2;
+        uint64_t d2 = static_cast<uint64_t>(h0) * r2 +
+                      static_cast<uint64_t>(h1) * r1 +
+                      static_cast<uint64_t>(h2) * r0 +
+                      static_cast<uint64_t>(h3) * s4 +
+                      static_cast<uint64_t>(h4) * s3;
+        uint64_t d3 = static_cast<uint64_t>(h0) * r3 +
+                      static_cast<uint64_t>(h1) * r2 +
+                      static_cast<uint64_t>(h2) * r1 +
+                      static_cast<uint64_t>(h3) * r0 +
+                      static_cast<uint64_t>(h4) * s4;
+        uint64_t d4 = static_cast<uint64_t>(h0) * r4 +
+                      static_cast<uint64_t>(h1) * r3 +
+                      static_cast<uint64_t>(h2) * r2 +
+                      static_cast<uint64_t>(h3) * r1 +
+                      static_cast<uint64_t>(h4) * r0;
+
+        uint64_t c;
+        c = d0 >> 26; h0 = static_cast<uint32_t>(d0) & 0x3ffffff; d1 += c;
+        c = d1 >> 26; h1 = static_cast<uint32_t>(d1) & 0x3ffffff; d2 += c;
+        c = d2 >> 26; h2 = static_cast<uint32_t>(d2) & 0x3ffffff; d3 += c;
+        c = d3 >> 26; h3 = static_cast<uint32_t>(d3) & 0x3ffffff; d4 += c;
+        c = d4 >> 26; h4 = static_cast<uint32_t>(d4) & 0x3ffffff;
+        h0 += static_cast<uint32_t>(c * 5);
+        c = h0 >> 26; h0 &= 0x3ffffff;
+        h1 += static_cast<uint32_t>(c);
+    };
+
+    while (len >= 16) {
+        process_block(msg, 1);
+        msg += 16;
+        len -= 16;
+    }
+
+    if (len > 0) {
+        uint8_t buf[16] = {};
+        memcpy(buf, msg, len);
+        buf[len] = 1;
+        process_block(buf, 0);
+    }
+
+    uint32_t c;
+    c = h1 >> 26; h1 &= 0x3ffffff; h2 += c;
+    c = h2 >> 26; h2 &= 0x3ffffff; h3 += c;
+    c = h3 >> 26; h3 &= 0x3ffffff; h4 += c;
+    c = h4 >> 26; h4 &= 0x3ffffff; h0 += c * 5;
+    c = h0 >> 26; h0 &= 0x3ffffff; h1 += c;
+
+    uint32_t g0 = h0 + 5;
+    c = g0 >> 26; g0 &= 0x3ffffff;
+    uint32_t g1 = h1 + c;
+    c = g1 >> 26; g1 &= 0x3ffffff;
+    uint32_t g2 = h2 + c;
+    c = g2 >> 26; g2 &= 0x3ffffff;
+    uint32_t g3 = h3 + c;
+    c = g3 >> 26; g3 &= 0x3ffffff;
+    uint32_t g4 = h4 + c - (1u << 26);
+
+    uint32_t mask = (g4 >> 31) - 1;
+    g0 &= mask;
+    g1 &= mask;
+    g2 &= mask;
+    g3 &= mask;
+    g4 &= mask;
+    mask = ~mask;
+    h0 = (h0 & mask) | g0;
+    h1 = (h1 & mask) | g1;
+    h2 = (h2 & mask) | g2;
+    h3 = (h3 & mask) | g3;
+    h4 = (h4 & mask) | g4;
+
+    uint32_t out0 = (h0      ) | (h1 << 26);
+    uint32_t out1 = (h1 >>  6) | (h2 << 20);
+    uint32_t out2 = (h2 >> 12) | (h3 << 14);
+    uint32_t out3 = (h3 >> 18) | (h4 <<  8);
+
+    uint64_t f0 = static_cast<uint64_t>(out0) + load32(key + 16);
+    c = static_cast<uint32_t>(f0 >> 32);
+    uint64_t f1 = static_cast<uint64_t>(out1) + load32(key + 20) + c;
+    c = static_cast<uint32_t>(f1 >> 32);
+    uint64_t f2 = static_cast<uint64_t>(out2) + load32(key + 24) + c;
+    c = static_cast<uint32_t>(f2 >> 32);
+    uint64_t f3 = static_cast<uint64_t>(out3) + load32(key + 28) + c;
+
+    auto store32 = [](uint8_t* p, uint32_t v) {
+        p[0] = static_cast<uint8_t>(v);
+        p[1] = static_cast<uint8_t>(v >> 8);
+        p[2] = static_cast<uint8_t>(v >> 16);
+        p[3] = static_cast<uint8_t>(v >> 24);
+    };
+
+    store32(tag + 0, static_cast<uint32_t>(f0));
+    store32(tag + 4, static_cast<uint32_t>(f1));
+    store32(tag + 8, static_cast<uint32_t>(f2));
+    store32(tag + 12, static_cast<uint32_t>(f3));
 }
 
-// Portable 128-bit unsigned integer (lo, hi) for the Poly1305 130-bit arithmetic.
-// MSVC x64 has no __uint128_t, so the needed operations are implemented by hand.
-struct U128 {
-    uint64_t lo = 0, hi = 0;
-    U128() = default;
-    U128(uint64_t v) : lo(v), hi(0) {}
-    U128(uint64_t l, uint64_t h) : lo(l), hi(h) {}
-
-    static U128 Mul64(uint64_t a, uint64_t b) {
-#if defined(_MSC_VER)
-        U128 r;
-        r.lo = _umul128(a, b, &r.hi);
-        return r;
-#else
-        __uint128_t p = static_cast<__uint128_t>(a) * b;
-        return U128(static_cast<uint64_t>(p), static_cast<uint64_t>(p >> 64));
-#endif
-    }
-    U128 operator+(const U128& o) const {
-        U128 r;
-        r.lo = lo + o.lo;
-        uint64_t carry = (r.lo < lo) ? 1 : 0;
-        r.hi = hi + o.hi + carry;
-        return r;
-    }
-    U128 operator&(const U128& o) const { return U128(lo & o.lo, hi & o.hi); }
-    U128 operator<<(int n) const {
-        if (n >= 128) return U128(0, 0);
-        if (n == 0) return *this;
-        if (n < 64) return U128(lo << n, (hi << n) | (lo >> (64 - n)));
-        return U128(0, lo << (n - 64));
-    }
-    U128 operator>>(int n) const {
-        if (n >= 128) return U128(0, 0);
-        if (n == 0) return *this;
-        if (n < 64) return U128((lo >> n) | (hi << (64 - n)), hi >> n);
-        return U128(hi >> (n - 64), 0);
-    }
-    U128 operator*(int m) const {
-        U128 a = Mul64(lo, static_cast<uint64_t>(m));
-        U128 b = Mul64(hi, static_cast<uint64_t>(m));
-        return U128(a.lo, a.hi + b.lo);
-    }
-    U128 operator*(const U128& o) const {
-        U128 a = Mul64(lo, o.lo);
-        U128 b = Mul64(lo, o.hi);
-        U128 c = Mul64(hi, o.lo);
-        U128 d = Mul64(hi, o.hi);
-        // Sum the four 128-bit partial products into a 256-bit result, keep low 128 bits.
-        U128 s = a + (b << 64) + (c << 64) + (d << 128);
-        return s;
-    }
-    explicit operator uint64_t() const { return lo; }
-};
-
-// r = a * b (mod 2^130 - 5) — the Poly1305 130-bit multiply-reduce.
-inline Poly1305Acc PolyMul(Poly1305Acc a, Poly1305Acc b) {
-    // 128-bit * 128-bit -> 256-bit product, then reduce mod (2^130 - 5).
-    U128 t0 = U128::Mul64(a.lo, b.lo);
-    U128 t1 = U128::Mul64(a.lo, b.hi);
-    U128 t2 = U128::Mul64(a.hi, b.lo);
-    U128 t3 = U128::Mul64(a.hi, b.hi);
-
-    // Sum the partial products into four 64-bit limbs (c0..c3) of the 256-bit product.
-    uint64_t c0 = static_cast<uint64_t>(t0);
-    U128 s1 = (t0 >> 64) + (t1 & U128(0xFFFFFFFFFFFFFFFF)) + (t2 & U128(0xFFFFFFFFFFFFFFFF));
-    uint64_t c1 = static_cast<uint64_t>(s1);
-    U128 s2 = (s1 >> 64) + (t1 >> 64) + (t2 >> 64) + (t3 & U128(0xFFFFFFFFFFFFFFFF));
-    uint64_t c2 = static_cast<uint64_t>(s2);
-    U128 s3 = (s2 >> 64) + (t3 >> 64);
-    uint64_t c3 = static_cast<uint64_t>(s3);
-
-    // Split the 256-bit value into the low 130 bits and the high 126 bits.
-    // low  = c0 + c1*2^64 + (c2 & 0x3F)*2^128
-    // high = (c2 >> 6) + c3*2^62
-    U128 low  = U128(c0) + (U128(c1) << 64) + (U128(c2 & 0x3F) << 128);
-    U128 high = U128(c2 >> 6) + (U128(c3) << 62);
-    // Since 2^130 ≡ 5 (mod 2^130 - 5), the value ≡ low + 5*high (mod 2^130 - 5).
-    U128 r = low + (U128(5) * high);
-    // r < 2^130 + 5*2^126, so one more reduction pass: (r & (2^130-1)) + (r >> 130)*5.
-    // The 128-bit mask (2^130-1) overflows to all-ones, so this is r + 5*carry.
-    U128 carry = r >> 130;
-    r = r + (U128(5) * carry);
-    Poly1305Acc out;
-    out.lo = static_cast<uint64_t>(r);
-    out.hi = static_cast<uint64_t>(r >> 64);
-    return out;
-}
-
-// Compute the Poly1305 tag over `msg` with the 32-byte `key` (r = key[0..16] & 0x0FFFFFFC0F...,
-// s = key[16..32]).
 inline std::array<uint8_t, 16> Poly1305(const uint8_t key[32], const uint8_t* msg, size_t len) {
-    // r = key[0..16] with the low 2 bits of each 32-bit word cleared.
-    Poly1305Acc r;
-    r.lo = (static_cast<uint64_t>(key[0]) | (static_cast<uint64_t>(key[1]) << 8) |
-           (static_cast<uint64_t>(key[2]) << 16) | (static_cast<uint64_t>(key[3]) << 24) |
-           (static_cast<uint64_t>(key[4]) << 32) | (static_cast<uint64_t>(key[5]) << 40) |
-           (static_cast<uint64_t>(key[6]) << 48) | (static_cast<uint64_t>(key[7]) << 56)) & 0x0FFFFFFC0FFFFFFCu;
-    r.hi = (static_cast<uint64_t>(key[8]) | (static_cast<uint64_t>(key[9]) << 8) |
-           (static_cast<uint64_t>(key[10]) << 16) | (static_cast<uint64_t>(key[11]) << 24) |
-           (static_cast<uint64_t>(key[12]) << 32) | (static_cast<uint64_t>(key[13]) << 40) |
-           (static_cast<uint64_t>(key[14]) << 48) | (static_cast<uint64_t>(key[15]) << 56)) & 0x0FFFFFFC0FFFFFFCu;
-    Poly1305Acc h{0, 0};
-    size_t off = 0;
-    while (off < len) {
-        uint64_t block = 0;
-        size_t n = std::min<size_t>(8, len - off);
-        for (size_t i = 0; i < n; ++i) block |= static_cast<uint64_t>(msg[off + i]) << (8 * i);
-        block |= (n < 8) ? (1ull << (8 * n)) : 0;  // pad with 0x01
-        h = PolyMul(h, r);
-        h = PolyAdd(h, {block, 0});
-        off += n;
-    }
-    // h + r (mod 2^130 - 5)
-    h = PolyAdd(h, r);
-    // s = key[16..32]
-    Poly1305Acc s;
-    s.lo = static_cast<uint64_t>(key[16]) | (static_cast<uint64_t>(key[17]) << 8) |
-           (static_cast<uint64_t>(key[18]) << 16) | (static_cast<uint64_t>(key[19]) << 24) |
-           (static_cast<uint64_t>(key[20]) << 32) | (static_cast<uint64_t>(key[21]) << 40) |
-           (static_cast<uint64_t>(key[22]) << 48) | (static_cast<uint64_t>(key[23]) << 56);
-    s.hi = static_cast<uint64_t>(key[24]) | (static_cast<uint64_t>(key[25]) << 8) |
-           (static_cast<uint64_t>(key[26]) << 16) | (static_cast<uint64_t>(key[27]) << 24) |
-           (static_cast<uint64_t>(key[28]) << 32) | (static_cast<uint64_t>(key[29]) << 40) |
-           (static_cast<uint64_t>(key[30]) << 48) | (static_cast<uint64_t>(key[31]) << 56);
-    Poly1305Acc mac = PolyAdd(h, s);
     std::array<uint8_t, 16> out;
-    for (int i = 0; i < 8; ++i) {
-        out[i] = static_cast<uint8_t>(mac.lo >> (8 * i));
-        out[i + 8] = static_cast<uint8_t>(mac.hi >> (8 * i));
-    }
+    Poly1305(key, msg, len, out.data());
     return out;
 }
 
 // ─── ChaCha20-Poly1305 AEAD (RFC 8439) ───────────────────────────────────────
 
-// Derive the Poly1305 subkey from the first 32 bytes of the ChaCha20 keystream.
 inline void ChaCha20Block(const uint8_t key[32], const uint8_t nonce[12], uint32_t counter,
                           uint8_t out[64]) {
     auto rotl = [](uint32_t v, int n) { return (v << n) | (v >> (32 - n)); };
     auto qr = [&rotl](uint32_t s[16], int a, int b, int c, int d) {
-        s[a] += s[b]; s[c] ^= s[a]; s[c] = rotl(s[c], 16);
-        s[d] += s[c]; s[a] ^= s[d]; s[a] = rotl(s[a], 12);
-        s[b] += s[a]; s[d] ^= s[b]; s[d] = rotl(s[d], 8);
-        s[c] += s[d]; s[a] ^= s[c]; s[a] = rotl(s[a], 7);
+        s[a] += s[b]; s[d] ^= s[a]; s[d] = rotl(s[d], 16);
+        s[c] += s[d]; s[b] ^= s[c]; s[b] = rotl(s[b], 12);
+        s[a] += s[b]; s[d] ^= s[a]; s[d] = rotl(s[d], 8);
+        s[c] += s[d]; s[b] ^= s[c]; s[b] = rotl(s[b], 7);
     };
     uint32_t state[16];
-    state[0] = 0x61707865; state[1] = 0x3320646e; state[2] = 0x79622d32; state[3] = 0x73636174;
+    state[0] = 0x61707865; state[1] = 0x3320646e; state[2] = 0x79622d32; state[3] = 0x6b206574;
     for (int i = 0; i < 8; ++i)
         state[4 + i] = key[i * 4] | (key[i * 4 + 1] << 8) | (key[i * 4 + 2] << 16) | (key[i * 4 + 3] << 24);
     state[12] = counter;
@@ -407,16 +410,28 @@ inline void ChaCha20Block(const uint8_t key[32], const uint8_t nonce[12], uint32
     }
     for (int i = 0; i < 16; ++i) state[i] += init[i];
     for (int i = 0; i < 16; ++i) {
-        out[i] = static_cast<uint8_t>(state[i]);
-        out[i + 1] = static_cast<uint8_t>(state[i] >> 8);
-        out[i + 2] = static_cast<uint8_t>(state[i] >> 16);
-        out[i + 3] = static_cast<uint8_t>(state[i] >> 24);
+        out[i * 4]     = static_cast<uint8_t>(state[i]);
+        out[i * 4 + 1] = static_cast<uint8_t>(state[i] >> 8);
+        out[i * 4 + 2] = static_cast<uint8_t>(state[i] >> 16);
+        out[i * 4 + 3] = static_cast<uint8_t>(state[i] >> 24);
     }
 }
 
-// Cached ChaCha20-Poly1305 algorithm provider. Every AEAD call used to open and
-// close the provider, which costs more than the decryption itself for a video
-// frame; the handle is process-wide and safe to share.
+inline void ChaCha20EncryptWithCounter(const uint8_t key[32], const uint8_t nonce[12], uint32_t counter,
+                                       const uint8_t* input, size_t len, uint8_t* output) {
+    uint8_t block[64];
+    size_t offset = 0;
+    while (offset < len) {
+        ChaCha20Block(key, nonce, counter++, block);
+        size_t chunk = (len - offset < 64) ? (len - offset) : 64;
+        for (size_t j = 0; j < chunk; ++j) {
+            output[offset + j] = (input ? input[offset + j] : 0) ^ block[j];
+        }
+        offset += chunk;
+    }
+}
+
+// Cached ChaCha20-Poly1305 algorithm provider (Windows 11+).
 inline BCRYPT_ALG_HANDLE ChaCha20Poly1305Alg() {
     static BCRYPT_ALG_HANDLE hAlg = [] {
         BCRYPT_ALG_HANDLE h = nullptr;
@@ -426,80 +441,35 @@ inline BCRYPT_ALG_HANDLE ChaCha20Poly1305Alg() {
     return hAlg;
 }
 
+// Forward declarations of AEAD with AAD
+inline std::vector<uint8_t> ChaCha20Poly1305SealWithAad(
+    const uint8_t key[32], const uint8_t nonce12[12],
+    const uint8_t* aad, size_t aadLen,
+    const uint8_t* plaintext, size_t len);
+
+inline bool ChaCha20Poly1305OpenWithAad(
+    const uint8_t key[32], const uint8_t nonce12[12],
+    const uint8_t* aad, size_t aadLen,
+    const uint8_t* ciphertext, size_t len,
+    std::vector<uint8_t>& outPlaintext);
+
 // AEAD-encrypt `plaintext` with `key` and the pairing 8-byte nonce (left-padded with four zero
 // bytes to the 12-byte IETF nonce). Returns ciphertext ‖ 16-byte Poly1305 tag.
 inline std::vector<uint8_t> ChaCha20Poly1305Seal(const uint8_t key[32], const uint8_t nonce8[8],
-                                                  const uint8_t* plaintext, size_t len) {
-    BCRYPT_ALG_HANDLE hAlg = ChaCha20Poly1305Alg();
-    if (!hAlg) {
-        return {};
-    }
-    BCRYPT_KEY_HANDLE hKey = nullptr;
-    if (BCryptGenerateSymmetricKey(hAlg, &hKey, nullptr, 0, const_cast<PUCHAR>(key), 32, 0) != 0) {
-        return {};
-    }
-
-    uint8_t nonce[12] = {};
-    memcpy(nonce + 4, nonce8, 8);
-    uint8_t tag[16] = {};
-
-    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
-    BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
-    authInfo.pbNonce = nonce;
-    authInfo.cbNonce = sizeof(nonce);
-    authInfo.pbTag = tag;
-    authInfo.cbTag = sizeof(tag);
-
-    std::vector<uint8_t> ct(len);
-    ULONG cbResult = 0;
-    NTSTATUS status = BCryptEncrypt(hKey, const_cast<PUCHAR>(plaintext), static_cast<ULONG>(len),
-                                    &authInfo, nullptr, 0, ct.data(), static_cast<ULONG>(ct.size()), &cbResult, 0);
-    BCryptDestroyKey(hKey);
-
-    if (status != 0) {
-        return {};
-    }
-    ct.insert(ct.end(), tag, tag + 16);
-    return ct;
+                                                 const uint8_t* plaintext, size_t len) {
+    uint8_t nonce12[12] = {};
+    memcpy(nonce12 + 4, nonce8, 8);
+    return ChaCha20Poly1305SealWithAad(key, nonce12, nullptr, 0, plaintext, len);
 }
 
 // AEAD-decrypt `ciphertext` (ciphertext ‖ 16-byte tag) with `key` and the pairing 8-byte nonce.
 // Returns true on success (tag verified), false on authentication failure.
 inline bool ChaCha20Poly1305Open(const uint8_t key[32], const uint8_t nonce8[8],
-                                  const uint8_t* ciphertext, size_t len,
-                                  std::vector<uint8_t>& outPlaintext) {
-    if (len < 16) return false;
-    size_t ctLen = len - 16;
-    const uint8_t* tag = ciphertext + ctLen;
-
-    BCRYPT_ALG_HANDLE hAlg = ChaCha20Poly1305Alg();
-    if (!hAlg) {
-        return false;
-    }
-    BCRYPT_KEY_HANDLE hKey = nullptr;
-    if (BCryptGenerateSymmetricKey(hAlg, &hKey, nullptr, 0, const_cast<PUCHAR>(key), 32, 0) != 0) {
-        return false;
-    }
-
-    uint8_t nonce[12] = {};
-    memcpy(nonce + 4, nonce8, 8);
-    uint8_t tagCopy[16];
-    memcpy(tagCopy, tag, 16);
-
-    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
-    BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
-    authInfo.pbNonce = nonce;
-    authInfo.cbNonce = sizeof(nonce);
-    authInfo.pbTag = tagCopy;
-    authInfo.cbTag = sizeof(tagCopy);
-
-    outPlaintext.resize(ctLen);
-    ULONG cbResult = 0;
-    NTSTATUS status = BCryptDecrypt(hKey, const_cast<PUCHAR>(ciphertext), static_cast<ULONG>(ctLen),
-                                    &authInfo, nullptr, 0, outPlaintext.data(), static_cast<ULONG>(ctLen), &cbResult, 0);
-    BCryptDestroyKey(hKey);
-
-    return (status == 0);
+                                 const uint8_t* ciphertext, size_t len,
+                                 std::vector<uint8_t>& outPlaintext) {
+    uint8_t nonce12[12] = {};
+    memcpy(nonce12 + 4, nonce8, 8);
+    return ChaCha20Poly1305OpenWithAad(key, nonce12, nullptr, 0, ciphertext, len, outPlaintext);
 }
 
 // AEAD-decrypt `ctAndTag` (ciphertext ‖ 16-byte tag) with `key` and the pairing 8-byte nonce.
@@ -586,38 +556,70 @@ inline std::vector<uint8_t> ChaCha20Poly1305SealWithAad(
     const uint8_t* aad, size_t aadLen,
     const uint8_t* plaintext, size_t len) {
     BCRYPT_ALG_HANDLE hAlg = ChaCha20Poly1305Alg();
-    if (!hAlg) {
-        return {};
-    }
-    BCRYPT_KEY_HANDLE hKey = nullptr;
-    if (BCryptGenerateSymmetricKey(hAlg, &hKey, nullptr, 0, const_cast<PUCHAR>(key), 32, 0) != 0) {
-        return {};
+    if (hAlg) {
+        BCRYPT_KEY_HANDLE hKey = nullptr;
+        if (BCryptGenerateSymmetricKey(hAlg, &hKey, nullptr, 0, const_cast<PUCHAR>(key), 32, 0) == 0) {
+            uint8_t nonce[12];
+            memcpy(nonce, nonce12, 12);
+            uint8_t tag[16] = {};
+
+            BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
+            BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
+            authInfo.pbNonce = nonce;
+            authInfo.cbNonce = sizeof(nonce);
+            if (aad && aadLen > 0) {
+                authInfo.pbAuthData = const_cast<PUCHAR>(aad);
+                authInfo.cbAuthData = static_cast<ULONG>(aadLen);
+            }
+            authInfo.pbTag = tag;
+            authInfo.cbTag = sizeof(tag);
+
+            std::vector<uint8_t> ct(len);
+            ULONG cbResult = 0;
+            NTSTATUS status = BCryptEncrypt(hKey, const_cast<PUCHAR>(plaintext), static_cast<ULONG>(len),
+                                            &authInfo, nullptr, 0, ct.data(), static_cast<ULONG>(ct.size()), &cbResult, 0);
+            BCryptDestroyKey(hKey);
+
+            if (status == 0) {
+                ct.insert(ct.end(), tag, tag + 16);
+                return ct;
+            }
+        }
     }
 
-    uint8_t nonce[12];
-    memcpy(nonce, nonce12, 12);
-    uint8_t tag[16] = {};
-
-    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
-    BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
-    authInfo.pbNonce = nonce;
-    authInfo.cbNonce = sizeof(nonce);
-    if (aad && aadLen > 0) {
-        authInfo.pbAuthData = const_cast<PUCHAR>(aad);
-        authInfo.cbAuthData = static_cast<ULONG>(aadLen);
-    }
-    authInfo.pbTag = tag;
-    authInfo.cbTag = sizeof(tag);
+    // RFC 8439 pure C++ fallback (e.g. Windows 10 where CNG lacks BCRYPT_CHACHA20_POLY1305_ALGORITHM)
+    uint8_t block0[64];
+    ChaCha20Block(key, nonce12, 0, block0);
+    uint8_t otk[32];
+    memcpy(otk, block0, 32);
 
     std::vector<uint8_t> ct(len);
-    ULONG cbResult = 0;
-    NTSTATUS status = BCryptEncrypt(hKey, const_cast<PUCHAR>(plaintext), static_cast<ULONG>(len),
-                                    &authInfo, nullptr, 0, ct.data(), static_cast<ULONG>(ct.size()), &cbResult, 0);
-    BCryptDestroyKey(hKey);
-
-    if (status != 0) {
-        return {};
+    if (len > 0) {
+        ChaCha20EncryptWithCounter(key, nonce12, 1, plaintext, len, ct.data());
     }
+
+    std::vector<uint8_t> mac_data;
+    mac_data.reserve(aadLen + 16 + len + 16 + 16);
+    if (aad && aadLen > 0) {
+        mac_data.insert(mac_data.end(), aad, aad + aadLen);
+        if (aadLen % 16 != 0) {
+            mac_data.insert(mac_data.end(), 16 - (aadLen % 16), 0);
+        }
+    }
+    if (len > 0) {
+        mac_data.insert(mac_data.end(), ct.begin(), ct.end());
+        if (len % 16 != 0) {
+            mac_data.insert(mac_data.end(), 16 - (len % 16), 0);
+        }
+    }
+    uint64_t aad_len_u64 = static_cast<uint64_t>(aadLen);
+    for (int i = 0; i < 8; ++i) mac_data.push_back(static_cast<uint8_t>(aad_len_u64 >> (8 * i)));
+    uint64_t ct_len_u64 = static_cast<uint64_t>(len);
+    for (int i = 0; i < 8; ++i) mac_data.push_back(static_cast<uint8_t>(ct_len_u64 >> (8 * i)));
+
+    uint8_t tag[16] = {};
+    Poly1305(otk, mac_data.data(), mac_data.size(), tag);
+
     ct.insert(ct.end(), tag, tag + 16);
     return ct;
 }
@@ -632,37 +634,78 @@ inline bool ChaCha20Poly1305OpenWithAad(
     const uint8_t* tag = ciphertext + ctLen;
 
     BCRYPT_ALG_HANDLE hAlg = ChaCha20Poly1305Alg();
-    if (!hAlg) {
-        return false;
-    }
-    BCRYPT_KEY_HANDLE hKey = nullptr;
-    if (BCryptGenerateSymmetricKey(hAlg, &hKey, nullptr, 0, const_cast<PUCHAR>(key), 32, 0) != 0) {
-        return false;
+    if (hAlg) {
+        BCRYPT_KEY_HANDLE hKey = nullptr;
+        if (BCryptGenerateSymmetricKey(hAlg, &hKey, nullptr, 0, const_cast<PUCHAR>(key), 32, 0) == 0) {
+            uint8_t nonce[12];
+            memcpy(nonce, nonce12, 12);
+            uint8_t tagCopy[16];
+            memcpy(tagCopy, tag, 16);
+
+            BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
+            BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
+            authInfo.pbNonce = nonce;
+            authInfo.cbNonce = sizeof(nonce);
+            if (aad && aadLen > 0) {
+                authInfo.pbAuthData = const_cast<PUCHAR>(aad);
+                authInfo.cbAuthData = static_cast<ULONG>(aadLen);
+            }
+            authInfo.pbTag = tagCopy;
+            authInfo.cbTag = sizeof(tagCopy);
+
+            outPlaintext.resize(ctLen);
+            ULONG cbResult = 0;
+            NTSTATUS status = BCryptDecrypt(hKey, const_cast<PUCHAR>(ciphertext), static_cast<ULONG>(ctLen),
+                                            &authInfo, nullptr, 0, outPlaintext.data(), static_cast<ULONG>(ctLen), &cbResult, 0);
+            BCryptDestroyKey(hKey);
+
+            if (status == 0) {
+                return true;
+            }
+        }
     }
 
-    uint8_t nonce[12];
-    memcpy(nonce, nonce12, 12);
-    uint8_t tagCopy[16];
-    memcpy(tagCopy, tag, 16);
+    // RFC 8439 pure C++ fallback
+    uint8_t block0[64];
+    ChaCha20Block(key, nonce12, 0, block0);
+    uint8_t otk[32];
+    memcpy(otk, block0, 32);
 
-    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
-    BCRYPT_INIT_AUTH_MODE_INFO(authInfo);
-    authInfo.pbNonce = nonce;
-    authInfo.cbNonce = sizeof(nonce);
+    std::vector<uint8_t> mac_data;
+    mac_data.reserve(aadLen + 16 + ctLen + 16 + 16);
     if (aad && aadLen > 0) {
-        authInfo.pbAuthData = const_cast<PUCHAR>(aad);
-        authInfo.cbAuthData = static_cast<ULONG>(aadLen);
+        mac_data.insert(mac_data.end(), aad, aad + aadLen);
+        if (aadLen % 16 != 0) {
+            mac_data.insert(mac_data.end(), 16 - (aadLen % 16), 0);
+        }
     }
-    authInfo.pbTag = tagCopy;
-    authInfo.cbTag = sizeof(tagCopy);
+    if (ctLen > 0) {
+        mac_data.insert(mac_data.end(), ciphertext, ciphertext + ctLen);
+        if (ctLen % 16 != 0) {
+            mac_data.insert(mac_data.end(), 16 - (ctLen % 16), 0);
+        }
+    }
+    uint64_t aad_len_u64 = static_cast<uint64_t>(aadLen);
+    for (int i = 0; i < 8; ++i) mac_data.push_back(static_cast<uint8_t>(aad_len_u64 >> (8 * i)));
+    uint64_t ct_len_u64 = static_cast<uint64_t>(ctLen);
+    for (int i = 0; i < 8; ++i) mac_data.push_back(static_cast<uint8_t>(ct_len_u64 >> (8 * i)));
+
+    uint8_t expected_tag[16] = {};
+    Poly1305(otk, mac_data.data(), mac_data.size(), expected_tag);
+
+    uint8_t diff = 0;
+    for (size_t i = 0; i < 16; ++i) {
+        diff |= (tag[i] ^ expected_tag[i]);
+    }
+    if (diff != 0) {
+        return false;
+    }
 
     outPlaintext.resize(ctLen);
-    ULONG cbResult = 0;
-    NTSTATUS status = BCryptDecrypt(hKey, const_cast<PUCHAR>(ciphertext), static_cast<ULONG>(ctLen),
-                                    &authInfo, nullptr, 0, outPlaintext.data(), static_cast<ULONG>(ctLen), &cbResult, 0);
-    BCryptDestroyKey(hKey);
-
-    return (status == 0);
+    if (ctLen > 0) {
+        ChaCha20EncryptWithCounter(key, nonce12, 1, ciphertext, ctLen, outPlaintext.data());
+    }
+    return true;
 }
 
 // ─── Control Channel Keys & Framer ───────────────────────────────────────────

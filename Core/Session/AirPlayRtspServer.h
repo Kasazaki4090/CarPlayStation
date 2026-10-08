@@ -38,6 +38,7 @@ public:
         uint32_t default_video_width{1280};
         uint32_t default_video_height{720};
         uint32_t default_fps{60};
+        uint32_t default_audio_sample_rate{48000}; // 44100 or 48000
         // The `features` bitmap advertised in /info. Defaults to the mask xcertplay
         // (Reference/diplay) advertises: the one verified on hardware to make an iPhone
         // hand audio over to a receiver.
@@ -213,6 +214,13 @@ public:
      * H.264 until the next session.
      */
     void SetVideoCodec(Common::VideoCodec codec);
+
+    /**
+     * @brief Configure the advertised audio sample rate (44100 or 48000 Hz).
+     *
+     * Informs the iPhone of the desired sample rate for the media lane to minimize SRC.
+     */
+    void SetAudioSampleRate(uint32_t sample_rate);
 
     /**
      * @brief Send a HID input report to the active AirPlay event channel.

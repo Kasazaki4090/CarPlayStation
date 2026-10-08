@@ -15,12 +15,14 @@ namespace CarPlayStation::Application {
 // ============================================================================
 
 enum class VideoResolutionPreset : uint8_t {
-    Res720P = 0,   // 1280 x 720
-    Res1080P = 1,  // 1920 x 1080
-    Res1440P = 2,  // 2560 x 1440 (2K)
-    Res2160P = 3,  // 3840 x 2160 (4K)
-    Auto = 4,      // Match window or display resolution dynamically
-    Custom = 5     // User-specified custom dimensions
+    Res720P = 0,     // 1280 x 720 (16:9 标准车机中控屏)
+    Res1080P = 1,    // 1920 x 1080 (16:9 高清大屏)
+    Res1440P = 2,    // 2560 x 1440 (2K)
+    Res2160P = 3,    // 3840 x 2160 (4K)
+    Auto = 4,        // Match window or display resolution dynamically
+    Custom = 5,      // User-specified custom dimensions
+    Car1280x480 = 6, // 1280 x 480 (8:3 宝马/奥迪经典车机长条宽屏)
+    Car1920x720 = 7  // 1920 x 720 (8:3 宝马/奔驰双联屏及现代车机高清宽屏)
 };
 
 // Pure presentation-layer concept: how the video surface is shown.
@@ -50,28 +52,30 @@ struct VideoPreferences {
         uint32_t currentDisplayWidth = 1920,
         uint32_t currentDisplayHeight = 1080) const noexcept {
         switch (resolution_preset) {
-            case VideoResolutionPreset::Res720P:  return {1280, 720};
-            case VideoResolutionPreset::Res1080P: return {1920, 1080};
-            case VideoResolutionPreset::Res1440P: return {2560, 1440};
-            case VideoResolutionPreset::Res2160P: return {3840, 2160};
-            case VideoResolutionPreset::Auto:     return {currentDisplayWidth, currentDisplayHeight};
-            case VideoResolutionPreset::Custom:   return {custom_width, custom_height};
+            case VideoResolutionPreset::Res720P:     return {1280, 720};
+            case VideoResolutionPreset::Res1080P:    return {1920, 1080};
+            case VideoResolutionPreset::Res1440P:    return {2560, 1440};
+            case VideoResolutionPreset::Res2160P:    return {3840, 2160};
+            case VideoResolutionPreset::Auto:        return {currentDisplayWidth, currentDisplayHeight};
+            case VideoResolutionPreset::Custom:      return {custom_width, custom_height};
+            case VideoResolutionPreset::Car1280x480: return {1280, 480};
+            case VideoResolutionPreset::Car1920x720: return {1920, 720};
         }
         return {1920, 1080};
     }
 };
 
-// Audio preferences: only the three lane volumes are user settings.
+// Audio preferences: only the three lane volumes and ducking attenuation ratio.
 //
-// The output sample rate is never chosen here - the audio pipeline opens the
-// Windows default render endpoint in shared mode and follows its mix format, so
-// the rate always matches whatever the OS is already running. The encode bitrate
-// is fixed at 320 kbps. Ducking is driven by the sender (RTSP `duckAudio`) and
-// by the receiver's own voice detector, not by the user.
+// The output sample rate is automatically determined from the Windows default
+// endpoint mix format (48000 Hz or 44100 Hz, with integer downsampling like 96k->48k
+// and 88.2k->44.1k to eliminate fractional SRC). The stream encode bitrate defaults
+// to 320 kbps. Neither sample rate nor bitrate is exposed in user settings.
 struct AudioPreferences {
     float media_volume{1.0f};     // 0.0 to 1.0
     float navigation_volume{1.0f};// 0.0 to 1.0
     float telephony_volume{1.0f}; // 0.0 to 1.0
+    float ducking_ratio{0.20f};   // Media volume multiplier during navigation prompt (0.0 to 1.0)
 };
 
 struct DevicePreferences {

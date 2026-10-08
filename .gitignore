@@ -9,7 +9,9 @@ ProjectManagementTemplate/
 /.vscode
 
 # Vendored external libraries (see Lib/Readme.md)
-/Lib/mpv
+/Lib/mpv/*.dll
+/Lib/mpv/*.7z
+/Lib/mpv/*.a
 
 build.bat
 carplay_pairings.json

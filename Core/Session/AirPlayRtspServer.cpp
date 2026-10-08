@@ -924,6 +924,14 @@ public:
         options_.advertise_hevc = codec == Common::VideoCodec::HEVC;
     }
 
+    void SetAudioSampleRate(uint32_t sample_rate) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (sample_rate == 44100 || sample_rate == 48000) {
+            options_.default_audio_sample_rate = sample_rate;
+            params_.audio_sample_rate = sample_rate;
+        }
+    }
+
     int hid_touch_contacts() const noexcept {
         return options_.hid_touch_contacts >= 2 ? 2 : 1;
     }
@@ -1530,35 +1538,36 @@ private:
             if (inp != 0) e.emplace_back("audioInputFormats", BplistValue(inp));
             return BplistValue(e);
         };
+        const bool is44k = (options_.default_audio_sample_rate == 44100);
+        const int64_t kPcmMediaStereo = is44k ? 0x0800 : 0x8000;
+        const int64_t kAacLcMediaStereo = is44k ? 0x00400000 : 0x00800000;
+
         if (options_.audio_advert_c_reference) {
             // The CCPA 8-entry wireless set the C reference advertises
             // (docs/c_reference/c_flow_chatty.log line 7). Every entry decodes to something
             // our media path can actually carry.
             constexpr int64_t kPcm16kMono = 0x10;             // PCM 16 kHz mono
-            constexpr int64_t kPcm48kStereo = 0x8000;         // PCM 48 kHz stereo
             constexpr int64_t kAacEld16kMono = 0x04000000;    // AAC-ELD 16 kHz mono
             constexpr int64_t kAacEld48kMono = 0x02000000;    // AAC-ELD 48 kHz
-            constexpr int64_t kAacLc48kStereo = 0x00800000;   // AAC-LC 48 kHz stereo
             // MainAudio (100).
-            af_arr.push_back(make_af(100, "compatibility", kPcm48kStereo | kPcm16kMono,
+            af_arr.push_back(make_af(100, "compatibility", kPcmMediaStereo | kPcm16kMono,
                                      kPcm16kMono));
             af_arr.push_back(make_af(100, "alert", kAacEld48kMono, 0));
             af_arr.push_back(make_af(100, "default", kAacEld16kMono, kAacEld16kMono));
             af_arr.push_back(make_af(100, "telephony", kAacEld16kMono, kAacEld16kMono));
             af_arr.push_back(make_af(100, "speechRecognition", kAacEld16kMono, kAacEld16kMono));
             // AltAudio (101): guidance/navigation.
-            af_arr.push_back(make_af(101, "compatibility", kPcm48kStereo, 0));
+            af_arr.push_back(make_af(101, "compatibility", kPcmMediaStereo, 0));
             af_arr.push_back(make_af(101, "default", kAacEld48kMono, 0));
             // MainHighAudio (102): buffered media, AAC-LC.
-            af_arr.push_back(make_af(102, "media", kAacLc48kStereo, 0));
+            af_arr.push_back(make_af(102, "media", kAacLcMediaStereo, 0));
         } else {
             // The 9-entry advert xcertplay sends (Reference/diplay
             // AirPlayInfoPlist.audioFormats). We deliberately do NOT advertise Opus
             // (0x70000000) - we have no Opus decoder.
             constexpr int64_t kPcmVoice = 0x3FC;   // 8/16/24/32 kHz, mono + stereo
-            constexpr int64_t kPcm = kPcmVoice | 0xC000;  // + 48 kHz mono + 48 kHz stereo
+            const int64_t kPcm = kPcmVoice | kPcmMediaStereo | 0x4000;
             constexpr int64_t kPcmMono = 0x154 | 0x4000;  // 8/16/24/32/48 kHz mono
-            constexpr int64_t kAacLc48kStereo = 0x00800000;
             // MainAudio (100).
             af_arr.push_back(make_af(100, "compatibility", kPcm, kPcmMono));
             af_arr.push_back(make_af(100, "default", kPcm, kPcmMono));
@@ -1570,7 +1579,7 @@ private:
             af_arr.push_back(make_af(101, "compatibility", kPcm, 0));
             af_arr.push_back(make_af(101, "default", kPcm, 0));
             // MainHighAudio (102): buffered media, AAC-LC.
-            af_arr.push_back(make_af(102, "media", kAacLc48kStereo, 0));
+            af_arr.push_back(make_af(102, "media", kAacLcMediaStereo, 0));
         }
         root.emplace_back("audioFormats", BplistValue(af_arr));
 
@@ -2219,6 +2228,10 @@ void AirPlayRtspServer::SetDisplayGeometry(uint32_t width, uint32_t height, uint
 
 void AirPlayRtspServer::SetVideoCodec(Common::VideoCodec codec) {
     impl_->SetVideoCodec(codec);
+}
+
+void AirPlayRtspServer::SetAudioSampleRate(uint32_t sample_rate) {
+    impl_->SetAudioSampleRate(sample_rate);
 }
 
 Common::Status AirPlayRtspServer::SendHidReport(uint32_t deviceUid, Common::ByteSpan report) {

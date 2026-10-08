@@ -86,12 +86,22 @@ public:
     void SetLimiterThreshold(float threshold) { limiterThreshold_ = threshold; }
     [[nodiscard]] float GetLimiterThreshold() const noexcept { return limiterThreshold_; }
 
-    // --- Resampler (platform-independent, testable) ---
+    // --- Resampler and sample rate helpers (platform-independent, testable) ---
     // Linear-interpolation multi-rate resampler. `src` is `srcCount` float32
     // samples at `srcRate`; returns `dstCount` samples at `dstRate`.
     [[nodiscard]] static std::vector<float> ResampleLinear(const float* src, size_t srcCount,
                                                            uint32_t srcRate, uint32_t dstRate,
                                                            size_t dstCount);
+
+    // Queries the Windows default render endpoint's hardware mix sample rate.
+    // Returns 0 if unable to query or in headless / non-Windows environments.
+    [[nodiscard]] static uint32_t QueryWindowsDefaultSampleRate();
+
+    // Resolves a Windows mix sample rate to either 48000 or 44100 Hz:
+    // - Any exact multiple of 44100 Hz (e.g. 44.1k, 88.2k, 176.4k) -> 44100 Hz
+    // - Any other rate (e.g. 48k, 96k, 192k) or fallback -> 48000 Hz
+    // This allows integer-only down/upsampling to minimize SRC degradation.
+    [[nodiscard]] static uint32_t ResolveOptimalSampleRate(uint32_t windowsSampleRate);
 
     // --- Inspection / test helpers ---
     [[nodiscard]] bool IsRunning() const noexcept { return running_; }

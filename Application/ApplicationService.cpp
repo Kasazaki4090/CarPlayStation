@@ -101,6 +101,14 @@ Core::Common::Status ApplicationService::StartCarPlay(const AppSettings& setting
             OnCoreEvent(event);
         });
 
+    // Apply initial audio volumes and ducking ratio to audio pipeline.
+    if (auto audio = core_api_->GetAudioPipeline()) {
+        audio->SetLaneVolume(Core::Media::AudioLane::MainMedia, settings.audio.media_volume);
+        audio->SetLaneVolume(Core::Media::AudioLane::AltNavigation, settings.audio.navigation_volume);
+        audio->SetLaneVolume(Core::Media::AudioLane::SiriTelephony, settings.audio.telephony_volume);
+        audio->SetTargetDuckingRatio(settings.audio.ducking_ratio);
+    }
+
     is_running_ = true;
     ui_state_.session_state = Core::Session::SessionState::Idle;
     ui_state_.is_streaming = false;
@@ -165,14 +173,12 @@ Core::Common::Status ApplicationService::ApplySettings(const AppSettings& newSet
         SnapshotVideoFacts(ui_state_);
     }
 
-    // Apply the lane volumes. Only the volumes are user settings: the output
-    // sample rate is the Windows render endpoint's mix format (the pipeline
-    // already adapted to it when it started, so there is nothing to reconfigure),
-    // the encode bitrate is fixed, and ducking is driven by the sender.
+    // Apply lane volumes and ducking attenuation ratio.
     if (auto audio = core_api_->GetAudioPipeline()) {
         audio->SetLaneVolume(Core::Media::AudioLane::MainMedia, newSettings.audio.media_volume);
         audio->SetLaneVolume(Core::Media::AudioLane::AltNavigation, newSettings.audio.navigation_volume);
         audio->SetLaneVolume(Core::Media::AudioLane::SiriTelephony, newSettings.audio.telephony_volume);
+        audio->SetTargetDuckingRatio(newSettings.audio.ducking_ratio);
     }
 
     ui_state_.active_settings = newSettings;

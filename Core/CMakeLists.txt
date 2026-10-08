@@ -57,13 +57,16 @@ if(WIN32)
     target_include_directories(CarPlayCore PUBLIC
         ${CMAKE_SOURCE_DIR}/Lib/mpv/include
     )
-    # Copy the libmpv DLL next to the executable so LoadLibrary can find it.
-    add_custom_command(TARGET CarPlayCore POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_SOURCE_DIR}/Lib/mpv/libmpv-2.dll
-            $<TARGET_FILE_DIR:CarPlayStation>
-        COMMENT "Copying libmpv-2.dll to output directory"
-    )
+    # Copy the libmpv DLL next to the executable so LoadLibrary can find it if present.
+    if(EXISTS "${CMAKE_SOURCE_DIR}/Lib/mpv/libmpv-2.dll")
+        add_custom_command(TARGET CarPlayCore POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:CarPlayStation>"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_SOURCE_DIR}/Lib/mpv/libmpv-2.dll"
+                "$<TARGET_FILE_DIR:CarPlayStation>/"
+            COMMENT "Copying libmpv-2.dll to output directory"
+        )
+    endif()
 
     # Vendor driver DLLs (Lib/Readme.md: wch-ch341, ftdi-d2xx). The I2C adapters
     # load these with LoadLibrary; DriverStore folders are not on the default DLL
@@ -76,18 +79,20 @@ if(WIN32)
 
     foreach(_cps_dll CH341DLLA64.DLL CH341DLL.DLL CH347DLLA64.DLL CH347DLL.DLL)
         add_custom_command(TARGET CarPlayCore POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:CarPlayStation>"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${CMAKE_SOURCE_DIR}/Lib/wch-ch341/${_cps_dll}
-                $<TARGET_FILE_DIR:CarPlayStation>
+                "${CMAKE_SOURCE_DIR}/Lib/wch-ch341/${_cps_dll}"
+                "$<TARGET_FILE_DIR:CarPlayStation>/"
             COMMENT "Copying ${_cps_dll} to output directory"
         )
     endforeach()
 
     foreach(_cps_dll libmpsse.dll ftd2xx.dll)
         add_custom_command(TARGET CarPlayCore POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:CarPlayStation>"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${CMAKE_SOURCE_DIR}/Lib/ftdi-d2xx/${CPS_DRIVER_ARCH}/${_cps_dll}
-                $<TARGET_FILE_DIR:CarPlayStation>
+                "${CMAKE_SOURCE_DIR}/Lib/ftdi-d2xx/${CPS_DRIVER_ARCH}/${_cps_dll}"
+                "$<TARGET_FILE_DIR:CarPlayStation>/"
             COMMENT "Copying ${_cps_dll} (${CPS_DRIVER_ARCH}) to output directory"
         )
     endforeach()

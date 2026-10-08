@@ -116,7 +116,9 @@ Common::Status WasapiAudioPipeline::Start(const Common::AudioOutputFormat& forma
                     mixRate_ = mixFormat->nSamplesPerSec;
                     // Accumulate this much audio before the first write, so the
                     // endpoint starts off full instead of trailing the feed.
-                    prebufferFrames_ = mixRate_ / 10u;  // 100 ms
+                    // Measure in input frames (format_.sample_rate) rather than mixRate_.
+                    const uint32_t inRate = format_.sample_rate > 0 ? format_.sample_rate : 48000;
+                    prebufferFrames_ = inRate / 10u;  // 100 ms
                     hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
                                            AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                                            bufferDuration, 0, mixFormat, nullptr);
@@ -574,59 +576,75 @@ void WasapiAudioPipeline::PumpLoop() {
             }
             continue;
         }
-        const size_t want = queued;
-        UINT32 frames = static_cast<UINT32>((std::min)(want, static_cast<size_t>(availableFrames)));
-        if (frames == 0) {
+        const uint32_t inRate = format_.sample_rate > 0 ? format_.sample_rate : 48000;
+        uint32_t factor = 1;
+        if (mixRate_ >= inRate && (mixRate_ % inRate == 0)) {
+            factor = mixRate_ / inRate;
+        }
+
+        const size_t maxInFrames = availableFrames / factor;
+        if (maxInFrames == 0) {
             continue;
         }
 
+        const size_t want = queued;
+        const size_t inFrames = (std::min)(want, maxInFrames);
+        if (inFrames == 0) {
+            continue;
+        }
+        const UINT32 framesToWrite = static_cast<UINT32>(inFrames * factor);
+
         BYTE* pData = nullptr;
-        if (FAILED(render->GetBuffer(frames, &pData)) || !pData) {
+        if (FAILED(render->GetBuffer(framesToWrite, &pData)) || !pData) {
             continue;
         }
         // The mix queues hold `inCh` interleaved channels; the endpoint wants
         // `ch` channels. Copy channel-for-channel and replicate the last input
         // channel when the endpoint has more (e.g. mono -> stereo).
+        // For factor > 1 (e.g. 96k from 48k, 88.2k from 44.1k), integer-duplicate
+        // each input sample factor times.
         const uint32_t inCh = format_.channels > 0 ? format_.channels : 2;
-        const size_t mixSamples = static_cast<size_t>(frames) * inCh;
-        const size_t endpointSamples = static_cast<size_t>(frames) * ch;
+        const size_t mixSamples = inFrames * inCh;
+        const size_t endpointSamples = static_cast<size_t>(framesToWrite) * ch;
         std::vector<float> mixed = RenderMixed(mixSamples);
-        auto sampleAt = [&](size_t frame, size_t c) -> float {
+        auto sampleAt = [&](size_t inF, size_t c) -> float {
             const size_t src = (c < inCh) ? c : (inCh - 1);
-            const size_t idx = frame * inCh + src;
+            const size_t idx = inF * inCh + src;
             return (idx < mixed.size()) ? mixed[idx] : 0.0f;
         };
         if (mixIsFloat_ && mixBitsPerSample_ == 32) {
             float* outFloat = reinterpret_cast<float*>(pData);
-            for (size_t f = 0; f < frames; ++f) {
+            for (size_t f = 0; f < framesToWrite; ++f) {
+                const size_t inF = f / factor;
                 for (size_t c = 0; c < ch; ++c) {
-                    outFloat[f * ch + c] = sampleAt(f, c);
+                    outFloat[f * ch + c] = sampleAt(inF, c);
                 }
             }
         } else if (mixBitsPerSample_ == 16) {
             int16_t* out16 = reinterpret_cast<int16_t*>(pData);
-            for (size_t f = 0; f < frames; ++f) {
+            for (size_t f = 0; f < framesToWrite; ++f) {
+                const size_t inF = f / factor;
                 for (size_t c = 0; c < ch; ++c) {
-                    const float clamped = std::clamp(sampleAt(f, c), -1.0f, 1.0f);
+                    const float clamped = std::clamp(sampleAt(inF, c), -1.0f, 1.0f);
                     out16[f * ch + c] = static_cast<int16_t>(clamped * 32767.0f);
                 }
             }
         } else {
             memset(pData, 0, endpointSamples * (mixBitsPerSample_ / 8));
         }
-        render->ReleaseBuffer(frames, 0);
+        render->ReleaseBuffer(framesToWrite, 0);
 
         // Only lanes that actually hold data advance; an idle lane keeps its
         // (empty) queue empty instead of being padded.
         for (size_t l = 0; l < kLaneCount; ++l) {
             if (!laneBuffers_[l].empty()) {
-                ConsumeLaneSamplesLocked(static_cast<AudioLane>(l), frames);
+                ConsumeLaneSamplesLocked(static_cast<AudioLane>(l), inFrames);
             }
         }
         lock.unlock();
 
         pumpWrites_++;
-        pumpFramesWritten_ += frames;
+        pumpFramesWritten_ += framesToWrite;
         LogPumpStats();
     }
 #endif
@@ -712,6 +730,52 @@ std::vector<float> WasapiAudioPipeline::ResampleLinear(const float* src, size_t 
         out[i] = src[idx0] * (1.0f - frac) + src[idx1] * frac;
     }
     return out;
+}
+
+uint32_t WasapiAudioPipeline::QueryWindowsDefaultSampleRate() {
+#ifdef _WIN32
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IMMDeviceEnumerator* enumerator = nullptr;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                  __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator));
+    if (SUCCEEDED(hr) && enumerator) {
+        IMMDevice* device = nullptr;
+        hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+        if (SUCCEEDED(hr) && device) {
+            IAudioClient* client = nullptr;
+            hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&client));
+            if (SUCCEEDED(hr) && client) {
+                WAVEFORMATEX* mixFormat = nullptr;
+                hr = client->GetMixFormat(&mixFormat);
+                if (SUCCEEDED(hr) && mixFormat) {
+                    uint32_t rate = mixFormat->nSamplesPerSec;
+                    CoTaskMemFree(mixFormat);
+                    client->Release();
+                    device->Release();
+                    enumerator->Release();
+                    return rate;
+                }
+                client->Release();
+            }
+            device->Release();
+        }
+        enumerator->Release();
+    }
+#endif
+    return 48000;
+}
+
+uint32_t WasapiAudioPipeline::ResolveOptimalSampleRate(uint32_t windowsSampleRate) {
+    if (windowsSampleRate == 0) {
+        return 48000;
+    }
+    // "48k和44.1k根据获取的windows默认设置，减少src。如果超过48k，比如96k的，按48k，88.2k设置为44.1k采样。也就是只允许整数倍。减少src。"
+    // Any sample rate that is an exact integer multiple of 44100 (e.g. 44100, 88200, 176400) maps to 44100.
+    if (windowsSampleRate % 44100 == 0) {
+        return 44100;
+    }
+    // Any sample rate in the 48000 family (48000, 96000, 192000, ...) or fallback maps to 48000.
+    return 48000;
 }
 
 // ---------------------------------------------------------------------------

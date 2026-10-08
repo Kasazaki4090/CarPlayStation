@@ -109,6 +109,7 @@ public:
         lane_volumes_[lane] = volume;
     }
     void SetDuckingRatio(float ratio) override { ducking_ratio_ = ratio; }
+    void SetTargetDuckingRatio(float ratio) override { ducking_ratio_ = ratio; }
     void SetDuckingActive(bool active) override { ducking_active_ = active; }
     [[nodiscard]] Core::Media::AudioCapabilities QueryCapabilities() const override { return {}; }
     [[nodiscard]] uint64_t GetRenderedSampleCount() const noexcept { return 0; }
@@ -368,6 +369,7 @@ void TestApplicationServiceWithMocks() {
     new_settings.audio.media_volume = 0.5f;
     new_settings.audio.navigation_volume = 0.4f;
     new_settings.audio.telephony_volume = 0.6f;
+    new_settings.audio.ducking_ratio = 0.35f;
     new_settings.video.resolution_preset = Application::VideoResolutionPreset::Res720P;
 
     status = app_service.ApplySettings(new_settings);
@@ -378,12 +380,13 @@ void TestApplicationServiceWithMocks() {
     assert(mock_decoder->GetSpec().width == 1280);
     assert(mock_decoder->GetSpec().height == 720);
 
-    // Only the lane volumes may be touched. The output format is the Windows
+    // Only lane volumes and ducking ratio may be touched. The output format is the Windows
     // mix format and is never reconfigured from the settings.
     assert(mock_audio->GetReconfigureCount() == 0);
     assert(mock_audio->GetLaneVolume(Core::Media::AudioLane::MainMedia) == 0.5f);
     assert(mock_audio->GetLaneVolume(Core::Media::AudioLane::AltNavigation) == 0.4f);
     assert(mock_audio->GetLaneVolume(Core::Media::AudioLane::SiriTelephony) == 0.6f);
+    assert(mock_audio->GetDuckingRatio() == 0.35f);
 
     // Forward input events
     Core::Input::TouchPoint point{1, 0.5f, 0.5f};

@@ -41,11 +41,20 @@ target_link_libraries(CarPlayStation PRIVATE
 target_compile_features(CarPlayStation PRIVATE cxx_std_20)
 
 # Embed application manifest (asInvoker) into CarPlayStation.exe.
-add_custom_command(TARGET CarPlayStation POST_BUILD
-    COMMAND ${CMAKE_MT} -manifest ${CMAKE_CURRENT_SOURCE_DIR}/CarPlayStation.manifest
-            -outputresource:$<TARGET_FILE:CarPlayStation>\;1
-    COMMENT "Embedding application manifest (asInvoker) into CarPlayStation.exe"
-)
+if(NOT CMAKE_MT OR CMAKE_MT MATCHES "NOTFOUND")
+    find_program(CMAKE_MT NAMES mt.exe
+        PATHS
+        "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64"
+        "C:/Program Files (x86)/Windows Kits/10/bin/x64"
+    )
+endif()
+if(CMAKE_MT AND NOT CMAKE_MT MATCHES "NOTFOUND")
+    add_custom_command(TARGET CarPlayStation POST_BUILD
+        COMMAND ${CMAKE_MT} -manifest ${CMAKE_CURRENT_SOURCE_DIR}/CarPlayStation.manifest
+                -outputresource:$<TARGET_FILE:CarPlayStation>\;1
+        COMMENT "Embedding application manifest (asInvoker) into CarPlayStation.exe"
+    )
+endif()
 
 if(WIN32)
     # Win32 subsystem configuration (no console window pop-up).

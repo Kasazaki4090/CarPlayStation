@@ -346,7 +346,8 @@ void AppController::OnSettingsChanged(const Application::AppSettings& newSetting
                                 newSettings.video.display_mode != settings_.video.display_mode ||
                                 newSettings.audio.media_volume != settings_.audio.media_volume ||
                                 newSettings.audio.navigation_volume != settings_.audio.navigation_volume ||
-                                newSettings.audio.telephony_volume != settings_.audio.telephony_volume);
+                                newSettings.audio.telephony_volume != settings_.audio.telephony_volume ||
+                                newSettings.audio.ducking_ratio != settings_.audio.ducking_ratio);
     settings_ = newSettings;
     if (app_api_) {
         (void)app_api_->ApplySettings(settings_);
