@@ -483,8 +483,8 @@ void MpvVideoPlayer::RenderThreadMain() {
         if (api_.mpv_wait_event) {
             while (true) {
                 mpv_event* ev = api_.mpv_wait_event(mpv_, 0.0);
-                if (!ev || ev->event_id == 0) break; // MPV_EVENT_NONE = 0
-                if (ev->event_id == 17) {            // MPV_EVENT_LOG_MESSAGE = 17
+                if (!ev || ev->event_id == MPV_EVENT_NONE) break;
+                if (ev->event_id == MPV_EVENT_LOG_MESSAGE) {
                     auto* msg = static_cast<mpv_event_log_message*>(ev->data);
                     CPS_LOG_WARN("libmpv", "[", msg->prefix, "] ", msg->text);
                 }
