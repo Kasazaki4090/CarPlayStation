@@ -135,6 +135,28 @@
 
 ---
 
+### 记录 [8]：死代码清理（AudioDuckingManager / VehicleNightModeEvent）与两个启动弹窗的 DPI 缩放（Core/Media、Core/Service、UI/Win32、文档）
+
+* **时间**：`2026-10-09 00:40:00 (UTC+8)`
+* **客户端（Agent）**：`GitHub Copilot (Copilot SDK in VS Code)`
+* **背景与实现**：
+  上一轮的全量盘点留下两处确认无用的死代码和一批待办；同时用户反馈"我有设备带缩放点不到"最先弹出的两个界面。本轮删除死代码、把其余项登记为待进一步工作，并给两个弹窗加上 DPI 缩放。
+
+  1. **删除 `Core/Media/AudioDuckingManager`**（经用户确认）：组件、头文件、`Core/CMakeLists.txt` 条目、`Tests/MediaTests.cpp` 里的 `TestAudioDuckingManager()` 全部移除。实际的闪避由 `WasapiAudioPipeline` 内部的媒体通道增益步进完成，相关单测保留。`DECISIONS.md` DEC-008 的实现说明改为"已删除"，`Core/Media/README.md` 的 ducking 描述改指向 `WasapiAudioPipeline`。
+  2. **删除 `CoreEventBus::VehicleNightModeEvent` / `PublishVehicleNightMode`**：夜间模式实际走 `IApplicationApi::SetHostNightMode` → `AirPlayRtspServer::SetNightMode`（DEC-013），事件总线上这条从未被发布也从未被订阅。`Core/Service/README.md` 的发布事件列表同步去掉"vehicle night mode"，DEC-013 的备选说明注明该事件类型已移除。
+  3. **两个启动弹窗的 DPI 缩放**：`AppController::Initialize` 先弹安全须知（`SetupWizard::ShowSafetyDisclaimer`），再弹首次运行 MFi 向导（`ShowMFiWizard`）。进程在 `MainWindow.cpp` 里调用 `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)`，系统不会做位图拉伸，而这两个窗口全部用硬编码 96 DPI 像素坐标创建、且从不设置字体，所以在开启缩放的屏幕上控件极小、几乎点不中。现在 `UI/Win32/SetupWizard.cpp` 增加文件内辅助函数：`DialogDpi`（取父窗口所在显示器的 `GetDpiForWindow`）、`Scaled`（`MulDiv` 换算）、`CreateScaledUiFont`（按 DPI 缩放 `NONCLIENTMETRICS.lfMessageFont`）、`CreateScaledChild`（换算矩形并 `WM_SETFONT`）、`ScaledWindowSize`（用 `AdjustWindowRectExForDpi` 由设计单位客户区 540×230 / 570×400 推出外框像素尺寸）。DPI 与字体句柄放在两个对话框上下文结构里，由 `WM_CREATE` 读取；所有子控件改走 `CreateScaledChild`，外层窗口尺寸改由 `ScaledWindowSize` 计算，模态循环结束后 `DeleteObject` 释放字体。布局源码仍写设计单位，无需按屏幕改数值。
+  4. **文档与待办**：`TODO.md` 顶部新增"Deferred items — need further work"顺序工作队列（Now Playing、通话状态与来电 UI、Siri/通话按键、`enablesUIAppearance` 广告），三处过时的 `AudioDuckingManager` 表述改为"已删除"，并新增一条已完成的 P1 记录说明弹窗缩放实现；`result.md` 第 5.3 / 5.5 节由"待定去留"改为"已删除"。
+* **构建与测试运行指标**：
+  - 清理后全量构建（`vcvars64.bat` + `cmake --build .`，`build-release`）：`exit code 0`，`[100%] Built target CarPlayStation_UiTests`；`error C` / `LNK` / `fatal error` 命中 0；警告与既有基线一致（`Curve25519.h`、`CarPlayCoreService.cpp` 的 C4834 等），无新增。
+  - `ctest --output-on-failure`：**10/10 通过**（CommonTests、HardwareTests、TransportTests、ProtocolTests、SessionTests、MediaTests 14.19s、InputTests、ProtocolReplayTests、ServiceTests、UiTests），总耗时 16.27s。
+* **本会话修复的关键缺陷与经验**：
+  1. 改 `CoreEventBus.h`（`CoreEvent` 变体成员增删）后链接报 `LNK2019`（`CoreEventBus::Subscribe`）：本仓库的构建系统对头文件依赖跟踪不可靠，必须 `touch` 所有包含该头文件的 `.h`/`.cpp`（`Core/Service/CarPlayCoreService.h`、`CoreEventBus.cpp`、`ICarPlayCoreApi.h`、`Application/ApplicationService.{h,cpp}`、`Tests/ServiceTests.cpp`）后重编。
+  2. Per-Monitor V2 下手工布局的窗口不会被系统缩放：任何用绝对像素创建的 Win32 对话框都必须自己按 `GetDpiForWindow` 换算矩形与字体，否则在带缩放的设备上不可用。`UI/Win32/CarPlayStation.manifest` 只有 `asInvoker`，DPI 感知完全由代码设置，因此无需改 manifest。
+  3. 死代码判定要落到"发布方与订阅方都不存在"这一硬证据上（`PublishVehicleNightMode` 0 调用、`VehicleNightModeEvent` 0 订阅），而不是仅看有没有测试。
+* **完成清理**：`git status` 只包含预期改动（`UI/Win32/SetupWizard.cpp`、`TODO.md`、`UI/Win32/README.md`、`result.md`，以及已提交的删除项）；未新增第三方依赖；未推送远端。
+
+---
+
 ## 5. 架构完成度盘点（对照 `TODO.md` 与代码实况）
 
 > 逐条核对 `TODO.md` 的 37 个未勾选项与真实代码，结论如下。`TODO.md` 已按此结果更正状态。

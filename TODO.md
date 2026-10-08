@@ -79,7 +79,8 @@ Historical information belongs in:
 ### 🔧 2026-10-08 Deferred items — need further work (next session)
 
 Dead-code cleanup is done (`Core/Media/AudioDuckingManager` and `CoreEventBus::VehicleNightModeEvent` /
-`PublishVehicleNightMode` deleted; build and all 10 test targets pass). Everything else found by the audit is
+`PublishVehicleNightMode` deleted; build and all 10 test targets pass). The DPI scaling of the two startup
+pop-ups is also done (see section "UI / windowing" / section 10). Everything else found by the audit is
 **still open and needs further work**. Each item below already has a full task entry elsewhere in this file; this
 list is the ordered work queue for the next session, not a duplicate spec.
 
@@ -92,7 +93,6 @@ list is the ordered work queue for the next session, not a duplicate spec.
    and stop discarding the returned status.
 4. **`enablesUIAppearance` / `uiAppearanceModes` advert** — DEC-013 leftover, confirmed never implemented
    (0 code hits). Decide whether to advertise it and what the modes mean.
-5. **Display-scaling (DPI) support for the first pop-ups** — see section "UI / windowing" below.
 
 ### 🚨 2026-10-03 Real-Device Urgent Hotfixes (P0 Urgent)
 
@@ -270,6 +270,7 @@ being deleted, so the plan stays auditable. Status was re-audited against the co
 - [x] P0 [Concluded: Partition 7] Define the application-level interface the UI consumes: connection state, session state, metadata, and commands such as connect, disconnect, mute, track control and display-mode change. (`IApplicationApi` + `ApplicationService`)
 - [x] P1 [Concluded: Partition 8] Implement the Win32 application window, lifecycle, DPI handling and the rendering surface, with no direct access to Core internals. (MainWindow + D3D11Renderer)
 - [x] P1 [Concluded: Partition 8] Implement status and pairing UI: device state, connection errors, pairing prompts, safety disclaimer, and first-run MFi wizard. (OverlayRenderer + SetupWizard)
+- [x] P1 [Concluded: 2026-10-08] Make the two startup pop-ups (safety disclaimer, first-run MFi wizard) honour display scaling. (`UI/Win32/SetupWizard.cpp`: the process is Per-Monitor V2 DPI aware (`MainWindow.cpp`), so Windows does not bitmap-stretch these windows; both dialogs were laid out in hardcoded 96-DPI pixels with no font, which made the controls tiny and unclickable on a scaled display. File-local helpers `DialogDpi` / `Scaled` / `CreateScaledUiFont` / `CreateScaledChild` / `ScaledWindowSize` now convert every design-unit rectangle and the outer window (client 540×230 and 570×400) to the parent monitor's device pixels, and apply the system UI font at the matching size. The DPI and font live in the two dialog context structs and the font is released after each modal loop.)
 - [ ] P2 Implement Now Playing and navigation metadata display from the session layer (carplayd doc 17). *(Half-wired: `CoreEventBus::PublishNowPlaying` exists and `ApplicationService` already consumes `NowPlayingEvent`, but nothing calls `PublishNowPlaying`. The iPhone sends `0x5001 NowPlayingUpdate` (1373 times in the current device log) and `Iap2ControlPlane::OnControlMessage` has no case for it, so it falls through to `default:`. The missing piece is: parse `0x5001` and publish.)*
 - [ ] P2 Implement system integration: autostart option, tray icon, single-instance behaviour and clean shutdown. *(Single instance exists — `CreateMutexW` in `MainWindow.cpp` — and clean shutdown was fixed by BUG-001 / BUG-005. Tray icon (no `Shell_NotifyIcon`) and autostart (no `CurrentVersion\Run` entry) are still missing.)*
 - [ ] P2 Implement Picture-in-Picture (PIP) / Mini-window mode (always-on-top, borderless compact viewport with opacity controls).

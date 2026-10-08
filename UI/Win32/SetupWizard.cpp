@@ -29,6 +29,72 @@ static bool FileExistsOnDisk(const std::string& utf8_path) {
 static const wchar_t* kDisclaimerWndClass = L"CarPlayStation_DisclaimerModalClass";
 static const wchar_t* kMfiWizardWndClass   = L"CarPlayStation_MfiWizardModalClass";
 
+// --- DPI scaling for the two startup modals ---------------------------------
+// Both dialogs are laid out below in 96-DPI *design* units. The process runs
+// Per-Monitor V2 DPI aware (MainWindow::Create), so Windows does not bitmap
+// stretch them: on a display with scaling enabled the controls would keep their
+// unscaled pixel size, which makes them tiny and effectively unclickable. Every
+// length is therefore converted to the device pixels of the monitor the dialog
+// is shown on, and the child controls get the system UI font at the matching
+// size so the drawn text and the hit area agree.
+
+constexpr int kBaseDpi = 96;
+
+// DPI of the monitor the dialog will appear on. The dialogs are centred on the
+// main window, so the parent's window DPI is the right one to use.
+UINT DialogDpi(HWND parent) {
+    HWND ref = parent ? parent : GetDesktopWindow();
+    UINT dpi = GetDpiForWindow(ref);
+    if (dpi == 0) {
+        dpi = kBaseDpi;
+    }
+    return dpi;
+}
+
+// Convert one design-unit length to device pixels.
+int Scaled(UINT dpi, int design) {
+    return MulDiv(design, static_cast<int>(dpi), kBaseDpi);
+}
+
+// The system UI font, resized for the dialog's DPI. Returns nullptr if the
+// metrics cannot be read, in which case controls keep the default font.
+HFONT CreateScaledUiFont(UINT dpi) {
+    NONCLIENTMETRICSW ncm{};
+    ncm.cbSize = sizeof(ncm);
+    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0) == 0) {
+        return nullptr;
+    }
+    LOGFONTW lf = ncm.lfMessageFont;
+    lf.lfHeight = MulDiv(lf.lfHeight, static_cast<int>(dpi), kBaseDpi);
+    return CreateFontIndirectW(&lf);
+}
+
+// Create a child control from design-unit coordinates and apply the UI font.
+HWND CreateScaledChild(UINT dpi, HFONT font, DWORD ex_style, const wchar_t* class_name,
+                       const wchar_t* text, DWORD style, int x, int y, int w, int h,
+                       HWND parent, HMENU id) {
+    HWND child = CreateWindowExW(
+        ex_style, class_name, text, style,
+        Scaled(dpi, x), Scaled(dpi, y), Scaled(dpi, w), Scaled(dpi, h),
+        parent, id, GetModuleHandleW(nullptr), nullptr);
+    if (child && font) {
+        SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    }
+    return child;
+}
+
+// Outer window size, in device pixels, for a client area given in design units.
+void ScaledWindowSize(UINT dpi, DWORD style, DWORD ex_style, int client_w, int client_h,
+                      int& out_w, int& out_h) {
+    RECT rc{ 0, 0, Scaled(dpi, client_w), Scaled(dpi, client_h) };
+    if (AdjustWindowRectExForDpi(&rc, style, FALSE, ex_style, dpi) == 0) {
+        rc.right += Scaled(dpi, 16);
+        rc.bottom += Scaled(dpi, 39);
+    }
+    out_w = rc.right - rc.left;
+    out_h = rc.bottom - rc.top;
+}
+
 SetupWizard::SetupWizard() {
     preferences_.config_file_path = GetDefaultConfigPath();
     LoadPreferences();
@@ -408,6 +474,8 @@ struct DisclaimerDialogContext {
     bool dont_show_again{false};
     HWND hwnd_btn{nullptr};
     HWND hwnd_chk{nullptr};
+    UINT dpi{static_cast<UINT>(kBaseDpi)};
+    HFONT font{nullptr};
 };
 
 static LRESULT CALLBACK DisclaimerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -420,7 +488,8 @@ static LRESULT CALLBACK DisclaimerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
 
             // Disclaimer text
-            CreateWindowExW(
+            CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"STATIC",
                 L"【行车安全须知】\r\n\r\n"
                 L"1. 请严格遵守道路交通安全法规，行车途中请勿注视或操作屏幕。\r\n"
@@ -428,25 +497,27 @@ static LRESULT CALLBACK DisclaimerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 L"3. 点击确认即代表您已充分知晓并承诺安全驾驶。",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
                 24, 20, 480, 110,
-                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+                hwnd, nullptr
             );
 
             // "不再提示" Checkbox
-            ctx->hwnd_chk = CreateWindowExW(
+            ctx->hwnd_chk = CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"BUTTON",
                 L"我已熟知，下次启动不再提示",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                 24, 140, 280, 24,
-                hwnd, (HMENU)101, GetModuleHandleW(nullptr), nullptr
+                hwnd, (HMENU)101
             );
 
             // Confirm button (initially disabled)
-            ctx->hwnd_btn = CreateWindowExW(
+            ctx->hwnd_btn = CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"BUTTON",
                 L"确认进入 (5s)",
                 WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_DEFPUSHBUTTON,
                 340, 138, 160, 32,
-                hwnd, (HMENU)IDOK, GetModuleHandleW(nullptr), nullptr
+                hwnd, (HMENU)IDOK
             );
 
             SetTimer(hwnd, 1, 1000, nullptr);
@@ -525,8 +596,14 @@ bool SetupWizard::ShowSafetyDisclaimer(HWND parent, bool headless) {
         parentRc.bottom = 700;
     }
 
-    int width = 540;
-    int height = 230;
+    // 按父窗口所在显示器的 DPI 放大窗口、控件与字体（进程为 Per-Monitor V2，系统不会拉伸）
+    ctx.dpi = DialogDpi(parent);
+    ctx.font = CreateScaledUiFont(ctx.dpi);
+
+    int width = 0;
+    int height = 0;
+    ScaledWindowSize(ctx.dpi, WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                     WS_EX_DLGMODALFRAME, 540, 230, width, height);
     int posX = parentRc.left + ((parentRc.right - parentRc.left) - width) / 2;
     int posY = parentRc.top + ((parentRc.bottom - parentRc.top) - height) / 2;
 
@@ -540,6 +617,9 @@ bool SetupWizard::ShowSafetyDisclaimer(HWND parent, bool headless) {
     );
 
     if (!hDlg) {
+        if (ctx.font) {
+            DeleteObject(ctx.font);
+        }
         return true;
     }
 
@@ -557,6 +637,11 @@ bool SetupWizard::ShowSafetyDisclaimer(HWND parent, bool headless) {
     if (parent) {
         EnableWindow(parent, TRUE);
         SetForegroundWindow(parent);
+    }
+
+    if (ctx.font) {
+        DeleteObject(ctx.font);
+        ctx.font = nullptr;
     }
 
     if (ctx.accepted && ctx.dont_show_again) {
@@ -592,6 +677,8 @@ struct MfiWizardDialogContext {
     std::string host;           // service endpoint (prefilled from settings)
     std::string port;
     std::string token;          // optional bearer token
+    UINT dpi{static_cast<UINT>(kBaseDpi)};
+    HFONT font{nullptr};
 };
 
 // Open a Win32 file picker; returns the chosen path as UTF-8 (empty on cancel).
@@ -695,116 +782,131 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
 
             // Intro text
-            CreateWindowExW(
+            CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"STATIC",
                 L"欢迎使用 CarPlayStation！初次启动请选择 Apple MFi 认证通道：\r\n\r\n"
                 L"【法律合规声明】本软件为中立开源互联引擎，不内置任何专有证书或私钥材料。"
                 L"请依据自身环境选择合适的方式：",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
                 24, 16, 520, 64,
-                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+                hwnd, nullptr
             );
 
             // Radio 1: Local File
-            ctx->hwnd_rad_file = CreateWindowExW(
+            ctx->hwnd_rad_file = CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"BUTTON",
                 L"1. 本地证书/私钥文件导入 (LocalFile: 默认读取 certs/ 目录)",
                 WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
                 24, 88, 500, 24,
-                hwnd, (HMENU)201, GetModuleHandleW(nullptr), nullptr
+                hwnd, (HMENU)201
             );
 
             // Local-file import: browse buttons + path labels (only meaningful
             // when the LocalFile backend is selected).
-            ctx->hwnd_btn_browse_cert = CreateWindowExW(
+            ctx->hwnd_btn_browse_cert = CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"BUTTON",
                 L"选择证书文件 (.p7b)…",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
                 40, 116, 150, 26,
-                hwnd, (HMENU)210, GetModuleHandleW(nullptr), nullptr
+                hwnd, (HMENU)210
             );
-            ctx->hwnd_lbl_cert = CreateWindowExW(
+            ctx->hwnd_lbl_cert = CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"STATIC",
                 L"(未选择证书文件)",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
                 196, 120, 348, 20,
-                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+                hwnd, nullptr
             );
 
-            ctx->hwnd_btn_browse_key = CreateWindowExW(
+            ctx->hwnd_btn_browse_key = CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"BUTTON",
                 L"选择私钥文件 (.pk8)…",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
                 40, 146, 150, 26,
-                hwnd, (HMENU)211, GetModuleHandleW(nullptr), nullptr
+                hwnd, (HMENU)211
             );
-            ctx->hwnd_lbl_key = CreateWindowExW(
+            ctx->hwnd_lbl_key = CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"STATIC",
                 L"(未选择私钥文件)",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
                 196, 150, 348, 20,
-                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+                hwnd, nullptr
             );
 
             // Radio 2: network signing service (HTTP JSON API).
-            ctx->hwnd_rad_net = CreateWindowExW(
+            ctx->hwnd_rad_net = CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"BUTTON",
                 L"2. 网络 MFi 认证服务 (远程签名服务, 需填写服务地址与端口)",
                 WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
                 24, 176, 500, 24,
-                hwnd, (HMENU)202, GetModuleHandleW(nullptr), nullptr
+                hwnd, (HMENU)202
             );
-            CreateWindowExW(
+            CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"STATIC", L"服务地址:",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
                 40, 208, 56, 20,
-                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+                hwnd, nullptr
             );
-            ctx->hwnd_edit_host = CreateWindowExW(
+            ctx->hwnd_edit_host = CreateScaledChild(
+                ctx->dpi, ctx->font,
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
                 100, 206, 200, 22,
-                hwnd, (HMENU)222, GetModuleHandleW(nullptr), nullptr
+                hwnd, (HMENU)222
             );
-            CreateWindowExW(
+            CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"STATIC", L"端口:",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
                 312, 208, 36, 20,
-                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+                hwnd, nullptr
             );
-            ctx->hwnd_edit_port = CreateWindowExW(
+            ctx->hwnd_edit_port = CreateScaledChild(
+                ctx->dpi, ctx->font,
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP,
                 350, 206, 60, 22,
-                hwnd, (HMENU)223, GetModuleHandleW(nullptr), nullptr
+                hwnd, (HMENU)223
             );
-            CreateWindowExW(
+            CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"STATIC", L"令牌(可选):",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
                 40, 238, 80, 20,
-                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+                hwnd, nullptr
             );
-            ctx->hwnd_edit_token = CreateWindowExW(
+            ctx->hwnd_edit_token = CreateScaledChild(
+                ctx->dpi, ctx->font,
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP,
                 124, 236, 286, 22,
-                hwnd, (HMENU)224, GetModuleHandleW(nullptr), nullptr
+                hwnd, (HMENU)224
             );
-            CreateWindowExW(
+            CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"STATIC",
                 L"提示: 服务提供 GET /mfi/certificate、POST /mfi/sign、POST /mfi/reset。",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
                 40, 264, 500, 20,
-                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+                hwnd, nullptr
             );
 
             // Radio 3: Hardware I2C Bridge
-            ctx->hwnd_rad_hw = CreateWindowExW(
+            ctx->hwnd_rad_hw = CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"BUTTON",
                 L"3. 物理 USB-to-I2C 桥接芯片 (HardwareI2C: CH341/CH347/FTDI)",
                 WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
                 24, 290, 500, 24,
-                hwnd, (HMENU)203, GetModuleHandleW(nullptr), nullptr
+                hwnd, (HMENU)203
             );
 
             // Pre-fill the endpoint fields from the current settings.
@@ -828,12 +930,13 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             SendMessageW(initial, BM_SETCHECK, BST_CHECKED, 0);
 
             // Confirm button
-            CreateWindowExW(
+            CreateScaledChild(
+                ctx->dpi, ctx->font,
                 0, L"BUTTON",
                 L"确定并进入",
                 WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
                 380, 322, 140, 32,
-                hwnd, (HMENU)IDOK, GetModuleHandleW(nullptr), nullptr
+                hwnd, (HMENU)IDOK
             );
 
             return 0;
@@ -940,8 +1043,14 @@ bool SetupWizard::ShowMFiWizard(HWND parent, Application::AppSettings& settings,
         parentRc.bottom = 700;
     }
 
-    int width = 570;
-    int height = 400;
+    // 按父窗口所在显示器的 DPI 放大窗口、控件与字体（进程为 Per-Monitor V2，系统不会拉伸）
+    ctx.dpi = DialogDpi(parent);
+    ctx.font = CreateScaledUiFont(ctx.dpi);
+
+    int width = 0;
+    int height = 0;
+    ScaledWindowSize(ctx.dpi, WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                     WS_EX_DLGMODALFRAME, 570, 400, width, height);
     int posX = parentRc.left + ((parentRc.right - parentRc.left) - width) / 2;
     int posY = parentRc.top + ((parentRc.bottom - parentRc.top) - height) / 2;
 
@@ -955,6 +1064,9 @@ bool SetupWizard::ShowMFiWizard(HWND parent, Application::AppSettings& settings,
     );
 
     if (!hDlg) {
+        if (ctx.font) {
+            DeleteObject(ctx.font);
+        }
         return true;
     }
 
@@ -971,6 +1083,11 @@ bool SetupWizard::ShowMFiWizard(HWND parent, Application::AppSettings& settings,
     if (parent) {
         EnableWindow(parent, TRUE);
         SetForegroundWindow(parent);
+    }
+
+    if (ctx.font) {
+        DeleteObject(ctx.font);
+        ctx.font = nullptr;
     }
 
     if (ctx.confirmed) {
