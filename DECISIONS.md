@@ -733,9 +733,9 @@ OR-ed in `UpdateDuckingStateLocked` — `voiceDuckingActive_` (set on an audible
 `kDuckingHangoverMs`) and `rtspDuckingActive_` (the phone's `duckAudio`/`unduckAudio`, with a `kRtspDuckingSafetyMs`
 safety timeout) — and `ApplyDuckingGainLocked` applies the gain immediately, matching the reference host's
 `DUCK_GAIN`/`UNDUCK_GAIN` (the phone's own duck window is about 1.5 s, so a 100 ms attack is not observable).
-`Core/Media/AudioDuckingManager` still exists, still compiles and is still unit-tested, but **no production code
-constructs it**. Whether to wire it (for a smooth ramp) or delete it (component + test + this section) is an open
-decision; nothing about current behaviour depends on it.
+`Core/Media/AudioDuckingManager` was never constructed by production code. It has since been **removed** (component,
+unit test and build entry) because the hard-step behaviour is what the reference host does and what the phone's ~1.5 s
+duck window expects. If a smooth ramp is ever wanted, it should be added to `WasapiAudioPipeline` directly.
 
 
 ### Consequences
@@ -754,7 +754,6 @@ Positive:
 - `Core/Media/IAudioPipeline.h`
 - `Core/Media/IMicrophoneUplink.h`
 - `Core/Media/AirPlayVideoDemuxer.h`
-- `Core/Media/AudioDuckingManager.h`
 - `Core/Media/WasapiAudioPipeline.h`
 
 
@@ -1209,7 +1208,8 @@ the letterbox bars do not even exist. The only way the CarPlay UI itself follows
   It would darken the picture without changing the CarPlay UI, so the phone's own white map and white panels would stay
   white, and the HUD and the video would disagree in a way neither of them explains.
 - **A `VehicleNightModeEvent` on the event bus**: not used. That event is Core→UI (a head unit reporting its own
-  night state), has no publishers, and points the wrong way for a host that is *telling* the phone.
+  night state), has no publishers, and points the wrong way for a host that is *telling* the phone. Since nothing ever
+  published or consumed it, the event type and `PublishVehicleNightMode()` have since been removed from `CoreEventBus`.
 - **Advertising `enablesUIAppearance` / `uiAppearanceModes` in `/info`**: not done. Our advert has neither field, and
   the reference receivers that send `setNightMode` do not advertise them either, so the command is sent on the same
   basis theirs is. If a phone turns out to ignore it, adding the advert fields is the follow-up, and the log line

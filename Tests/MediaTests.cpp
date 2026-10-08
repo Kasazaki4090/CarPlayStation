@@ -8,7 +8,6 @@
 #include "Core/Media/MockMicrophoneUplink.h"
 #include "Core/Media/AirPlayVideoDemuxer.h"
 #include "Core/Media/MpvVideoPlayer.h"
-#include "Core/Media/AudioDuckingManager.h"
 #include "Core/Media/WasapiAudioPipeline.h"
 #include "Core/Media/WasapiMicrophoneUplink.h"
 #include "Core/Media/AacCodecAdapter.h"
@@ -431,62 +430,6 @@ void TestVideoDecoderGracefulFallback() {
 // ---------------------------------------------------------------------------
 // Step 3 helpers & tests
 // ---------------------------------------------------------------------------
-
-// Test 8: AudioDuckingManager attack/release gain curve and timing.
-void TestAudioDuckingManager() {
-    std::cout << "[RUN] TestAudioDuckingManager" << std::endl;
-
-    AudioDuckingManager duck;
-    duck.SetConfig(AudioDuckingManager::Config{
-        .fullGain = 1.0f,
-        .duckedGain = 0.20f,
-        .attackMs = 100,
-        .releaseMs = 400
-    });
-
-    // Idle: gain is full (100%).
-    ASSERT_EQ(duck.CurrentGain(), 1.0f);
-    ASSERT_TRUE(duck.IsSettled());
-
-    // Start a navigation prompt: attack fades 100% -> 20% over 100ms.
-    duck.SetNavigationActive(true);
-    ASSERT_TRUE(duck.IsDucked());
-    ASSERT_TRUE(!duck.IsSettled());
-
-    // After 50ms (half the attack), gain should be ~60%.
-    float g = duck.Tick(50);
-    ASSERT_TRUE(g > 0.55f && g < 0.65f);
-
-    // After the full 100ms attack, gain reaches the 20% floor.
-    g = duck.Tick(50);
-    ASSERT_EQ(g, 0.20f);
-    ASSERT_TRUE(duck.IsSettled());
-
-    // End the prompt: release restores 20% -> 100% over 400ms.
-    duck.SetNavigationActive(false);
-    ASSERT_TRUE(!duck.IsDucked());
-    ASSERT_TRUE(!duck.IsSettled());
-
-    // After 200ms (half the release), gain should be ~60%.
-    g = duck.Tick(200);
-    ASSERT_TRUE(g > 0.55f && g < 0.65f);
-
-    // After the full 400ms release, gain is back to 100%.
-    g = duck.Tick(200);
-    ASSERT_EQ(g, 1.0f);
-    ASSERT_TRUE(duck.IsSettled());
-
-    // Telephony prompt also ducks.
-    duck.SetTelephonyActive(true);
-    ASSERT_TRUE(duck.IsDucked());
-    g = duck.Tick(100);
-    ASSERT_EQ(g, 0.20f);
-    duck.SetTelephonyActive(false);
-    g = duck.Tick(400);
-    ASSERT_EQ(g, 1.0f);
-
-    std::cout << "[PASS] TestAudioDuckingManager" << std::endl;
-}
 
 // Test 9: WasapiAudioPipeline 3-lane software mixer (mathematical addition)
 // and soft-limiter clamping.
@@ -1213,8 +1156,7 @@ int main() {
     TestAirPlayVideoDemuxerResync();
     TestVideoDecoderGracefulFallback();
 
-    // Step 3: 3-lane audio mixer, ducking manager & microphone uplink.
-    TestAudioDuckingManager();
+    // Step 3: 3-lane audio mixer & microphone uplink.
     TestWasapiAudioPipelineMixer();
     TestWasapiAudioPipelineFifoBounds();
     TestWasapiAudioPipelineResampler();

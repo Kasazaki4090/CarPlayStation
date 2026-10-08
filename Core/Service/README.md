@@ -9,7 +9,7 @@ This module is located at the top of Core (Layer 7). It acts as the central Faca
   - Controls service lifecycles: `StartCore(config)`, `StopCore()`, `ResetSession()`.
 - **Core Event Bus (`CoreEventBus`)**:
   - Thread-safe publish-subscribe event mechanism.
-  - Emits events to the Application layer: Connection state changes, NowPlaying metadata, album artwork, vehicle night mode, audio route changes.
+  - Emits events to the Application layer: Connection state changes, NowPlaying metadata, album artwork, audio route changes.
 - **Public C++ Contract Header (`ICarPlayCoreApi.h`)**:
   - Pure C++ abstract base classes and Plain Old Data transfer objects (DTOs).
   - Contains NO third-party or platform-specific header leaks (e.g. no WinSock, libmpv, or WASAPI headers).

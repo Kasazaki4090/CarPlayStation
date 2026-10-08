@@ -59,10 +59,6 @@ void CoreEventBus::PublishAlbumArtwork(Common::ByteBuffer data, std::string mime
     Publish(AlbumArtworkEvent{std::move(data), std::move(mime_type)});
 }
 
-void CoreEventBus::PublishVehicleNightMode(bool is_night_mode) {
-    Publish(VehicleNightModeEvent{is_night_mode});
-}
-
 void CoreEventBus::PublishAudioRouteChanged(std::string route_description) {
     Publish(AudioRouteChangedEvent{std::move(route_description)});
 }

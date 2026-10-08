@@ -171,7 +171,7 @@
 | 会话其余平面：车辆数据、位置、目的地（`TODO.md:194`）、Modern Vehicle Data Config（`:195`） | `Iap2MessageCatalog.h` 只有 availability / Wi-Fi / NowPlaying / RouteGuidance / Call / Power 相关 id |
 | 延迟测量与丢帧重同步策略（`TODO.md:204` / `216`） | `latencyMs` 在 `Core/` 已 0 次命中 |
 | 多声道音频（`TODO.md:217`） | 无 |
-| `Core/Media/AudioDuckingManager` | 设计过但未接线：参与编译（`Core/CMakeLists.txt:39`）、有单元测试（`Tests/MediaTests.cpp:436`）、有文档（DEC-008、`Core/Media/README.md:35`），但**没有任何生产代码构造它**（全仓库只有自身 .cpp/.h 与测试引用它）。闪避实际在 `WasapiAudioPipeline` 内实现（见 5.5）。删除它 = 删组件 + 删测试 + 修订 DEC-008 |
+| `Core/Media/AudioDuckingManager` | **已删除**（本轮）。此前状态：设计过但未接线——参与编译、有单元测试、有文档（DEC-008、`Core/Media/README.md`），但没有任何生产代码构造它；闪避实际在 `WasapiAudioPipeline` 内实现（见 5.5）。经用户确认后删除组件（`.h`/`.cpp`）、构建条目与对应单测，并修订 DEC-008 |
 | PIP / 置顶小窗（`TODO.md:251`）、多显示器输出目标选择（`:252`） | 只有 `SetupWizard.cpp:534,949` 的 `WS_EX_TOPMOST` |
 | i18n（`TODO.md:254`） | 只有 `OverlayRenderer.cpp:81,95,106` 硬编码 `L"zh-cn"`，无检测与选择器 |
 | `ARCHITECTURE.md` 详细章节（`TODO.md:266`） | `ARCHITECTURE.md:169` "Detailed Architecture" 仍是一行占位 |
@@ -188,7 +188,7 @@
 **（1）两处遗留已用代码确认，不是"待查"。**
 
 * `enablesUIAppearance` / `uiAppearanceModes`：全仓库 **0 次**代码命中（只有 `DECISIONS.md:1201`、`TODO.md`、本文件与 `Reference/carplayd/docs/APPLE_BEHAVIORAL_REFERENCE.md:203,250,252` 提到）。即 DEC-013 的这条遗留不是"没验证"，而是"从未实现"，已归入 5.3。
-* `AudioDuckingManager`：不是"没用"，而是"设计完成但未接线"。它被编译、被单测覆盖、被 DEC-008 记录，但没有任何生产代码构造它。因此"删掉它"是一个产品决定（连带删测试、修订 DEC-008），而不是清理死代码。
+* `AudioDuckingManager`：不是"没用"，而是"设计完成但未接线"。它被编译、被单测覆盖、被 DEC-008 记录，但没有任何生产代码构造它。经用户确认，本轮已按死代码删除（组件 + 构建条目 + 单测），并修订 DEC-008 与相关分区文档。
 
 **（2）闪避（ducking）的真实实现位置：`Core/Media/WasapiAudioPipeline.cpp`，两个独立触发源，取并集。**
 

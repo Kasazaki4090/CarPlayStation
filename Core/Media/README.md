@@ -32,7 +32,8 @@ This module is located at Layer 5 of Core. It manages real-time depacketization,
   - The supported downlink formats are advertised through the CCPA `audioFormats` bitmask in the
     RTSP `/info` response (Layer 4): PCM 16 kHz mono, PCM 48 kHz stereo, AAC-ELD 16 kHz mono,
     AAC-ELD 48 kHz, AAC-LC 48 kHz stereo.
-  - Audio Ducking Manager (`AudioDuckingManager`): Smooth volume attenuation on media audio when navigation or phone calls become active.
+  - Ducking: a hard media-lane gain step applied inside `WasapiAudioPipeline` when navigation/voice audio is audible
+    or when the phone sends `duckAudio`/`unduckAudio` (see `DEC-008` implementation note).
 - **Microphone Uplink Pipeline (`WasapiMicrophoneUplink`, `MicrophoneRtpSender`, `IMicrophoneUplink`)**:
   - WASAPI microphone capture, resampling, and RTP transmission back to the iPhone (Payload Type 100)
     over UDP to the `dataPort` the iPhone advertised for the `input=true` stream.
@@ -55,4 +56,5 @@ This module is located at Layer 5 of Core. It manages real-time depacketization,
 
 ## 3. AI Partition & Mocking Guide
 - **Offline Video Stream Harness**: Feed saved H.264/HEVC byte streams directly into `IVideoDecoder` to benchmark decode latency and D3D11 texture presentation.
-- **Audio Ducking Harness**: Synthesize dual-lane audio inputs to verify ducking attack/release curves.
+- **Ducking Harness**: Synthesize dual-lane audio inputs through `WasapiAudioPipeline` to verify the media-lane gain
+  step and its attack/release timing.

@@ -37,10 +37,6 @@ struct AlbumArtworkEvent {
     std::string mime_type{"image/jpeg"};
 };
 
-struct VehicleNightModeEvent {
-    bool is_night_mode{false};
-};
-
 struct AudioRouteChangedEvent {
     std::string route_description;  // e.g. "WASAPI Shared Mode / 48kHz Stereo"
 };
@@ -58,7 +54,6 @@ using CoreEvent = std::variant<
     ConnectionStateChangedEvent,
     NowPlayingEvent,
     AlbumArtworkEvent,
-    VehicleNightModeEvent,
     AudioRouteChangedEvent,
     DeviceConnectedEvent
 >;
@@ -69,7 +64,7 @@ using CoreEventCallback = std::function<void(const CoreEvent&)>;
 // CoreEventBus — thread-safe publish-subscribe event mechanism.
 //
 // Emits events to the Application layer: connection state changes,
-// NowPlaying metadata, album artwork, vehicle night mode, audio route changes.
+// NowPlaying metadata, album artwork, audio route changes.
 //
 // Thread-safety:
 //   - Subscribe / Unsubscribe are thread-safe (mutex-guarded).
@@ -110,9 +105,6 @@ public:
 
     // Convenience: publish album artwork.
     void PublishAlbumArtwork(Common::ByteBuffer data, std::string mime_type = "image/jpeg");
-
-    // Convenience: publish vehicle night mode change.
-    void PublishVehicleNightMode(bool is_night_mode);
 
     // Convenience: publish audio route change.
     void PublishAudioRouteChanged(std::string route_description);

@@ -36,7 +36,6 @@ add_library(CarPlayCore STATIC
     Media/AacCodecAdapter.cpp
     Media/AirPlayAudioDemuxer.cpp
     Media/AirPlayAudioReceiver.cpp
-    Media/AudioDuckingManager.cpp
     Media/WasapiAudioPipeline.cpp
     Media/WasapiMicrophoneUplink.cpp
     Media/MicrophoneRtpSender.cpp
