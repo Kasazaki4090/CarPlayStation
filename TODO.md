@@ -140,7 +140,11 @@ Project-wide review completed on 2026-10-01:
 - Input Strategy (`DEC-003`): Mouse is mapped directly to touch events (left-click tap/drag, right-click back);
   keyboard is mapped to vehicle rotary knob / directional controls (arrow keys, Enter, Backspace/Esc, hotkeys).
 
-Tasks below reflect the initial master planning. Remaining items have been consolidated into `TODO_missing.md`.
+Tasks below reflect the initial master planning. Remaining open items stay in their numbered section below;
+`TODO_missing.md` no longer exists (it was removed during the repository cleanup recorded in `result.md`
+记录 [6]), so nothing is deferred to it. Completed items are kept with a `[Concluded: ...]` marker instead of
+being deleted, so the plan stays auditable. Status was re-audited against the code on 2026-10-08; see
+`result.md` section 5 for the evidence behind each status.
 
 ### 1. Architectural and strategic decisions
 
@@ -156,7 +160,7 @@ Tasks below reflect the initial master planning. Remaining items have been conso
 - [x] P0 [Concluded: Partition 1] Choose and document the C++ baseline: language standard, compiler/SDK, build system (CMake or MSVC solution), static analysis, unit-test framework, and the "no extra runtime" packaging rule from `PROJECT.md`. (C++20, MSVC 14.44, CMake NMake Makefiles, custom assert-based tests)
 - [ ] P1 Define the threading and data-flow model for the media path (capture/decode/render/audio) and the UI/Core hand-off, so decoder callbacks never enter UI code.
 - [ ] P1 Define an error-handling and logging policy consistent with `CONTRIBUTING.md` rule 13 (no swallowed errors), including a session trace format usable for protocol debugging.
-- [ ] P2 Update `README.md` so the feature checklist reflects real status instead of the placeholder "New Folder" state.
+- [x] P2 Update `README.md` so the feature checklist reflects real status instead of the placeholder "New Folder" state. (`README.md` "Feature Status" checklist. One overclaim remains: it lists wired CarPlay (USB / NCM) as done, but `Core/Transport/` has no such transport and `TransportType::UsbNcm` is only an enum value — see section 5.)
 
 ### 3. Protocol: iAP2
 
@@ -199,8 +203,8 @@ Tasks below reflect the initial master planning. Remaining items have been conso
 - [x] P0 [Concluded: DEC-008, superseded for decoding by DEC-009] Architecture decision concluded: forward-compatible codec discovery (H264/HEVC/AV1/VP9/VVC), Direct3D 11 shared texture handles (EVR/madVR rejected), and a decoder fallback strategy.
 - [x] P0 [Concluded: Partition 5] Implement H.264 depacketization with Direct3D11 presentation. (`AirPlayVideoDemuxer`)
 - [x] P1 [Concluded: DEC-009] Video decoding runs on libmpv only; the Media Foundation and FFmpeg decoders and the FFmpeg build sync were removed. (`MpvVideoPlayer`)
-- [ ] P1 Implement codec capability negotiation and runtime selection between H.264 and HEVC.
-- [ ] P1 Implement the display-mode selector described in `PROJECT.md`.
+- [x] P1 Implement codec capability negotiation and runtime selection between H.264 and HEVC. (`VideoCodec` in `Core/Common/Config.h`, `Options::advertise_hevc`, `hevcInfo` in `/info`, `hevc` in `enabledFeatures`, HEVC NAL classification in `AirPlayVideoDemuxer`, `VideoCodecPreference` in `Application/AppSettings.h` mapped in `ApplicationService::BuildVideoSpec`. Confirmed on hardware: `Video stream spec set to 1920x1080@60 HEVC`, `Processed hvcC HEVC VideoConfig`.)
+- [x] P1 Implement the display-mode selector described in `PROJECT.md`. (`MainWindow::SetDisplayMode` Windowed ↔ BorderlessFullscreen applied from `AppController`, plus the 720p/1080p/1440p/2160p/Auto/Custom/Car1280x480/Car1920x720 and 30/60 fps presets in `Application/AppSettings.h`.)
 - [ ] P2 Measure decode and presentation latency and define the frame-drop policy under load.
 
 ### 8. Media: audio and microphone
@@ -212,9 +216,9 @@ Tasks below reflect the initial master planning. Remaining items have been conso
 - [x] P1 [Concluded: DEC-010] Advertise the wireless receiver `audioFormats` set in `/info` so the iPhone selects AAC instead of falling back to PCM. (`AirPlayRtspServer` CCPA `audioFormats` advert)
 - [x] P1 [Concluded: DEC-010] Implement microphone capture, resampling and encoding for the uplink path (carplayd doc 16). (`WasapiMicrophoneUplink` resample to 16/24kHz mono + `MicrophoneRtpSender` AAC-ELD encode and AEAD seal + `CarPlayCoreService::ConfigureMicrophoneUplink`)
 - [x] P1 [Concluded: DEC-010] Negotiate the microphone uplink stream in RTSP SETUP (`streamType=100`): fill `NegotiatedMediaParams::mic_audio_data_port` / `mic_audio_control_port`, answer the bplist `dataPort` form, and keep the legacy `Transport:` SETUP answered with `server_port`/`control_port`. The Voice SETUP half of `TestRtspAnnounceAndSetupWireReplay` is re-enabled (`Tests/ProtocolReplayTests.cpp`).
-- [ ] P1 Drive Siri and call activation end to end now that the uplink carries audio: confirm the `SETUP`/`RECORD` sequence a real iPhone sends for Siri and for a phone call, and which lane each voice stream maps to.
+- [ ] P1 Drive Siri and call activation end to end now that the uplink carries audio: confirm the `SETUP`/`RECORD` sequence a real iPhone sends for Siri and for a phone call, and which lane each voice stream maps to. *(Code side is complete: `CarPlayCoreService::ConfigureMicrophoneUplink` builds `MicrophoneRtpConfig`, creates `MicrophoneRtpSender`, attaches it to `WasapiMicrophoneUplink` and starts capture; `AirPlayRtspServer` fills `mic_audio_data_port` / `mic_audio_control_port`. Still unverified on hardware — the current device log contains no microphone `RECORD`.)*
 - [ ] P2 Measure downlink audio latency and define the resync/drop policy when the receiver underruns, mirroring the video item in section 7.
-- [ ] P2 Implement multichannel audio and automatic volume control, listed as limited in Phase 1.
+- [ ] P2 Implement multichannel audio and automatic volume control, listed as limited in Phase 1. *(Automatic volume is done: three lane volumes plus automatic ducking driven by audible navigation audio and the phone's `duckAudio`/`unduckAudio`, in `WasapiAudioPipeline::UpdateDuckingStateLocked`. Multichannel output is not implemented. `Core/Media/AudioDuckingManager` is unreferenced dead code — the ducking actually lives in the pipeline.)*
 - [x] P0 Answer the iAP2 data tunnel SETUP (`stream type 130`) instead of falling through to the screen fallback. The iPhone identifies it by `clientTypeUUID=E9459FD0-BCAD-4C45-820F-1E72447EF2F2` and a plaintext `seed`; the read key is `HKDF-SHA512(sharedSecret, "DataStream-Salt"+seed, "DataStream-Output-Encryption-Key")`, and the iPhone then connects back to our `dataPort` and streams `[u16 LE len][ct][tag]` frames of `APTransportPackage` records. Answering `{type=130,streamID=1,dataPort}` (and NOT firing the streaming callback) replaces the previous bogus `{type=110,dataPort=7100}` reply. (`AirPlayRtspServer::ClientSession::StartDataTunnelReader`, `RunDataTunnelConnection`, `HandleSetup`)
 - [x] P0 On hardware the iPhone still never issues the audio SETUP (`streamType=100/101/102`), so `Audio receivers configured: count=0` and audio stays on the phone. Eliminated: advert size/`features` mask, TXT record, `modesChanged` resource ownership ladder, `requestUI`/`takeScreen`, ack sizes, session length, `hevcInfo`/`extendedFeatures`, the presence of a Bluetooth iAP2 link, the `type=130` data-tunnel reply, and the xcertplay audio advert shape (closed by the next item).
 - [x] P0 A/B the audio half of the `/info` advert against the C reference, which is the receiver proven working over the same `T=Enet` transport. The Rust reference records our exact symptom and pins it on an `audioFormats` advert iOS cannot map the stream it wants onto: it announces `mainAudio=controller` in `modesChanged`, never issues the `streamType=100` SETUP, and audio stays on the phone ("never borrowed MainAudio → no audio"). Our advert was xcertplay's 9-entry PCM-first set, which splits MainAudio across a per-`audioType` `media` entry neither working reference has; the C reference sends the 8-entry CCPA set (all AAC, no PCM for the media lane) plus a single catch-all `audioLatencies` entry with no `type`/`audioType` keys. `Options::audio_advert_c_reference` selects between the two and defaults to the C-reference shape. (`AirPlayRtspServer::HandleInfo`) - **confirmed on hardware**: the iPhone now sends `SETUP streamType=102 audioFormat=0x00800000 audioType=media 48000Hz 2ch spf=1024`, we answer `dataPort=7002`, and the media lane starts receiving RTP.
@@ -246,18 +250,18 @@ Tasks below reflect the initial master planning. Remaining items have been conso
 - [x] P0 [Concluded: Partition 7] Define the application-level interface the UI consumes: connection state, session state, metadata, and commands such as connect, disconnect, mute, track control and display-mode change. (`IApplicationApi` + `ApplicationService`)
 - [x] P1 [Concluded: Partition 8] Implement the Win32 application window, lifecycle, DPI handling and the rendering surface, with no direct access to Core internals. (MainWindow + D3D11Renderer)
 - [x] P1 [Concluded: Partition 8] Implement status and pairing UI: device state, connection errors, pairing prompts, safety disclaimer, and first-run MFi wizard. (OverlayRenderer + SetupWizard)
-- [ ] P2 Implement Now Playing and navigation metadata display from the session layer (carplayd doc 17).
-- [ ] P2 Implement system integration: autostart option, tray icon, single-instance behaviour and clean shutdown.
+- [ ] P2 Implement Now Playing and navigation metadata display from the session layer (carplayd doc 17). *(Half-wired: `CoreEventBus::PublishNowPlaying` exists and `ApplicationService` already consumes `NowPlayingEvent`, but nothing calls `PublishNowPlaying`. The iPhone sends `0x5001 NowPlayingUpdate` (731 times in the current device log) and `Iap2ControlPlane::OnControlMessage` has no case for it, so it falls through to `default:`. The missing piece is: parse `0x5001` and publish.)*
+- [ ] P2 Implement system integration: autostart option, tray icon, single-instance behaviour and clean shutdown. *(Single instance exists — `CreateMutexW` in `MainWindow.cpp` — and clean shutdown was fixed by BUG-001 / BUG-005. Tray icon (no `Shell_NotifyIcon`) and autostart (no `CurrentVersion\Run` entry) are still missing.)*
 - [ ] P2 Implement Picture-in-Picture (PIP) / Mini-window mode (always-on-top, borderless compact viewport with opacity controls).
 - [ ] P2 Implement display target selector for dedicated secondary car touchscreen / portable displays.
-- [x] P2 [Concluded: DEC-012 / DEC-013] Implement automatic day/night theme sync (Dark/Light Auto Sync) with Windows theme. (`ThemeHelper` palette drives the HUD, letterbox and DWM caption live; `IApplicationApi::SetHostNightMode` → `AirPlayRtspServer::SetNightMode` sends the CarPlay `setNightMode` event command to the phone. The sunrise/sunset schedule variant was not implemented.)
+- [x] P2 [Concluded: DEC-012 / DEC-013] Implement automatic day/night theme sync (Dark/Light Auto Sync) with Windows theme. (`ThemeHelper` palette drives the HUD, letterbox and DWM caption live; `IApplicationApi::SetHostNightMode` → `AirPlayRtspServer::SetNightMode` sends the CarPlay `setNightMode` event command to the phone. The sunrise/sunset schedule variant was not implemented.) **Confirmed on hardware**: `Sent event command: setNightMode (nightMode=true/false), success=true` across several theme switches with no crash. Open follow-up: we never advertise `enablesUIAppearance` / `uiAppearanceModes` in the `_airplay._tcp` TXT or `/info` advert (0 occurrences in the repo), so whether the iPhone treats appearance as a negotiated capability is unproven.
 - [ ] P2 Implement internationalization (i18n): default Simplified Chinese & English, Windows UI language auto-detection, and menu language selector (Auto/zh-CN/en-US).
 
 ### 11. Verification and test infrastructure
 
-- [ ] P0 Build a protocol test harness that replays recorded iAP2/CarPlay frames against Core without a device or UI.
+- [x] P0 Build a protocol test harness that replays recorded iAP2/CarPlay frames against Core without a device or UI. (`Tests/ProtocolReplayTests.cpp`: byte-exact iAP2 SYN/ACK/control/challenge/cert frames, fragmented-stream resync, RTSP ANNOUNCE+SETUP wire replay, microphone RTP packetization. Registered as `CarPlayStation_ProtocolReplayTests`.)
 - [ ] P1 Create a mock iPhone accessory simulator sufficient to drive identification, session start and media negotiation in CI.
-- [ ] P1 Add a Windows build to CI that compiles Core and the Win32 UI and runs unit tests.
+- [ ] P1 Add a Windows build to CI that compiles Core and the Win32 UI and runs unit tests. *(No `.github/workflows` directory exists, so there is no CI at all.)*
 - [ ] P2 Add device-level regression scripts for the manual test matrix: wired (bridge), wireless, reconnect, sleep/resume, codec switch.
 
 ### 12. Documentation follow-ups from this review

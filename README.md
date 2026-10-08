@@ -21,7 +21,8 @@ place and a wireless CarPlay session reaches the desktop end to end.
 
 Features:
 
-- [x] Wired CarPlay (USB / NCM)
+- [ ] Wired CarPlay (USB / NCM) — deferred to an external hardware bridge (`DEC-003`);
+      `TransportType::UsbNcm` exists only as an enum value, no transport implements it
 - [x] Wireless CarPlay (Bluetooth RFCOMM + Wi-Fi hotspot, mDNS/DNS-SD)
 - [x] MFi authentication — three interchangeable backends (see below)
 - [x] Pairing / identity — `pair-setup` (SRP), `pair-verify`, `auth-setup`,
@@ -33,6 +34,9 @@ Features:
       (see `DEC-010`)
 - [x] Microphone uplink — WASAPI capture, sealed and sent as RTP (PT 100)
 - [x] Touch / Input — Win32 input router, single- and multi-touch HID
+- [x] Day/night theme sync — follows the Windows light/dark theme locally
+      (HUD, letterbox, DWM caption) and sends the CarPlay `setNightMode`
+      event command to the phone (see `DEC-012` / `DEC-013`)
 - [x] First-run setup wizard and persisted UI preferences
 
 ## Architecture

@@ -106,3 +106,80 @@
   * `Tests/UiTests.cpp` 的 `MockApplicationApi` 缺少 `IApplicationApi` 新增的两个纯虚函数（`RegisterCpuFrameConsumer`、`SetVideoSharedDevice`），导致 `C2259 无法实例化抽象类`。已补齐实现，测试通过。
   * `ProtocolReplayTests` 中 RTSP 麦克风上行 SETUP（`streamType=100` → `server_port=5002` 与 `mic_audio_*_port`）的断言在当前实现里没有对应代码：`AirPlayRtspServer::HandleSetup` 只协商视频流（7100/7101），`mic_audio_data_port/control_port` 从未被写入，`MicrophoneRtpSender` 也尚未接入任何服务层。这是麦克风上行的功能缺口而非本次清理造成的回归，已按决定注释掉该断言块并标注 `TODO(microphone-uplink)`，同时在 `TODO.md` 第 8 节新增对应待办条目。
   * 最终 CTest：10/10 套件 **100% 全部通过**（总用时 3.39s）。
+
+---
+
+### 记录 [7]：Windows 主题跟随、主题切换崩溃修复与 TODO 全量盘点（UI/Win32、Application、Core/Session、文档）
+
+* **时间**：`2026-10-08 22:15:53 (UTC+8)`
+* **客户端（Agent）**：`GitHub Copilot (Copilot SDK in VS Code)`
+* **背景与实现**：
+  需求是"让主机跟随 Windows 的黑白主题，并让 CarPlay 画面一起变暗"。实现后用户报告"我一切换主题就闪退"，本轮先修崩溃，再对 `TODO.md` 做全量实况盘点。
+
+  1. **主机侧主题跟随（DEC-012）**：`ThemeHelper` 读取注册表 `Themes\Personalize` 的 `AppsUseLightTheme` / `SystemUsesLightTheme`；`MainWindow::ApplyTheme` 换控件调色板并用 `DwmSetWindowAttribute` 切深色标题栏；`OverlayRenderer::ApplyTheme` 换 HUD 配色；`WM_DWMCOLORIZATIONCOLORCHANGED` 与 `WM_SETTINGCHANGE` 驱动热切换；`AppController::ApplyCurrentTheme` 统一决策并同步 letterbox 底色与 HUD。
+  2. **手机侧夜间模式（DEC-013）**：`MainWindow` 只上报原始信号（`WM_SETTINGCHANGE` 的 `lParam == L"Themes"`，或 `WM_DWMCOLORIZATIONCOLORCHANGED`）→ `AppController` 判定夜间（`AppsUseLightTheme == 0`，回退 `SystemUsesLightTheme`）→ `ApplicationService::SetHostNightMode` → `CarPlayCoreService::SetHostNightMode` → `AirPlayRtspServer::SetNightMode`，走事件通道 `setNightMode`（与已验证可用的 `setUIResolution` 同一条通道）。去重：`night_mode_` 只在值变化时发送；`ResetStreamState()` 复位，重连后按当前主题补发。
+  3. **真机证据**（`build-release/UI/Win32/carplaystation.log`）：`Sent event command: setNightMode (nightMode=false), success=true`、`Sent event command: setNightMode (nightMode=true), success=true`，以及多次 `UI theme switched to light/dark (appsLight=…, systemLight=…), commandWritten=true`；日志尾部视频仍 58 fps、音频持续渲染 —— 命令确实送达并被接受。
+  4. **崩溃修复**：用户手动切换 Windows 主题必闪退。根因是 `WM_SETTINGCHANGE` 处理里把 **`wParam`** 当作 `const wchar_t*` 传给 `_wcsicmp`；变更段字符串在 **`lParam`**，`wParam` 是数值（主题变更为 0），解引用空指针即访问违例。已改为读 `lParam`（`UI/Win32/MainWindow.cpp:344`）。该路径只有真实消息分发能触发，`UiTests` 直接调 `ApplyCurrentTheme()`，因此测试从未暴露它。
+  5. **文档同步**：`DECISIONS.md` 追加 DEC-012/DEC-013；`UI/Win32/README.md`、`Application/README.md`、`Core/Session/README.md` 同步主题与夜间模式说明；`TODO.md` 对应项标记完成并按实况更正状态。
+* **构建与测试运行指标**：
+  - 全新生成 + 干净全量构建（`cmake --build . --target clean` 后全量编译，`vcvars64.bat` + `NMake Makefiles`）：`EXITCODE=0`，`[100%] Built target CarPlayStation_UiTests`；`error C` / `LNK` / `fatal error` 命中数 0；警告与基线完全一致（`Lib/` 17×C4244 + 47×C4456、`AirPlayRtspServer.cpp:290` 1×C4458、1×C4996、`Tests/UiTests.cpp` 16×C4834 + 20×C4189），无新增。
+  - `CarPlayStation_UiTests.exe`：8/8 通过（含主题解析、HUD 调色板、letterbox 底色、`WM_SETTINGCHANGE` / `WM_DWMCOLORIZATIONCOLORCHANGED` 处理、`setNightMode` 去重与复位）。
+  - `CarPlayStation_SessionTests.exe`：全部通过（含 `setNightMode` 参数编码）。
+  - 用户真机复跑：多次主题切换无崩溃，`setNightMode` 均 `success=true`。
+* **本会话修复的关键缺陷与经验**：
+  1. `WM_SETTINGCHANGE` 的变更段字符串在 `lParam` 不在 `wParam`（`MainWindow.cpp:344`）。这是"只有真人去点系统设置才会触发"的路径，单元测试结构上覆盖不到 —— 涉及 Win32 消息语义的逻辑，测试应直接 `SendMessage` 投递消息，而不是只调内部方法。
+  2. 夜间模式命令走事件通道（`stream=11`）而非 `SET_PARAMETER`：`SETUP` 阶段 `SET_PARAMETER` 会被拒（`error 355`），事件通道已被 `setUIResolution` 证明可用。但 `commandWritten=true` 只说明帧已写入加密事件通道，不等于 iPhone 已改变界面外观。
+  3. 遗留风险：我们的 `_airplay._tcp` TXT 与 `/info` 广告里从未出现 `enablesUIAppearance` / `uiAppearanceModes`（全仓库 0 次命中），iPhone 是否按外观能力处理仍未证实。真机已见 `setNightMode` 被接受，但建议补上广告键后再回归一次。
+  4. 用 PowerShell 写文档时 `$content` 未定义会把文件静默截断成 3 字节（本次 `result.md` 差点丢失，已用 `git checkout -- result.md` 恢复）。文档编辑一律用编辑工具，不用 shell 变量插值。
+* **完成清理**：临时构建日志（`build-release/_clean.log`、`build-release/_build.log`）已删除；`git status` 只包含预期改动（`UI/Win32/MainWindow.cpp`、`DECISIONS.md`、`TODO.md`、三个模块 README、`result.md`）；未新增第三方依赖。
+
+---
+
+## 5. 架构完成度盘点（对照 `TODO.md` 与代码实况）
+
+> 逐条核对 `TODO.md` 的 37 个未勾选项与真实代码，结论如下。`TODO.md` 已按此结果更正状态。
+
+### 5.1 已实现（`TODO.md` 里仍挂着未勾选，已更正）
+
+| 项目 | 证据 |
+| --- | --- |
+| README 功能清单反映真实状态（原 `TODO.md:159`） | `README.md:22-38` 已是真实的 `[x]` 清单 |
+| 编解码能力协商与运行时选择 H.264/HEVC（原 `TODO.md:202`） | `VideoCodec` 枚举（`Core/Common/Config.h:25-46`）、`advertise_hevc`（`AirPlayRtspServer.cpp:954`）、`/info` 的 `hevcInfo`（1664）、`enabledFeatures` 含 `hevc`（2182）、HEVC NAL 分类（`AirPlayVideoDemuxer.cpp:27-54`）、`VideoCodecPreference`（`Application/AppSettings.h:36-44`）与映射（`ApplicationService.cpp:421-424`）；真机日志 `Video stream spec set to 1920x1080@60 HEVC`、`Processed hvcC HEVC VideoConfig`、`video-codec=H.265 / HEVC` |
+| PROJECT.md 描述的显示模式选择器（原 `TODO.md:203`） | `MainWindow::SetDisplayMode`（`MainWindow.cpp:212-262`，Windowed ↔ BorderlessFullscreen，364/391/419 处应用）、`AppController.cpp:177-178` 从设置应用；720p/1080p/1440p/2160p/Auto/Custom/Car1280x480/Car1920x720 与 30/60 fps 预设（`AppSettings.h:17-63`） |
+| 麦克风上行接线（记录 [6] 记录的缺口已闭合） | `CarPlayCoreService.cpp:1496-1544` 构造 `MicrophoneRtpConfig`、创建 `MicrophoneRtpSender`、`AttachToUplink`、启动采集；`AirPlayRtspServer.cpp:1856-1857` / `1980-1981` 写入 `mic_audio_data_port=5002` / `control=5003`；`ProtocolReplayTests.cpp:300-301` 断言这些端口。**真机验证仍未做**（本次日志无麦克风上行 `RECORD` 记录） |
+| 单实例与干净退出（`TODO.md:250` 的前半） | `MainWindow.cpp:46` 的 `CreateMutexW`；退出清理由 BUG-001 / BUG-005 修复 |
+| 三车道音量与自动闪避（`TODO.md:217` 的音量部分） | `SetLaneVolume` 三车道 + `voiceDuckingActive_` / `rtspDuckingActive_` 自动闪避（`WasapiAudioPipeline.cpp:230-280`）、INI 与 HUD 滑条、`UpdateSettings` 热更新 |
+
+### 5.2 部分实现（骨架在，缺最后一环）
+
+| 项目 | 已有 | 缺 |
+| --- | --- | --- |
+| Now Playing 显示（`TODO.md:249`） | `CoreEventBus::PublishNowPlaying`（`CoreEventBus.cpp:43-56`）、`ApplicationService.cpp:338-339` 已消费 `NowPlayingEvent`、目录里有 `0x5000/0x5001/0x5002` | `PublishNowPlaying` **无调用者**；`Iap2ControlPlane.cpp` 无 `0x5001` 分支，落到 `default:`（164 行）。真机日志里 `0x5001 NowPlayingUpdate` 到达 731 次却只被记录。缺的就是"解析 `0x5001` → `PublishNowPlaying`" |
+| 通话控制（`TODO.md:242`） | 目录与订阅齐全：`StartCallState` / `CallStateUpdate` / `AcceptCall` / `EndCall` / `StartCommunications`（`Iap2ControlPlane.cpp:69-70`） | 无来电 UI、无接听/挂断动作 |
+| Siri / 导航返回（`TODO.md:242`） | 输入侧映射 `KeyboardKnobTranslator.cpp:61-62` → `ButtonType::Siri` | 协议侧语义与 iPhone 行为验证 |
+| 加固（`TODO.md:250`） | 单实例、干净退出 | 系统托盘图标（无 `Shell_NotifyIcon`）、开机自启（无 `CurrentVersion\Run`） |
+| 验证基础设施（`TODO.md:258-261`） | `ProtocolReplayTests` 存在 | CI（**无 `.github/workflows`**）、mock iPhone 模拟器、设备回归脚本 |
+| 麦克风上行真机验证（`TODO.md:215` / `227`） | 代码已接线（见 5.1） | 真机验证 |
+
+### 5.3 未实现
+
+| 项目 | 说明 |
+| --- | --- |
+| 线程与数据流模型文档、错误处理与日志策略文档（`TODO.md:157` / `158`） | 全仓库没有任何文档提到线程/数据流或 `CPS_LOG_*` 约定 |
+| iAP2 消息模型成文（`TODO.md:163`）、单一事实来源表（`:170`）、accessory-info / 车辆身份记录（`:171`） | 只有 `Core/Protocol/README.md` 与 `Iap2MessageCatalog` 代码 |
+| 外部桥接的有线 CarPlay（`TODO.md:186` / `187`） | `Core/Transport/` 只有 `BtRfcommTransport`、`BtSdpHelper`、`MdnsAdvertiser`、`WifiSoftApManager`；`TransportType::UsbNcm` 只是枚举（`ITransportChannel.h:14`）。**`README.md:24` 的 `[x] Wired CarPlay (USB / NCM)` 是过度声明，需更正或补实现** |
+| 仪表 / HUD 模板（`TODO.md:182`） | 无任何代码 |
+| 会话其余平面：车辆数据、位置、目的地（`TODO.md:194`）、Modern Vehicle Data Config（`:195`） | `Iap2MessageCatalog.h` 只有 availability / Wi-Fi / NowPlaying / RouteGuidance / Call / Power 相关 id |
+| 延迟测量与丢帧重同步策略（`TODO.md:204` / `216`） | `latencyMs` 在 `Core/` 已 0 次命中 |
+| 多声道音频（`TODO.md:217`） | 无 |
+| `Core/Media/AudioDuckingManager` | 只被自己引用，未接线（死组件）—— 闪避实际在 `WasapiAudioPipeline` 内实现 |
+| PIP / 置顶小窗（`TODO.md:251`）、多显示器输出目标选择（`:252`） | 只有 `SetupWizard.cpp:534,949` 的 `WS_EX_TOPMOST` |
+| i18n（`TODO.md:254`） | 只有 `OverlayRenderer.cpp:81,95,106` 硬编码 `L"zh-cn"`，无检测与选择器 |
+| `ARCHITECTURE.md` 详细章节（`TODO.md:266`） | `ARCHITECTURE.md:169` "Detailed Architecture" 仍是一行占位 |
+| PROJECT.md Phase 1 目标与实况对齐（`TODO.md:267`） | 未做 |
+| `/info` 广告 `enablesUIAppearance` / `uiAppearanceModes`（DEC-013 遗留） | 全仓库 0 次命中 |
+
+### 5.4 文档自身的不一致（已修）
+
+* `TODO.md:143` 声称条目已并入 `TODO_missing.md`，**该文件不存在**（记录 [6] 记录过它被有意删除）。已改为直接说明条目保留在 `TODO.md` 各分区。
+* `TODO.md` 规则 5 要求"完成即删除"，但文件保留了大量 `[x]` 长块；实际做法是保留并标注 `[Concluded: DEC-xxx]` 以保留可追溯性。
