@@ -20,11 +20,19 @@ std::wstring Utf8ToWide(const std::string& utf8) {
     }
     return wide;
 }
+
+// Palette colour -> Direct2D colour.
+inline D2D1_COLOR_F ToD2D(const UiColor& c) {
+    return D2D1::ColorF(c.r, c.g, c.b, c.a);
+}
 }  // namespace
 
 OverlayRenderer::OverlayRenderer() {
     auto now = std::chrono::steady_clock::now().time_since_epoch();
     last_mouse_interaction_tick_ = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    // Start in whatever appearance Windows is currently set to.
+    theme_ = ThemeHelper::CurrentTheme();
+    palette_ = ThemeHelper::BuildPalette(theme_);
 }
 
 OverlayRenderer::~OverlayRenderer() {
@@ -155,18 +163,38 @@ Core::Common::Status OverlayRenderer::CreateDeviceResources(IDXGISwapChain1* swa
         target_height_ = static_cast<uint32_t>(sz.height);
     }
 
-    // Create Brushes
-    d2d_render_target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &brush_text_white_);
-    d2d_render_target_->CreateSolidColorBrush(D2D1::ColorF(0.7f, 0.7f, 0.75f, 1.0f), &brush_text_gray_);
-    d2d_render_target_->CreateSolidColorBrush(D2D1::ColorF(0.08f, 0.08f, 0.10f, 0.85f), &brush_panel_bg_);
-    d2d_render_target_->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.48f, 1.0f, 1.0f), &brush_accent_blue_);
-    d2d_render_target_->CreateSolidColorBrush(D2D1::ColorF(0.2f, 0.8f, 0.3f, 1.0f), &brush_status_green_);
-    d2d_render_target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.6f, 0.0f, 1.0f), &brush_status_orange_);
-    d2d_render_target_->CreateSolidColorBrush(D2D1::ColorF(0.25f, 0.25f, 0.30f, 1.0f), &brush_slider_track_);
-    d2d_render_target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &brush_slider_thumb_);
-    d2d_render_target_->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.30f, 0.30f, 1.0f), &brush_log_error_);
+    // Create Brushes from the active palette (see ThemeHelper).
+    d2d_render_target_->CreateSolidColorBrush(ToD2D(palette_.text_primary), &brush_text_white_);
+    d2d_render_target_->CreateSolidColorBrush(ToD2D(palette_.text_secondary), &brush_text_gray_);
+    d2d_render_target_->CreateSolidColorBrush(ToD2D(palette_.panel_bg), &brush_panel_bg_);
+    d2d_render_target_->CreateSolidColorBrush(ToD2D(palette_.accent), &brush_accent_blue_);
+    d2d_render_target_->CreateSolidColorBrush(ToD2D(palette_.status_green), &brush_status_green_);
+    d2d_render_target_->CreateSolidColorBrush(ToD2D(palette_.status_orange), &brush_status_orange_);
+    d2d_render_target_->CreateSolidColorBrush(ToD2D(palette_.slider_track), &brush_slider_track_);
+    d2d_render_target_->CreateSolidColorBrush(ToD2D(palette_.slider_thumb), &brush_slider_thumb_);
+    d2d_render_target_->CreateSolidColorBrush(ToD2D(palette_.log_error), &brush_log_error_);
 
     return Core::Common::Status::Ok();
+}
+
+void OverlayRenderer::ApplyPaletteToBrushes() {
+    if (brush_text_white_) brush_text_white_->SetColor(ToD2D(palette_.text_primary));
+    if (brush_text_gray_) brush_text_gray_->SetColor(ToD2D(palette_.text_secondary));
+    if (brush_panel_bg_) brush_panel_bg_->SetColor(ToD2D(palette_.panel_bg));
+    if (brush_accent_blue_) brush_accent_blue_->SetColor(ToD2D(palette_.accent));
+    if (brush_status_green_) brush_status_green_->SetColor(ToD2D(palette_.status_green));
+    if (brush_status_orange_) brush_status_orange_->SetColor(ToD2D(palette_.status_orange));
+    if (brush_slider_track_) brush_slider_track_->SetColor(ToD2D(palette_.slider_track));
+    if (brush_slider_thumb_) brush_slider_thumb_->SetColor(ToD2D(palette_.slider_thumb));
+    if (brush_log_error_) brush_log_error_->SetColor(ToD2D(palette_.log_error));
+}
+
+bool OverlayRenderer::ApplyTheme(UiTheme theme) {
+    if (theme == theme_) return false;
+    theme_ = theme;
+    palette_ = ThemeHelper::BuildPalette(theme);
+    ApplyPaletteToBrushes();
+    return true;
 }
 
 void OverlayRenderer::DiscardDeviceResources() {

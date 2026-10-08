@@ -74,6 +74,7 @@ public:
     [[nodiscard]] Common::Status UpdateEnvironment(const Common::CoreEnvironmentConfig& env) override;
     void SetVideoStreamSpec(const Common::VideoStreamSpec& spec) override;
     [[nodiscard]] Common::VideoStreamSpec GetActiveVideoStreamSpec() const override;
+    [[nodiscard]] Common::Status SetHostNightMode(bool night_mode) override;
     [[nodiscard]] Common::Status Start() override;
     void Stop() override;
 

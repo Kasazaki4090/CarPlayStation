@@ -2,13 +2,31 @@
 #include "D3D11Renderer.h"
 #include "Core/Common/Logging.h"
 #include <windowsx.h>
+#include <dwmapi.h>
 
 namespace CarPlayStation::UI {
 
 static const wchar_t* kWindowClassName = L"CarPlayStation_MainWindowClass";
 
+namespace {
+// DWMWA_USE_IMMERSIVE_DARK_MODE is 20 on Windows 10 1809/1903 (the SDK constant
+// is only available in newer headers).
+constexpr DWORD kDwmUseImmersiveDarkMode = 20;
+
+inline COLORREF ToCOLORREF(const UiColor& c) {
+    auto clamp8 = [](float v) -> int {
+        if (v < 0.0f) return 0;
+        if (v > 1.0f) return 255;
+        return static_cast<int>(v * 255.0f + 0.5f);
+    };
+    return RGB(clamp8(c.r), clamp8(c.g), clamp8(c.b));
+}
+}  // namespace
+
 MainWindow::MainWindow() {
     hinstance_ = GetModuleHandleW(nullptr);
+    // Start in whatever appearance Windows is currently set to.
+    theme_ = ThemeHelper::CurrentTheme();
 }
 
 MainWindow::~MainWindow() {
@@ -155,6 +173,31 @@ void MainWindow::AttachRenderer(D3D11Renderer* renderer) {
     renderer_ = renderer;
 }
 
+void MainWindow::ApplyTheme(UiTheme theme) {
+    const bool changed = (theme != theme_);
+    theme_ = theme;
+    const UiPalette palette = ThemeHelper::BuildPalette(theme);
+
+    // Client-area background brush (only visible before the first frame and
+    // during resize flicker). Created on first call, recreated on change.
+    if (!bg_brush_ || changed) {
+        if (bg_brush_) DeleteObject(bg_brush_);
+        bg_brush_ = CreateSolidBrush(ToCOLORREF(palette.letterbox));
+    }
+
+    if (!hwnd_) return;
+
+    // Caption and window frame follow the same setting.
+    const int useDark = (theme == UiTheme::Dark) ? 1 : 0;
+    if (FAILED(DwmSetWindowAttribute(hwnd_, kDwmUseImmersiveDarkMode, &useDark, sizeof(useDark)))) {
+        CPS_LOG_WARN("MainWindow", "DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE) failed");
+    }
+    // Force the non-client area to repaint with the new caption colour.
+    SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    InvalidateRect(hwnd_, nullptr, TRUE);
+}
+
 void MainWindow::Show(int nCmdShow) {
     if (hwnd_) {
         CPS_LOG_INFO("MainWindow", "Showing window HWND=", reinterpret_cast<uintptr_t>(hwnd_), " nCmdShow=", nCmdShow);
@@ -246,6 +289,11 @@ void MainWindow::Close() {
         CloseHandle(single_instance_mutex_);
         single_instance_mutex_ = nullptr;
     }
+
+    if (bg_brush_) {
+        DeleteObject(bg_brush_);
+        bg_brush_ = nullptr;
+    }
 }
 
 LRESULT CALLBACK MainWindow::StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -275,6 +323,40 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     }
 
     switch (msg) {
+        case WM_ERASEBKGND: {
+            // The client area is fully covered by the swapchain every frame; this
+            // only matters before the first frame and during resize flicker, and
+            // it must match the theme's letterbox colour so no black flash shows
+            // in light mode.
+            if (bg_brush_) {
+                RECT rc{};
+                if (GetClientRect(hwnd, &rc)) {
+                    FillRect(reinterpret_cast<HDC>(wParam), &rc, bg_brush_);
+                    return 1;
+                }
+            }
+            break;
+        }
+
+        case WM_SETTINGCHANGE: {
+            // Windows broadcasts "Theme" / "ImmersiveColorSet" when the user flips
+            // the light/dark ("Choose your mode") setting.
+            const wchar_t* area = reinterpret_cast<const wchar_t*>(lParam);
+            const bool themeChange = area && (_wcsicmp(area, L"Theme") == 0 ||
+                                              _wcsicmp(area, L"ImmersiveColorSet") == 0);
+            if (themeChange && theme_changed_callback_) {
+                theme_changed_callback_();
+            }
+            break;
+        }
+
+        case WM_DWMCOLORIZATIONCOLORCHANGED: {
+            if (theme_changed_callback_) {
+                theme_changed_callback_();
+            }
+            break;
+        }
+
         case WM_GETMINMAXINFO: {
             // Windowed mode: pin the window to one size so the client area can
             // never be stretched away from the video aspect. Fullscreen uses a

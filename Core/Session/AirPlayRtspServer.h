@@ -228,6 +228,16 @@ public:
     [[nodiscard]] Common::Status SendHidReport(uint32_t deviceUid, Common::ByteSpan report);
 
     /**
+     * @brief Tell the phone which appearance the host is showing (setNightMode).
+     *
+     * `night_mode = true` means dark/night. The phone re-colors its CarPlay UI to
+     * match, which is what lets a desktop host keep the phone and its own window in
+     * the same theme. The value is also remembered and re-sent whenever a new event
+     * channel comes up, so a session started after the theme change still gets it.
+     */
+    [[nodiscard]] Common::Status SetNightMode(bool night_mode);
+
+    /**
      * @brief Contacts declared by the advertised uuid 1 touchscreen descriptor.
      *
      * The report length has to match the descriptor, so whoever builds a touch report

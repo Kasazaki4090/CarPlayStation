@@ -1057,3 +1057,188 @@ protocol of the third option is now the HTTP JSON API rather than a bespoke TCP 
 - `Tests/HardwareTests.cpp` (`MockHttpMfiServer` and the three remote-MFi tests)
 - `Reference/remote-mfi-for-xcertplay/docs/01-api-contract.md`, `internal/httpapi/handlers.go`
 - `Core/Hardware/README.md` (backend list), `.gitmodules`
+
+---
+
+## DEC-012 — Following the Windows light/dark theme instead of a fixed dark HUD
+
+**Status:** `Accepted`
+
+**Date:** 2026-10-08
+
+### Context
+
+Every colour in the UI was hardcoded: the HUD's white text, translucent black panels, green/orange status pills and
+slider colours in `OverlayRenderer::CreateDeviceResources()`, the `{0,0,0,1}` swapchain clear colour in
+`D3D11Renderer::Render()`, and a `BLACK_BRUSH` window background. On a machine set to Windows light mode that reads as
+a foreign dark rectangle: the caption follows the system theme, the client area does not, and the letterbox bars stay
+black while the surrounding desktop is white.
+
+The user asked for the app to switch between its black and white appearance on its own when Windows switches. Asked
+whether an in-app override should be added to the `F2` drawer, the answer was no: follow the system only, no manual
+switch, no new `.ini` key.
+
+### Decision
+
+1. **A new `UI/Win32/ThemeHelper` owns the theme and the colours.** It exposes `UiTheme{Dark,Light}`, a plain
+   `UiColor{r,g,b,a}` in `[0,1]`, a `UiPalette` of *named roles* (`text_primary`, `text_secondary`, `panel_bg`,
+   `accent`, `status_green`, `status_orange`, `slider_track`, `slider_thumb`, `log_error`, `letterbox`), and
+   `CurrentTheme()` / `BuildPalette()` / `ThemeName()`. It includes no D2D or D3D header, so the palette can be
+   asserted on from a test.
+2. **The theme is read from the registry, the same way `SystemPermissionHelper` reads capability consent.**
+   `AppsUseLightTheme` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`, strict `REG_DWORD`
+   and size checks, then the same value under `HKLM`, then `Dark`. `Dark` is the default because it is the historical
+   appearance: the dark palette reproduces the previous hardcoded values exactly, and `Tests/UiTests.cpp` asserts that.
+3. **No user-facing override and no persisted setting.** `Application::AppSettings` and `carplaystation_ui.ini` are
+   untouched, which also keeps the whole feature inside `UI/Win32` per `DEC-002`.
+4. **Live switching, three ways.** `MainWindow` handles `WM_SETTINGCHANGE` with `lParam` `Theme` or
+   `ImmersiveColorSet` and `WM_DWMCOLORIZATIONCOLORCHANGED`, and calls back into
+   `AppController::ApplyCurrentTheme(force=true)`. Because that broadcast is not reliably delivered to a
+   fullscreen-ish window, `Step()` also calls it unforced, and it re-reads the registry at most once per
+   `kUiRefreshMs`. A change is logged as `UI theme switched to light|dark`.
+5. **Recolour in place; never rebuild the device.** `OverlayRenderer::ApplyTheme()` calls
+   `ID2D1SolidColorBrush::SetColor()` on the live brushes. The render target and swapchain are untouched, so a theme
+   switch cannot interrupt video presentation.
+6. **The window frame follows too.** `MainWindow::ApplyTheme()` sets DWM attribute `20`
+   (`DWMWA_USE_IMMERSIVE_DARK_MODE`, declared locally because the installed SDK header has no name for it) and paints
+   `WM_ERASEBKGND` with an owned brush instead of the class-level `BLACK_BRUSH`, which cannot be changed after
+   `RegisterClassEx`. `D3D11Renderer::SetLetterboxColor()` takes the palette's letterbox colour for the clear colour.
+
+### Alternatives
+
+- **A theme radio in the `F2` settings drawer plus an `Appearance` `.ini` key**: rejected by the user. It would have
+  added a setting, a persisted value and a second source of truth for something Windows already exposes.
+- **Reading the theme in `UI/Win32` and passing it through `Application::AppSettings`**: rejected. The Application
+  layer has no business knowing about Windows themes, and `DEC-002` puts all Win32 knowledge in the UI layer.
+- **High-contrast and custom-accent themes**: out of scope. Only `AppsUseLightTheme` is read; a high-contrast palette
+  would be a third palette in the same table.
+- **Recreating the Direct2D render target on theme change**: rejected. It is the path `Resize()` already takes, it is
+  much heavier than `SetColor()`, and it risks a visible video hitch for a cosmetic change.
+- **`GetSysColor(COLOR_WINDOW)` / the immersive colour APIs (`GetImmersiveColorFromColorSetEx`)**: rejected. The
+  immersive colour table is undocumented and version-sensitive, and system colours do not match the app palette. A
+  small explicit palette keeps the HUD legible over video, which the system palette is not designed for.
+
+### Reason
+
+The requirement is "become light when Windows is light", not "let the user pick". Reading one documented registry
+value and mapping it to a role-keyed palette is the smallest thing that satisfies it, keeps the existing dark look
+byte-for-byte for users who never change the setting, and leaves the theme decision in exactly one file.
+
+### Consequences
+
+Positive:
+- The caption, client background, letterbox bars and HUD now agree with each other and with the desktop.
+- Switching the theme while running needs no restart and no device rebuild; the log line makes the transition
+  debuggable.
+- Colours are named, so a future palette (high contrast, or a per-profile accent) is a table entry rather than a hunt
+  through draw calls.
+
+Negative / limitations:
+- The palette is ours, not the system's. A user with a custom accent colour or a high-contrast theme gets our light or
+  dark palette, not theirs.
+- The registry is polled once a second as a fallback for a missing broadcast. That is one `RegGetValueW` per second
+  while running - negligible, but it is a poll.
+- `DWMWA_USE_IMMERSIVE_DARK_MODE` is used by its numeric value (20). It is stable on Windows 10 1809+ but the
+  constant name is not in the SDK headers we build against.
+- Light mode is only exercised by unit assertions on this machine, which is set to dark.
+
+### Related
+
+- `DEC-002` (UI isolation - why the theme lives in `UI/Win32` and not in `AppSettings`)
+- `UI/Win32/ThemeHelper.h`, `UI/Win32/ThemeHelper.cpp`
+- `UI/Win32/OverlayRenderer.cpp` (`ApplyTheme`, `ApplyPaletteToBrushes`), `UI/Win32/D3D11Renderer.cpp`
+  (`SetLetterboxColor`), `UI/Win32/MainWindow.cpp` (`ApplyTheme`, `WM_SETTINGCHANGE`, `WM_ERASEBKGND`),
+  `UI/Win32/AppController.cpp` (`ApplyCurrentTheme`)
+- `UI/Win32/SystemPermissionHelper.cpp` (the registry-read idiom this copies)
+- `UI/Win32/README.md` ("Appearance (Light / Dark)")
+- `Tests/UiTests.cpp` (`TestThemeHelper`)
+## DEC-013 — Telling the phone the host appearance (CarPlay night mode)
+
+**Status:** `Accepted`
+
+**Date:** 2026-10-08
+
+### Context
+
+`DEC-012` made the window, letterbox bars and HUD follow the Windows light/dark setting. The user's reaction was that
+nothing had changed, and the follow-up made the actual goal explicit: "是通知carplay变化主题，跟windows和app界面一起变化即可"
+— tell CarPlay to change its theme so it changes together with Windows and the app.
+
+That is a different thing from recolouring our own drawing. The pixels on screen are rendered by the iPhone and arrive
+as an H.264/HEVC bitstream; nothing the host paints can darken them, and at a 1920x1080 client with a 1920x1080 stream
+the letterbox bars do not even exist. The only way the CarPlay UI itself follows the desktop theme is the AirPlay
+`setNightMode` event-channel command, which is what a real head unit sends when its own day/night state changes.
+
+### Decision
+
+1. **The wire command is the one the reference receivers already send.** A binary-plist dictionary on the event
+   channel: `type = "setNightMode"`, `params = { "nightMode": <bool> }`, `true` meaning night/dark.
+   `ClientSession::SendSetNightMode()` in `Core/Session/AirPlayRtspServer.cpp` builds it with the existing
+   `BplistEncoder` and hands it to `SendEventCommand()`, the same encrypted `POST /command` queue used by
+   `hidSendReport`, `requestUI`, `changeModes` and `forceKeyFrame`.
+2. **The value is remembered, not just sent.** `AirPlayRtspServer::Impl` keeps `night_mode_known_` / `night_mode_`,
+   and every `ClientSession` inherits them at creation. When a session's event channel is accepted, the pending value
+   is flushed next to `SendRequestUI()` / `SendTakeScreen()` / `SendForceKeyFrame()`. Without this, a theme change
+   made before the phone connects — which is the normal case, since the theme is applied at window creation — would be
+   lost.
+3. **It is a Core capability exposed upward, not a UI detail.** `ICarPlayCoreApi::SetHostNightMode(bool)` and
+   `IApplicationApi::SetHostNightMode(bool)` forward to the RTSP server, mirroring how `SetVideoStreamSpec` is
+   threaded. The UI still owns the *decision* (`ThemeHelper::CurrentTheme()`); Core owns the *transport*, so
+   `DEC-002`'s boundary holds and the Win32 layer touches no protocol type.
+4. **The UI pushes it from the single place that already decides the theme.** `AppController::ApplyCurrentTheme()`
+   sends `night = (theme == UiTheme::Dark)` after applying the local palette, so startup, `WM_SETTINGCHANGE` and the
+   once-a-second registry poll all cover it with no extra trigger.
+5. **The log states what it can and cannot prove.** `CarPlay night mode requested=…, commandWritten=…` plus the note
+   that a successful write does not prove the iPhone changed its appearance — the same caveat the reference host logs.
+
+### Alternatives
+
+- **Dimming or colour-grading the video on the host** (a brightness multiplier or a LUT in `D3D11Renderer`): rejected.
+  It would darken the picture without changing the CarPlay UI, so the phone's own white map and white panels would stay
+  white, and the HUD and the video would disagree in a way neither of them explains.
+- **A `VehicleNightModeEvent` on the event bus**: not used. That event is Core→UI (a head unit reporting its own
+  night state), has no publishers, and points the wrong way for a host that is *telling* the phone.
+- **Advertising `enablesUIAppearance` / `uiAppearanceModes` in `/info`**: not done. Our advert has neither field, and
+  the reference receivers that send `setNightMode` do not advertise them either, so the command is sent on the same
+  basis theirs is. If a phone turns out to ignore it, adding the advert fields is the follow-up, and the log line
+  already separates "written" from "honoured".
+- **Sending only while streaming**: rejected. The call is cheap, returns `Unavailable` when there is no event channel,
+  and because the value is remembered, calling it unconditionally is what makes the next session correct.
+
+### Reason
+
+The user wants one appearance across Windows, the app and the phone. Only the phone can change the phone, and the
+command that does it is already on a channel we own. Storing the value in the RTSP server makes the behaviour correct
+for the ordering that actually happens — theme first, phone second — instead of depending on a coincidence of timing.
+
+### Consequences
+
+Positive:
+- Changing "Choose your mode" in Windows now changes the caption, the HUD, the letterbox bars and the CarPlay UI on
+  the phone together, with no restart and no interaction with the app.
+- A session that starts after the change is told about it as soon as its event channel exists, so the phone never
+  renders a light UI into a dark window.
+- The command goes through the existing encrypted command queue, so it stays ordered with input reports and cannot
+  block the UI thread.
+
+Negative / limitations:
+- Whether iOS honours `setNightMode` on a given iOS version is not verifiable from the host; `commandWritten=true`
+  only proves the frame was queued.
+- `setNightMode` is not part of any published AirPlay specification this repository holds; the format is taken from
+  the reference receivers in `Reference/`, the only working implementations available here.
+- There is no automatic day/night schedule or ambient-light input; the appearance is exactly the Windows setting.
+
+### References
+
+- `Core/Session/AirPlayRtspServer.cpp` (`SendSetNightMode`, `FlushNightMode`, `Impl::SetNightMode`,
+  `night_mode_known_`), `Core/Session/AirPlayRtspServer.h` (`SetNightMode`)
+- `Core/Service/ICarPlayCoreApi.h`, `Core/Service/CarPlayCoreService.cpp` (`SetHostNightMode`)
+- `Application/IApplicationApi.h`, `Application/ApplicationService.cpp` (`SetHostNightMode`)
+- `UI/Win32/AppController.cpp` (`ApplyCurrentTheme`)
+- `DECISIONS.md` `DEC-012` (the host-side palette this completes)
+- `Reference/xcertplay/shared/src/main/java/com/shilapi/xcertplay/airplay/AirPlaySession.kt` (`setNightMode`,
+  `pendingNightMode`), `Reference/diplay/common/src/main/java/com/shilapi/xcertplay/CarPlayHostActivity.kt`
+  (`syncAirPlayDarkMode`, the `commandWritten=` diagnostic)
+- `Reference/carplayd/docs/APPLE_BEHAVIORAL_REFERENCE.md` (`enablesUIAppearance`, `uiAppearanceModes`,
+  `SessionState.nightMode`)
+- `Tests/UiTests.cpp` (`MockApplicationApi::SetHostNightMode`, `TestAppControllerHeadlessLifecycle`)

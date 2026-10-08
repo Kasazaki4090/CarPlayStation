@@ -305,6 +305,11 @@ Core::Common::Status ApplicationService::ForwardButtonEvent(
     return sink->SendButtonEvent(button, isPressed);
 }
 
+Core::Common::Status ApplicationService::SetHostNightMode(bool night_mode) {
+    // Pure pass-through: Core owns the event channel and the remembered value.
+    return core_api_->SetHostNightMode(night_mode);
+}
+
 // ============================================================================
 // IApplicationApi — State Query
 // ============================================================================

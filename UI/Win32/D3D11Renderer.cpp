@@ -434,8 +434,9 @@ Core::Common::Status D3D11Renderer::Render(bool autoPresent) {
         CPS_LOG_INFO("D3D11Renderer", "Render: RTV self-healed (recreated)");
     }
 
-    // 1. Clear backbuffer to solid black (Letterbox bars)
-    const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    // 1. Clear backbuffer to the theme's letterbox colour (Letterbox bars)
+    const float clearColor[4] = { letterbox_color_.r, letterbox_color_.g,
+                                  letterbox_color_.b, letterbox_color_.a };
     context_->ClearRenderTargetView(render_target_view_.Get(), clearColor);
 
     // 2. Render active video quad if texture available

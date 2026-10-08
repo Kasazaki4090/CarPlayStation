@@ -53,6 +53,8 @@ public:
         Core::Input::ButtonType button,
         bool isPressed) override;
 
+    [[nodiscard]] Core::Common::Status SetHostNightMode(bool night_mode) override;
+
     [[nodiscard]] AppUiState GetCurrentState() const override;
 
     // --- Additional accessors ---

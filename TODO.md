@@ -250,7 +250,7 @@ Tasks below reflect the initial master planning. Remaining items have been conso
 - [ ] P2 Implement system integration: autostart option, tray icon, single-instance behaviour and clean shutdown.
 - [ ] P2 Implement Picture-in-Picture (PIP) / Mini-window mode (always-on-top, borderless compact viewport with opacity controls).
 - [ ] P2 Implement display target selector for dedicated secondary car touchscreen / portable displays.
-- [ ] P2 Implement automatic day/night theme sync (Dark/Light Auto Sync) with Windows theme or sunrise/sunset schedule.
+- [x] P2 [Concluded: DEC-012 / DEC-013] Implement automatic day/night theme sync (Dark/Light Auto Sync) with Windows theme. (`ThemeHelper` palette drives the HUD, letterbox and DWM caption live; `IApplicationApi::SetHostNightMode` → `AirPlayRtspServer::SetNightMode` sends the CarPlay `setNightMode` event command to the phone. The sunrise/sunset schedule variant was not implemented.)
 - [ ] P2 Implement internationalization (i18n): default Simplified Chinese & English, Windows UI language auto-detection, and menu language selector (Auto/zh-CN/en-US).
 
 ### 11. Verification and test infrastructure

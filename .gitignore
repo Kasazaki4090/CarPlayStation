@@ -1,6 +1,7 @@
 build/
 build-msvc/
 build-release/
+scratch/
 
 # Project Management Template (Local template archive, not uploaded to git)
 ProjectManagementTemplate/

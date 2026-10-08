@@ -1,6 +1,7 @@
 #include "UI/Win32/VideoAdaptationHelper.h"
 #include "UI/Win32/D3D11Renderer.h"
 #include "UI/Win32/SystemPermissionHelper.h"
+#include "UI/Win32/ThemeHelper.h"
 #include "UI/Win32/SetupWizard.h"
 #include "UI/Win32/Win32InputRouter.h"
 #include "UI/Win32/AppController.h"
@@ -9,6 +10,7 @@
 #include "Core/Hardware/TouchscreenCapabilities.h"
 #include <cassert>
 #include <iostream>
+#include <string>
 #include <vector>
 #include <memory>
 #include <cmath>
@@ -94,6 +96,11 @@ public:
         return Core::Common::Status::Ok();
     }
 
+    Core::Common::Status SetHostNightMode(bool night_mode) override {
+        night_mode_records_.push_back(night_mode);
+        return Core::Common::Status::Ok();
+    }
+
     Application::AppUiState GetCurrentState() const override {
         return ui_state_;
     }
@@ -116,6 +123,7 @@ public:
     std::vector<TouchRecord> touch_records_;
     std::vector<KnobRecord> knob_records_;
     std::vector<ButtonRecord> button_records_;
+    std::vector<bool> night_mode_records_;
 };
 
 } // namespace
@@ -359,6 +367,12 @@ void TestAppControllerHeadlessLifecycle() {
     assert(controller.IsInitialized());
     assert(mockApi->started_);
 
+    // Bootstrapping also pushes the current Windows theme to the phone, so the
+    // CarPlay UI starts in the same appearance as the window.
+    const UI::UiTheme expected = UI::ThemeHelper::CurrentTheme();
+    assert(!mockApi->night_mode_records_.empty());
+    assert(mockApi->night_mode_records_.back() == (expected == UI::UiTheme::Dark));
+
     // Run a step
     controller.Step();
 
@@ -368,6 +382,58 @@ void TestAppControllerHeadlessLifecycle() {
     assert(!mockApi->started_);
 
     std::cout << "PASSED\n";
+}
+
+// ============================================================================
+// Test 8: ThemeHelper (Windows light/dark detection & palettes)
+// ============================================================================
+void TestThemeHelper() {
+    std::cout << "[Test 8] ThemeHelper: system theme detection & palettes... ";
+
+    // The current theme must always resolve to one of the two known values
+    // (missing registry value falls back to Dark).
+    const UI::UiTheme theme = UI::ThemeHelper::CurrentTheme();
+    assert(theme == UI::UiTheme::Dark || theme == UI::UiTheme::Light);
+    const char* name = UI::ThemeHelper::ThemeName(theme);
+    assert(std::string(name) == "dark" || std::string(name) == "light");
+
+    const UI::UiPalette dark = UI::ThemeHelper::BuildPalette(UI::UiTheme::Dark);
+    const UI::UiPalette light = UI::ThemeHelper::BuildPalette(UI::UiTheme::Light);
+
+    // Dark palette reproduces the colours this UI has always hardcoded.
+    assert(dark.text_primary.r == 1.0f && dark.text_primary.g == 1.0f && dark.text_primary.b == 1.0f);
+    assert(dark.text_secondary.r == 0.70f && dark.text_secondary.g == 0.70f);
+    assert(dark.panel_bg.r == 0.08f && dark.panel_bg.a == 0.85f);
+    assert(dark.accent.b == 1.0f && dark.accent.g == 0.48f);
+    assert(dark.slider_track.r == 0.25f);
+    assert(dark.letterbox.r == 0.0f && dark.letterbox.g == 0.0f && dark.letterbox.b == 0.0f);
+
+    // Light palette is the mirror image: dark text on light panels.
+    assert(light.text_primary.r < 0.5f && light.text_primary.g < 0.5f);
+    assert(light.panel_bg.r > 0.5f && light.text_primary.r < light.panel_bg.r);
+    assert(light.letterbox.r > 0.5f);
+
+    // Translucency is preserved in both themes (panels are drawn over video).
+    assert(dark.panel_bg.a > 0.0f && dark.panel_bg.a < 1.0f);
+    assert(light.panel_bg.a > 0.0f && light.panel_bg.a < 1.0f);
+
+    // Every component stays in [0,1] so Direct2D/D3D11 never rejects a colour.
+    const UI::UiPalette* palettes[2] = { &dark, &light };
+    for (const UI::UiPalette* p : palettes) {
+        const UI::UiColor roles[10] = {
+            p->text_primary, p->text_secondary, p->panel_bg, p->accent,
+            p->status_green, p->status_orange, p->slider_track,
+            p->slider_thumb, p->log_error, p->letterbox
+        };
+        for (const UI::UiColor& c : roles) {
+            assert(c.r >= 0.0f && c.r <= 1.0f);
+            assert(c.g >= 0.0f && c.g <= 1.0f);
+            assert(c.b >= 0.0f && c.b <= 1.0f);
+            assert(c.a >= 0.0f && c.a <= 1.0f);
+        }
+    }
+
+    std::cout << "PASSED (system theme: " << name << ")\n";
 }
 
 // ============================================================================
@@ -386,7 +452,8 @@ int main() {
     TestWin32InputRouterMouse();
     TestWin32InputRouterKeyboard();
     TestAppControllerHeadlessLifecycle();
+    TestThemeHelper();
 
-    std::cout << "\nAll 7 Partition 8 UI test suites passed successfully!\n";
+    std::cout << "\nAll 8 Partition 8 UI test suites passed successfully!\n";
     return 0;
 }

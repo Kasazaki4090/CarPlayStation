@@ -20,6 +20,9 @@ This module is located at Layer 4 of Core. It coordinates the overall CarPlay se
     `input=true` `type:100` stream that means the iPhone wants our microphone
     (`iphone_uplink_port`).
   - `takeScreen` / `forceKeyFrame` handling on `SET_PARAMETER` and `SETUP`.
+  - Host appearance: `AirPlayRtspServer::SetNightMode(bool)` stores the value and writes the
+    `setNightMode` command (`params.nightMode`) to every session with an event channel; sessions
+    whose event channel is accepted later receive the stored value at that moment (`DEC-013`).
   - Routes negotiated audio/video stream endpoints to Layer 5 (`Media`).
 - **Pairing & Accessory Crypto (`Pairing/`)**:
   - Self-contained, dependency-free implementation of the HomeKit-style pairing stack used by

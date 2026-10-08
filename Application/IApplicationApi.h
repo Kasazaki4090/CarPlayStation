@@ -65,6 +65,12 @@ public:
     [[nodiscard]] virtual Core::Common::Status ForwardKnobEvent(Core::Input::KnobAction action, uint32_t stepCount = 1) = 0;
     [[nodiscard]] virtual Core::Common::Status ForwardButtonEvent(Core::Input::ButtonType button, bool isPressed) = 0;
 
+    // Tell the phone which appearance the host window is showing (CarPlay night mode).
+    // night_mode = true means dark. The value is remembered by Core and re-sent to the
+    // phone whenever an event channel comes up, so calling it with no session running is
+    // fine. Returns Unavailable when no phone currently has an event channel.
+    [[nodiscard]] virtual Core::Common::Status SetHostNightMode(bool night_mode) = 0;
+
     // Query current application state snapshot
     [[nodiscard]] virtual AppUiState GetCurrentState() const = 0;
 };

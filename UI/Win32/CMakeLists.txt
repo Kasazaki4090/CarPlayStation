@@ -3,6 +3,7 @@ add_library(CarPlayUI STATIC
     D3D11Renderer.cpp
     MainWindow.cpp
     SystemPermissionHelper.cpp
+    ThemeHelper.cpp
     SetupWizard.cpp
     OverlayRenderer.cpp
     Win32InputRouter.cpp

@@ -73,6 +73,12 @@ private:
     // timer is not reset every second.
     void RefreshUiState();
 
+    // Re-read the Windows light/dark setting and push the resulting palette to
+    // the window frame, the letterbox clear colour and the D2D HUD. Called at
+    // startup (force), on the theme-change broadcast, and once a second as a
+    // fallback for windows that miss the broadcast.
+    void ApplyCurrentTheme(bool force = false);
+
     MainWindow window_;
     D3D11Renderer renderer_;
     OverlayRenderer overlay_;
@@ -96,6 +102,11 @@ private:
     // Video facts last pushed to the overlay (see RefreshUiState).
     static constexpr uint64_t kUiRefreshMs = 1000;
     uint64_t ui_refresh_tick_{0};
+
+    // Appearance last applied to the UI (see ApplyCurrentTheme). The system
+    // setting is re-read at most once a second as a fallback for the broadcast.
+    UiTheme applied_theme_{UiTheme::Dark};
+    uint64_t theme_check_tick_{0};
     uint32_t pushed_video_width_{0};
     uint32_t pushed_video_height_{0};
     uint32_t pushed_video_fps_{0};

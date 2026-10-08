@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Common/Result.h"
+#include "ThemeHelper.h"
 #include <windows.h>
 #include <cstdint>
 #include <string>
@@ -28,6 +29,8 @@ struct WindowConfig {
 using WindowMessageCallback = std::function<bool(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)>;
 using WindowCloseCallback = std::function<void()>;
 using WindowResizeCallback = std::function<void(uint32_t width, uint32_t height)>;
+// Raised when Windows announces an appearance change (WM_SETTINGCHANGE).
+using WindowThemeChangedCallback = std::function<void()>;
 
 class MainWindow {
 public:
@@ -63,6 +66,13 @@ public:
     void Show(int nCmdShow = SW_SHOWNORMAL);
 
     /**
+     * @brief Match the non-client frame (caption/border) and the client
+     *        background brush to the active theme. Call once after the window
+     *        exists and again whenever the theme changes.
+     */
+    void ApplyTheme(UiTheme theme);
+
+    /**
      * @brief Run a non-blocking pump iteration of window messages.
      * @return false if WM_QUIT received, true otherwise.
      */
@@ -77,6 +87,7 @@ public:
     void SetMessageHook(WindowMessageCallback callback) { message_hook_ = std::move(callback); }
     void SetCloseCallback(WindowCloseCallback callback) { close_callback_ = std::move(callback); }
     void SetResizeCallback(WindowResizeCallback callback) { resize_callback_ = std::move(callback); }
+    void SetThemeChangedCallback(WindowThemeChangedCallback callback) { theme_changed_callback_ = std::move(callback); }
 
     // --- Accessors ---
     [[nodiscard]] HWND GetHwnd() const noexcept { return hwnd_; }
@@ -98,6 +109,11 @@ private:
     HANDLE single_instance_mutex_{nullptr};
     bool is_open_{false};
 
+    // Non-client / client background appearance. The client brush is owned by us
+    // (the stock brush is not) so it must be deleted when replaced or destroyed.
+    UiTheme theme_{UiTheme::Dark};
+    HBRUSH bg_brush_{nullptr};
+
     uint32_t client_width_{1280};
     uint32_t client_height_{720};
     uint32_t dpi_{96};
@@ -117,6 +133,7 @@ private:
     WindowMessageCallback message_hook_;
     WindowCloseCallback close_callback_;
     WindowResizeCallback resize_callback_;
+    WindowThemeChangedCallback theme_changed_callback_;
 };
 
 } // namespace CarPlayStation::UI

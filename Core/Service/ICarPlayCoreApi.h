@@ -34,6 +34,14 @@ public:
     // readout so the pill can report facts instead of the settings' guesses.
     [[nodiscard]] virtual Common::VideoStreamSpec GetActiveVideoStreamSpec() const = 0;
 
+    // Tell the phone which appearance the host is showing (the AirPlay event-channel
+    // setNightMode command). night_mode = true means dark/night, and the iPhone
+    // re-colors its CarPlay UI to match the host window. Safe to call at any time:
+    // the value is remembered and re-sent whenever a new event channel comes up, so a
+    // session that starts after the change still gets it. Returns Unavailable when no
+    // session currently has an event channel.
+    [[nodiscard]] virtual Common::Status SetHostNightMode(bool night_mode) = 0;
+
     // Start CarPlay advertising and discovery
     [[nodiscard]] virtual Common::Status Start() = 0;
 

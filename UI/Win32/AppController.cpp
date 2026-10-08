@@ -118,6 +118,13 @@ Core::Common::Status AppController::Initialize(
         OnSettingsChanged(s);
     });
 
+    // Match the window frame, the letterbox bars and the HUD to the Windows
+    // light/dark setting the user currently has ("Choose your mode").
+    ApplyCurrentTheme(true);
+    window_.SetThemeChangedCallback([this]() {
+        ApplyCurrentTheme(true);
+    });
+
     // 5. Wire Input Router to Window Message Hook
     input_router_ = std::make_unique<Win32InputRouter>(app_api_, &renderer_, &overlay_);
     window_.SetMessageHook([this](HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -244,6 +251,10 @@ bool AppController::Step() {
     //    pick up the codec correction from the first VideoConfig.
     RefreshUiState();
 
+    // Belt-and-braces: some theme changes (or a missed WM_SETTINGCHANGE) are
+    // picked up by re-reading the registry on the same once-a-second cadence.
+    ApplyCurrentTheme();
+
     if (::IsIconic(window_.GetHwnd())) {
         ::Sleep(16);
     } else {
@@ -271,6 +282,40 @@ void AppController::FlushPendingSettings() {
     }
     settings_dirty_ = false;
     wizard_.SaveVideoAudioSettings(settings_);
+}
+
+void AppController::ApplyCurrentTheme(bool force) {
+    const uint64_t now = ::GetTickCount64();
+    if (!force && now - theme_check_tick_ < kUiRefreshMs) {
+        return;
+    }
+    theme_check_tick_ = now;
+
+    const UiTheme theme = ThemeHelper::CurrentTheme();
+    if (!force && theme == applied_theme_) {
+        return;
+    }
+    applied_theme_ = theme;
+
+    // Window frame/caption, letterbox bars, then the HUD brushes. All three are
+    // cheap and take effect on the next frame.
+    window_.ApplyTheme(theme);
+    renderer_.SetLetterboxColor(ThemeHelper::BuildPalette(theme).letterbox);
+    (void)overlay_.ApplyTheme(theme);
+
+    // The video on screen is rendered by the iPhone, so re-coloring anything on this
+    // side cannot darken it. The only way the CarPlay UI itself follows the desktop
+    // theme is the AirPlay night-mode command.
+    const bool night_mode = (theme == UiTheme::Dark);
+    Core::Common::Status status = Core::Common::MakeError(
+        Core::Common::StatusCode::Unavailable, "Application API not available");
+    if (app_api_) {
+        status = app_api_->SetHostNightMode(night_mode);
+    }
+    CPS_LOG_INFO("AppController", "UI theme switched to ", ThemeHelper::ThemeName(theme),
+                 ", CarPlay night mode requested=", night_mode ? "true" : "false",
+                 ", commandWritten=", status.IsOk() ? "true" : "false",
+                 " (a successful write does not prove the iPhone changed its appearance)");
 }
 
 void AppController::RefreshUiState() {

@@ -2,6 +2,7 @@
 
 #include "Core/Common/Result.h"
 #include "Core/Media/IVideoDecoder.h"
+#include "ThemeHelper.h"
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -71,6 +72,12 @@ public:
     [[nodiscard]] Core::Common::Status Present();
 
     /**
+     * @brief Colour used for the letterbox bars (and the cleared backbuffer).
+     *        Follows the active Windows light/dark theme.
+     */
+    void SetLetterboxColor(const UiColor& color) noexcept { letterbox_color_ = color; }
+
+    /**
      * @brief Release all D3D11 / DXGI resources.
      */
     void Shutdown();
@@ -107,6 +114,9 @@ private:
     uint32_t video_width_{1280};
     uint32_t video_height_{720};
     ViewportRect current_viewport_{};
+
+    // Backbuffer / letterbox clear colour (black by default, see ThemeHelper).
+    UiColor letterbox_color_{0.0f, 0.0f, 0.0f, 1.0f};
 
     // D3D11 & DXGI interfaces
     Microsoft::WRL::ComPtr<ID3D11Device> device_;

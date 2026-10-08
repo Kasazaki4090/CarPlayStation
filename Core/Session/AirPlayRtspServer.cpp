@@ -513,6 +513,35 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
         return ok;
     }
 
+    // 通知手机昼夜模式（setNightMode）。true = 夜间（深色）。手机上的 CarPlay UI
+    // 会随之换配色，这是让手机和宿主窗口保持同一主题的唯一途径 —— 视频帧本身
+    // 是手机渲染好的，宿主这边无论怎么调色都不会改变它。
+    bool SendSetNightMode(bool night) {
+        using namespace Pairing;
+        BplistDict params;
+        params.emplace_back("nightMode", BplistValue(night));
+        BplistDict d;
+        d.emplace_back("type", BplistValue("setNightMode"));
+        d.emplace_back("params", BplistValue(std::move(params)));
+        auto body = BplistEncoder::Encode(BplistValue(d));
+        bool ok = SendEventCommand(body);
+        CPS_LOG_INFO("AirPlayRtsp", "Sent event command: setNightMode (nightMode=",
+                     night ? "true" : "false", "), success=", ok ? "true" : "false");
+        return ok;
+    }
+
+    // The host's appearance at the moment this session was created. The event channel
+    // only exists after the phone connects, so the value has to be remembered and sent
+    // as soon as it is usable.
+    bool night_mode_known{false};
+    bool night_mode{false};
+
+    void FlushNightMode()
+    {
+        if (!night_mode_known) return;
+        SendSetNightMode(night_mode);
+    }
+
     void StartEventDrain() {
         if (event_stream_sock == INVALID_SOCK || !event_channel) return;
         auto self = shared_from_this();
@@ -732,6 +761,7 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
                 SendRequestUI();
                 SendTakeScreen();
                 SendForceKeyFrame();
+                FlushNightMode();
                 return true;
             }
         }
@@ -960,6 +990,36 @@ public:
             "No active AirPlay event channel is available for HID input");
     }
 
+    // Remembers the host appearance and pushes it to every session that already has an
+    // event channel. Sessions created later inherit the stored value and get it sent as
+    // soon as their event channel comes up.
+    Common::Status SetNightMode(bool night_mode) {
+        std::vector<std::shared_ptr<ClientSession>> candidates;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            night_mode_known_ = true;
+            night_mode_ = night_mode;
+            candidates.reserve(sessions_.size());
+            for (const auto& [socket, session] : sessions_) {
+                (void)socket;
+                session->night_mode_known = true;
+                session->night_mode = night_mode;
+                candidates.push_back(session);
+            }
+        }
+
+        bool sent = false;
+        for (const auto& session : candidates) {
+            if (session->HasEventChannel()) {
+                session->SendSetNightMode(night_mode);
+                sent = true;
+            }
+        }
+        if (sent) return Common::Status::Ok();
+        return Common::MakeError(Common::StatusCode::Unavailable,
+            "No active AirPlay event channel is available for setNightMode");
+    }
+
     RtspResponse ProcessSimulatedRequest(const RtspRequest& req) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto dummy_sess = std::make_shared<ClientSession>();
@@ -984,6 +1044,10 @@ private:
             auto sess = std::make_shared<ClientSession>();
             sess->sock = client_sock;
             sess->peer_address = ipStr;
+            // Inherit the host appearance so the phone is told about it the moment its
+            // event channel is accepted.
+            sess->night_mode_known = night_mode_known_;
+            sess->night_mode = night_mode_;
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -2140,6 +2204,9 @@ private:
     uint16_t bound_port_{0};
     std::vector<socket_t> client_sockets_;
     std::map<socket_t, std::shared_ptr<ClientSession>> sessions_;
+    // Host appearance last reported by the UI. Guarded by mutex_.
+    bool night_mode_known_{false};
+    bool night_mode_{false};
     std::thread server_thread_;
     std::vector<std::thread> worker_threads_;
     RtspRequestHandler custom_handler_;
@@ -2236,6 +2303,10 @@ void AirPlayRtspServer::SetAudioSampleRate(uint32_t sample_rate) {
 
 Common::Status AirPlayRtspServer::SendHidReport(uint32_t deviceUid, Common::ByteSpan report) {
     return impl_->SendHidReport(deviceUid, report);
+}
+
+Common::Status AirPlayRtspServer::SetNightMode(bool night_mode) {
+    return impl_->SetNightMode(night_mode);
 }
 
 int AirPlayRtspServer::hid_touch_contacts() const noexcept {

@@ -1202,6 +1202,20 @@ Common::VideoStreamSpec CarPlayCoreService::GetActiveVideoStreamSpec() const {
     return video_spec_;
 }
 
+Common::Status CarPlayCoreService::SetHostNightMode(bool night_mode) {
+    std::shared_ptr<Session::AirPlayRtspServer> rtsp;
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        rtsp = rtsp_server_;
+    }
+    // The RTSP server owns the event channel and remembers the value, so a call
+    // before any phone is connected still reaches it on the next session.
+    if (!rtsp) {
+        return Common::MakeError(Common::StatusCode::InvalidState, "Core service not initialized");
+    }
+    return rtsp->SetNightMode(night_mode);
+}
+
 Common::Status CarPlayCoreService::UpdateEnvironment(const Common::CoreEnvironmentConfig& env) {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
 

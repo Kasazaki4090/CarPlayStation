@@ -3,6 +3,7 @@
 #include "Application/IApplicationApi.h"
 #include "Application/AppSettings.h"
 #include "Core/Common/Result.h"
+#include "ThemeHelper.h"
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
@@ -101,6 +102,20 @@ public:
     void SetLogPanelLineCount(int count) { log_panel_line_count_ = count > 0 ? count : 12; }
 
     /**
+     * @brief Re-colour the HUD for a theme (Windows light/dark switch).
+     *
+     * Only the brush colours change; the render target, text formats and
+     * hit-test geometry are untouched, so this is safe to call from the frame
+     * loop. Returns true when the theme actually changed.
+     */
+    bool ApplyTheme(UiTheme theme);
+
+    /**
+     * @brief The theme the HUD is currently painted in.
+     */
+    [[nodiscard]] UiTheme GetTheme() const noexcept { return theme_; }
+
+    /**
      * @brief Set callback for when user modifies settings in the HUD.
      */
     void SetSettingsCallback(SettingsChangeCallback callback) {
@@ -117,6 +132,8 @@ public:
 private:
     [[nodiscard]] Core::Common::Status CreateDeviceResources(IDXGISwapChain1* swapChain, uint32_t backBufferIndex);
     void DiscardDeviceResources();
+    // Push palette_ into the live brushes (created in CreateDeviceResources).
+    void ApplyPaletteToBrushes();
     void DrawStatusPill(float width, float height);
     void DrawSettingsDrawer(float width, float height);
     void DrawWelcomeGuide(float width, float height);
@@ -179,6 +196,11 @@ private:
 
     // Standalone log panel: number of most-recent lines to display.
     int log_panel_line_count_{12};
+
+    // Appearance follows the Windows app light/dark setting; the palette is
+    // rebuilt only when that setting changes.
+    UiTheme theme_{UiTheme::Dark};
+    UiPalette palette_{};
 
     bool initialized_{false};
 };

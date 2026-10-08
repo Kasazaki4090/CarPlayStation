@@ -21,6 +21,7 @@ layer (`Application::IApplicationApi`). It never reaches into Core.
 | `SetupWizard` | First-run flow and persistence. Safety disclaimer modal, MFi backend wizard (local file / USB-to-I2C hardware / Remote MFi HTTP), and the INI read/write for all of it. |
 | `Win32InputRouter` | Translates `WM_POINTER*`, mouse, wheel and keyboard messages into the pure data structs consumed by `Core/Input/IInputEventSink`. Multi-contact pointers are read from pointer messages, not from synthesized mouse messages. |
 | `SystemPermissionHelper` | Reads the Windows Microphone and Location capability consent from the registry and can open the matching Settings page. |
+| `ThemeHelper` | Reads the Windows app light/dark setting and builds the colour palette used by the HUD, the letterbox and the window frame. |
 
 ## Settings Persistence
 
@@ -86,6 +87,52 @@ gracefully instead of producing a black window. Watch `SETUP Phase 1 response
 body keys=…, enabledFeatures=on, hevc=on` and the `MpvVideoPlayer DIAG` line's
 `video-codec=` / `decodedSize=` fields to confirm which codec is really flowing.
 
+## Appearance (Light / Dark)
+
+`ThemeHelper` reads `AppsUseLightTheme` under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize` (falling back to
+`HKLM`, then to dark) and turns it into a palette of named roles — text, panel,
+accent, status colours, slider colours and the letterbox colour. There is no in-app
+override and nothing is written to the INI: the UI follows whatever Windows is set
+to, which is also what the caption does.
+
+* `OverlayRenderer` creates its Direct2D brushes from the palette and repaints them
+  in place (`ID2D1SolidColorBrush::SetColor`) when the theme changes, so no render
+  target has to be rebuilt.
+* `D3D11Renderer::SetLetterboxColor()` takes the letterbox colour from the palette;
+  the swapchain is cleared with it instead of hardcoded black.
+* `MainWindow::ApplyTheme()` asks DWM for a light or dark caption
+  (`DWMWA_USE_IMMERSIVE_DARK_MODE`) and paints `WM_ERASEBKGND` with the matching
+  background brush.
+* A change is picked up from `WM_SETTINGCHANGE` / `WM_DWMCOLORIZATIONCOLORCHANGED`,
+  and `AppController::ApplyCurrentTheme()` re-reads the registry once a second as a
+  fallback, because the broadcast is not always delivered.
+
+The dark palette is exactly the set of colours the HUD used before, so a system left
+on dark mode looks unchanged.
+
+### Telling the phone
+
+The same `AppController::ApplyCurrentTheme()` call also pushes the appearance to the
+iPhone: it calls `IApplicationApi::SetHostNightMode(night)`, which passes through
+`ICarPlayCoreApi::SetHostNightMode()` into `AirPlayRtspServer::SetNightMode()`. The
+RTSP server remembers the value and writes an AirPlay event-channel command
+
+```
+POST /command  ->  { "type": "setNightMode", "params": { "nightMode": true|false } }
+```
+
+to every session that has an event channel. A session that is not connected yet, or
+whose event channel has not been accepted yet, receives the stored value as soon as
+the channel appears, so the phone is never left with a stale appearance.
+
+Each theme transition logs two lines: `UI theme switched to …` followed by
+`CarPlay night mode requested=…, commandWritten=…`. `commandWritten=1` only proves
+the frame was queued on the event channel — whether the phone actually re-colours its
+CarPlay UI depends on the iOS version and cannot be verified from the host. Nothing
+here changes the video pixels we decode: the stream is whatever the phone decided to
+send. See `DEC-013`.
+
 ## Boundaries & Isolation
 
 The UI must not access directly:
@@ -103,9 +150,10 @@ The UI is replaceable: another toolkit could be dropped in without touching Core
 
 The app writes a rolling log next to the executable (`carplaystation.log`). It
 records which MFi backend was resolved, the touchscreen capability probe result
-and the HID descriptor that was chosen, mDNS join/announce activity, and the
-WASAPI pipeline format — which is the first place to look when a phone does not
-connect.
+and the HID descriptor that was chosen, mDNS join/announce activity, the
+WASAPI pipeline format, and every `UI theme switched to light|dark` transition —
+which is the first place to look when a phone does not connect or the HUD looks
+washed out.
 
 ## AI Partition & Mocking Guide
 
@@ -115,4 +163,7 @@ connect.
   wizard are accepted programmatically.
 * Rendering is verified by asserting on the presentation rectangles and overlay
   hit-test rects, not by pixel comparison.
+* `ThemeHelper` is pure Win32 registry access plus plain structs, so it can be
+  asserted on directly (`Tests/UiTests.cpp` checks that the dark palette reproduces
+  the historical colours and that both palettes stay translucent and in range).
 
