@@ -264,6 +264,7 @@ being deleted, so the plan stays auditable. Status was re-audited against the co
 - [ ] P2 [Deferred] Implement Picture-in-Picture (PIP) / Mini-window mode (always-on-top, borderless compact viewport with opacity controls).
 - [x] P2 [Concluded: DEC-012 / DEC-013] Implement automatic day/night theme sync (Dark/Light Auto Sync) with Windows theme. (`ThemeHelper` palette drives the HUD, letterbox and DWM caption live; `IApplicationApi::SetHostNightMode` → `AirPlayRtspServer::SetNightMode` sends the CarPlay `setNightMode` event command to the phone. The sunrise/sunset schedule variant was not implemented.) **Confirmed on hardware**: `Sent event command: setNightMode (nightMode=true/false), success=true` across several theme switches with no crash. Open follow-up: we never advertise `enablesUIAppearance` / `uiAppearanceModes` in the `_airplay._tcp` TXT or `/info` advert (0 occurrences in the repo), so whether the iPhone treats appearance as a negotiated capability is unproven.
 - [ ] P2 [Deferred] Implement internationalization (i18n): default Simplified Chinese & English, Windows UI language auto-detection, and menu language selector (Auto/zh-CN/en-US).
+- [ ] P2 Rewrite UI layer with QML (Qt Quick): modernize and redraw the presentation surface and overlay tier using QML components (`CarPlayVideoSurface`, `StatusPill`, `CallBanner`, `SettingsDrawer`, `WelcomeCard`, `LogPanel`) consuming `Application::IApplicationApi`. Initial scaffold, design theme tokens, and foundation components prepared in `UI/Qml/`.
 
 ### 11. Verification and test infrastructure
 

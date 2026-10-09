@@ -87,6 +87,7 @@ Application layer builds the right `Core::Hardware::IMfiSigner` from
 Core/          CarPlayStation's own implementation (7 layers) — see Core/README.md
 Application/   Application layer between UI and Core (settings, signer factory)
 UI/Win32/      Win32 window, D3D11/D2D renderer, input router, setup wizard
+UI/Qml/        QML / Qt Quick modern UI layer (components, themes, video surface)
 Lib/           External libraries — see Lib/Readme.md
 Reference/     Protocol reference projects (git submodules)
 Tests/         Per-layer unit / replay / hardware tests
@@ -242,6 +243,7 @@ Layer and module documents:
 - [Core/Service](./Core/Service/README.md) — the `ICarPlayCoreApi` facade
 - [Application/README.md](./Application/README.md) — settings model and signer factory
 - [UI/Win32/README.md](./UI/Win32/README.md) — window, renderer, overlay, setup wizard, INI keys
+- [UI/Qml/README.md](./UI/Qml/README.md) — QML / Qt Quick architecture, components, and rendering model
 
 Every layer README ends with an "AI Partition & Mocking Guide": which interfaces
 to mock so the layer can be developed and tested in isolation.
