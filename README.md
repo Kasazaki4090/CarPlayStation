@@ -21,8 +21,7 @@ place and a wireless CarPlay session reaches the desktop end to end.
 
 Features:
 
-- [ ] Wired CarPlay (USB / NCM) — deferred to an external hardware bridge (`DEC-003`);
-      `TransportType::UsbNcm` exists only as an enum value, no transport implements it
+- [ ] Wired CarPlay (USB / NCM) — Not viable directly on Windows x86 due to Intel xDCI hardware controller being locked to Host mode by PC OEM BIOS firmware without device-mode peripheral stack (see [Intel xDCI Driver](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-atom-processor-for-smartphone-and-tablet-usb-otg-xdci-driver.html)); deferred to future Windows on ARM64 UDC or external bridge hardware (RP2350/Linux SBC, `DEC-003`)
 - [x] Wireless CarPlay (Bluetooth RFCOMM + Wi-Fi hotspot, mDNS/DNS-SD)
 - [x] MFi authentication — three interchangeable backends (see below)
 - [x] Pairing / identity — `pair-setup` (SRP), `pair-verify`, `auth-setup`,
@@ -33,6 +32,9 @@ Features:
 - [x] Audio — three-lane WASAPI shared-mode pipeline, AAC via fdk-aac
       (see `DEC-010`)
 - [x] Microphone uplink — WASAPI capture, sealed and sent as RTP (PT 100)
+- [x] Siri activation — triggers `requestSiri` over encrypted AirPlay event channel (`F1`)
+- [x] Telephony & Call handling — iAP2 `0x4155 CallStateUpdate` parsing, floating HUD Call Banner with click-to-accept/hangup, `0x415B AcceptCall` (`F3` / `Enter`) and `0x415C EndCall` (`F4` / `Esc`)
+- [x] Now Playing — delta metadata stream (`0x5001 NowPlayingUpdate`) with incremental field caching, HUD pill display, and dynamic window title
 - [x] Touch / Input — Win32 input router, single- and multi-touch HID
 - [x] Day/night theme sync — follows the Windows light/dark theme locally
       (HUD, letterbox, DWM caption) and sends the CarPlay `setNightMode`
@@ -177,7 +179,7 @@ powershell -ExecutionPolicy Bypass -File scripts\Set-UpFirewall.ps1
 ```
 
 The app writes a rolling log next to the executable (`carplaystation.log`), and
-`F4` opens the in-app log panel.
+`Ctrl + F4` opens the in-app log panel.
 
 ## Input
 
@@ -189,14 +191,17 @@ same touchscreen device.
 | Local input | Sent to the phone |
 | --- | --- |
 | Left mouse / touch drag | Touch / scroll |
-| Right mouse, `Esc`, `Backspace` | Back button |
+| Right mouse, `Backspace` | Back button |
 | `↑` `↓` `←` `→`, `W` `A` `S` `D` | Swipe up / down / left / right |
 | Mouse wheel | Swipe down / up (scroll) |
-| `Enter` | Tap at the centre of the screen |
+| `Enter` | Tap at the centre of the screen (or Answer incoming call when call banner is active) |
+| `Esc` | Back button (or Reject / End active call when call banner is active) |
 | `Space`, media keys | Play-pause / next / previous |
-| `F1`, `F3` / `F4` | Siri / call accept, call reject — **not sent**: `SendButtonEvent` only maps play-pause, next and previous, and the HID advert has no Siri or call button, so these keys do nothing today (see `TODO.md` section 8/9) |
+| `F1` | Siri activation (`requestSiri` button event) |
 | `F2` | Settings drawer (local only) |
-| `F4` | Log panel (local only, when the overlay is up) |
+| `F3` | Accept incoming call (`0x415B AcceptCall`) |
+| `F4` | Reject / End active call (`0x415C EndCall`) |
+| `Ctrl + F4` | In-app log panel (local only, when the overlay is up) |
 | `F11` | Toggle fullscreen (local only) |
 
 ### Multi-touch
@@ -215,14 +220,15 @@ mouse messages a touchpad produces, which is why a touchpad stays single-point.
 
 Root documents:
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — layer responsibilities and data flow
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — layer responsibilities, data flow, media pipeline latency/resync, and wired xDCI analysis
+- [docs/IAP2_SPECIFICATION.md](./docs/IAP2_SPECIFICATION.md) — authoritative iAP2 framing, TLV format, and message dictionary
 - [DECISIONS.md](./DECISIONS.md) — design decisions (DEC-xxx)
 - [PROJECT.md](./PROJECT.md) — goals, scope, requirements
-- [TODO.md](./TODO.md) — open work
+- [TODO.md](./TODO.md) — open work and roadmap status
 - [BUGS.md](./BUGS.md) — known issues (BUG-xxx)
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — contribution guidelines
 - [Lib/Readme.md](./Lib/Readme.md) — external library records and policy
-- [result.md](./result.md) — phase progress and fix log (Chinese)
+- [result.md](./result.md) — phase progress and fix log
 
 Layer and module documents:
 

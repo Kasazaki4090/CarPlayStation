@@ -75,6 +75,9 @@ public:
     void SetVideoStreamSpec(const Common::VideoStreamSpec& spec) override;
     [[nodiscard]] Common::VideoStreamSpec GetActiveVideoStreamSpec() const override;
     [[nodiscard]] Common::Status SetHostNightMode(bool night_mode) override;
+    [[nodiscard]] Common::Status AcceptCall(std::string_view callUuid = {}) override;
+    [[nodiscard]] Common::Status EndCall(std::string_view callUuid = {}) override;
+    [[nodiscard]] Common::Status TriggerSiri(bool isPressed) override;
     [[nodiscard]] Common::Status Start() override;
     void Stop() override;
 

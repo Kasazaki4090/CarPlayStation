@@ -42,6 +42,15 @@ public:
     // session currently has an event channel.
     [[nodiscard]] virtual Common::Status SetHostNightMode(bool night_mode) = 0;
 
+    // Accept an incoming call via iAP2 AcceptCall (0x415B).
+    [[nodiscard]] virtual Common::Status AcceptCall(std::string_view callUuid = {}) = 0;
+
+    // End/decline an active or incoming call via iAP2 EndCall (0x415C).
+    [[nodiscard]] virtual Common::Status EndCall(std::string_view callUuid = {}) = 0;
+
+    // Trigger or release Siri via AirPlay RTSP event channel requestSiri.
+    [[nodiscard]] virtual Common::Status TriggerSiri(bool isPressed) = 0;
+
     // Start CarPlay advertising and discovery
     [[nodiscard]] virtual Common::Status Start() = 0;
 

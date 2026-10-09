@@ -297,6 +297,24 @@ Common::ByteBuffer Iap2MessageCatalog::BuildStartCallState() {
     return b.Data();
 }
 
+Common::ByteBuffer Iap2MessageCatalog::BuildAcceptCall(uint8_t acceptAction, std::string_view callUuid) {
+    TlvBuilder b;
+    b.U8(0, acceptAction);
+    if (!callUuid.empty()) {
+        b.Str(1, callUuid);
+    }
+    return b.Data();
+}
+
+Common::ByteBuffer Iap2MessageCatalog::BuildEndCall(uint8_t endAction, std::string_view callUuid) {
+    TlvBuilder b;
+    b.U8(0, endAction);
+    if (!callUuid.empty()) {
+        b.Str(1, callUuid);
+    }
+    return b.Data();
+}
+
 // ============================================================================
 // CarPlay session handshake (0x4300 -> 0x4301)
 // ============================================================================
@@ -363,6 +381,27 @@ struct TlvGroup {
 [[nodiscard]] std::optional<bool> ReadAvailabilityFlag(Common::ByteSpan value) {
     if (value.size() != 1 || value[0] > 1) return std::nullopt;
     return value[0] == 1;
+}
+
+[[nodiscard]] std::optional<uint8_t> ReadU8(Common::ByteSpan value) {
+    if (value.empty()) return std::nullopt;
+    return value[0];
+}
+
+[[nodiscard]] std::optional<uint16_t> ReadU16(Common::ByteSpan value) {
+    if (value.size() < 2) return std::nullopt;
+    return Common::Endian::ReadBe16(value.data());
+}
+
+[[nodiscard]] std::optional<uint32_t> ReadU32(Common::ByteSpan value) {
+    if (value.size() < 4) return std::nullopt;
+    return Common::Endian::ReadBe32(value.data());
+}
+
+[[nodiscard]] std::optional<uint64_t> ReadU64(Common::ByteSpan value) {
+    if (value.size() < 8) return std::nullopt;
+    return (static_cast<uint64_t>(Common::Endian::ReadBe32(value.data())) << 32) |
+           Common::Endian::ReadBe32(value.data() + 4);
 }
 
 } // namespace
@@ -459,6 +498,64 @@ std::optional<uint16_t> Iap2MessageCatalog::ParseMessageId(Common::ByteSpan payl
         return std::nullopt;
     }
     return Common::Endian::ReadBe16(payload.data() + 4);
+}
+
+Iap2MessageCatalog::NowPlayingDelta Iap2MessageCatalog::ParseNowPlayingUpdate(Common::ByteSpan body) {
+    NowPlayingDelta delta;
+    for (const auto& grp : ReadGroups(body)) {
+        if (grp.pid == 0x0000) { // MediaItemAttributes
+            for (const auto& sub : ReadGroups(grp.value)) {
+                switch (sub.pid) {
+                    case 1: delta.title = ReadString(sub.value); break;
+                    case 4: delta.duration_ms = ReadU32(sub.value); break;
+                    case 6: delta.album = ReadString(sub.value); break;
+                    case 7: delta.track_number = ReadU16(sub.value); break;
+                    case 8: delta.track_count = ReadU16(sub.value); break;
+                    case 12: delta.artist = ReadString(sub.value); break;
+                    case 16: delta.genre = ReadString(sub.value); break;
+                    case 18: delta.composer = ReadString(sub.value); break;
+                    default: break;
+                }
+            }
+        } else if (grp.pid == 0x0001) { // PlaybackAttributes
+            for (const auto& sub : ReadGroups(grp.value)) {
+                switch (sub.pid) {
+                    case 0: delta.playback_status = ReadU8(sub.value); break;
+                    case 1: delta.elapsed_ms = ReadU32(sub.value); break;
+                    case 7: delta.app_name = ReadString(sub.value); break;
+                    case 16: delta.app_bundle_id = ReadString(sub.value); break;
+                    default: break;
+                }
+            }
+        }
+    }
+    return delta;
+}
+
+std::optional<Iap2MessageCatalog::CallStateInfo> Iap2MessageCatalog::ParseCallStateUpdate(Common::ByteSpan body) {
+    const auto groups = ReadGroups(body);
+    if (groups.empty()) {
+        return std::nullopt;
+    }
+    CallStateInfo info;
+    for (const auto& param : groups) {
+        switch (param.pid) {
+            case 0: if (auto s = ReadString(param.value)) info.remote_id = *s; break;
+            case 1: if (auto s = ReadString(param.value)) info.display_name = *s; break;
+            case 2: if (auto u = ReadU8(param.value)) info.status = *u; break;
+            case 3: if (auto u = ReadU8(param.value)) info.direction = *u; break;
+            case 4: if (auto s = ReadString(param.value)) info.call_uuid = *s; break;
+            case 6: if (auto s = ReadString(param.value)) info.address_book_id = *s; break;
+            case 7: if (auto s = ReadString(param.value)) info.label = *s; break;
+            case 8: if (auto u = ReadU8(param.value)) info.service = *u; break;
+            case 9: if (auto b = ReadU8(param.value)) info.is_conferenced = (*b != 0); break;
+            case 10: if (auto u = ReadU8(param.value)) info.conference_group = *u; break;
+            case 11: if (auto u = ReadU8(param.value)) info.disconnect_reason = *u; break;
+            case 12: if (auto t = ReadU64(param.value)) info.start_timestamp = *t; break;
+            default: break;
+        }
+    }
+    return info;
 }
 
 } // namespace CarPlayStation::Core::Protocol

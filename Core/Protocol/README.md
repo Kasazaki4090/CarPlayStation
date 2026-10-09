@@ -12,9 +12,11 @@ This module is located at Layer 3 of Core. It handles Apple iAP2 (iPod Accessory
   - Control Session (Session ID 1).
   - External Accessory / Data Sessions (Session ID 2+).
 - **iAP2 Message Catalog & Serialization (`Iap2MessageCatalog`)**:
+  - Detailed SSOT reference: [`docs/IAP2_SPECIFICATION.md`](../../docs/IAP2_SPECIFICATION.md).
   - Authentication Messages: `AuthenticationStart`, `AuthenticationChallenge`, `AuthenticationResponse`, `AuthenticationFailed`, `AuthenticationSucceeded`.
   - Wireless Handshake Messages: `RequestWiFiCredentials`, `WiFiCredentials`, `StartWirelessCarPlay`.
   - Accessory Declarations: `IdentificationInformation`, `PowerStateUpdate`, `VehicleStatus`.
+  - Telephony & Media Messages: `NowPlayingUpdate (0x5001)`, `CallStateUpdate (0x4155)`, `AcceptCall (0x415B)`, `EndCall (0x415C)`.
 - **MFi Authentication Coordinator (`MfiAuthCoordinator`)**:
   - Connects to Layer 1 `IMfiSigner` interface to request signatures when receiving iPhone challenge packets.
 - **Wireless Control Plane (`Iap2WirelessControlPlane`, `Iap2ControlPlane.h`)**:

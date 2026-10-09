@@ -321,6 +321,11 @@ Core::Common::Status OverlayRenderer::Draw(uint32_t width, uint32_t height) {
     // 3. Draw Status Pill
     DrawStatusPill(static_cast<float>(width), static_cast<float>(height));
 
+    // 3.5 Draw Telephony Call Banner (if active/incoming call)
+    if (ui_state_.call_state.has_call) {
+        DrawCallBanner(static_cast<float>(width), static_cast<float>(height));
+    }
+
     // 4. Draw Settings Drawer (if open)
     if (show_settings_drawer_) {
         DrawSettingsDrawer(static_cast<float>(width), static_cast<float>(height));
@@ -401,10 +406,10 @@ void OverlayRenderer::DrawWelcomeGuide(float width, float height) {
         L"3. 选择本机蓝牙名称进行配对，并允许 CarPlay 车载与无线连接；\n"
         L"4. 系统将自动完成 iAP2 握手与 Wi-Fi AP 热点切换。\n\n"
         L"快捷键操作：\n"
-        L"• F11: 切换全屏沉浸模式\n"
-        L"• F2: 打开 / 关闭 3-Lane WASAPI 音频与视频设置\n"
-        L"• F4: 打开 / 关闭 运行日志面板\n"
-        L"• ESC 或 点击右上角 [X]: 隐藏此指引卡片";
+        L"• F1: 唤醒 / 交互 Siri (长按/按击)\n"
+        L"• F3 / Enter: 接听电话 | F4 / Esc: 挂断/拒接电话\n"
+        L"• F2: 切换音频与视频设置抽屉 | Ctrl + F4: 切换运行日志面板\n"
+        L"• F11: 全屏切换 | ESC 或 点击 [X]: 隐藏此指引卡片";
 
     D2D1_RECT_F guideRect = D2D1::RectF(cardX + 24.0f, cardY + 62.0f, cardX + cardW - 24.0f, cardY + cardH - 16.0f);
     if (brush_text_gray_ && tf_normal_) {
@@ -415,6 +420,116 @@ void OverlayRenderer::DrawWelcomeGuide(float width, float height) {
             tf_normal_.Get(),
             &guideRect,
             brush_text_gray_.Get()
+        );
+    }
+}
+
+void OverlayRenderer::DrawCallBanner(float width, float height) {
+    (void)height;
+    const auto& call = ui_state_.call_state;
+    if (!call.has_call) return;
+
+    // Centered at top, below status pill
+    const float cardW = 440.0f;
+    const float cardH = 88.0f;
+    const float cardX = (width - cardW) * 0.5f;
+    const float cardY = 56.0f;
+
+    call_card_rect_ = D2D1::RectF(cardX, cardY, cardX + cardW, cardY + cardH);
+    D2D1_ROUNDED_RECT cardRRect = D2D1::RoundedRect(call_card_rect_, 14.0f, 14.0f);
+
+    // Dark solid translucent background
+    if (brush_panel_bg_) {
+        brush_panel_bg_->SetOpacity(0.96f);
+        d2d_render_target_->FillRoundedRectangle(&cardRRect, brush_panel_bg_.Get());
+    }
+    if (brush_slider_track_) {
+        d2d_render_target_->DrawRoundedRectangle(&cardRRect, brush_slider_track_.Get(), 1.5f);
+    }
+
+    // Call status & caller name
+    std::wstring callerName = Utf8ToWide(call.display_name.empty() ? call.remote_id : call.display_name);
+    if (callerName.empty()) callerName = L"未知来电";
+
+    std::wstring statusLabel = call.is_incoming ? L"📞 来电振铃中..." : L"📞 通话中...";
+    if (call.status == 1) statusLabel = L"📞 呼叫中...";
+
+    // Draw caller name
+    D2D1_RECT_F nameRect = D2D1::RectF(cardX + 18.0f, cardY + 14.0f, cardX + 260.0f, cardY + 44.0f);
+    if (brush_text_white_ && tf_header_) {
+        brush_text_white_->SetOpacity(1.0f);
+        d2d_render_target_->DrawText(
+            callerName.c_str(),
+            static_cast<UINT32>(callerName.length()),
+            tf_header_.Get(),
+            &nameRect,
+            brush_text_white_.Get()
+        );
+    }
+
+    // Draw status / phone number
+    std::wstring subText = statusLabel;
+    if (!call.remote_id.empty() && call.remote_id != call.display_name) {
+        subText += L" (" + Utf8ToWide(call.remote_id) + L")";
+    }
+    D2D1_RECT_F subRect = D2D1::RectF(cardX + 18.0f, cardY + 48.0f, cardX + 260.0f, cardY + 74.0f);
+    if (brush_text_gray_ && tf_small_) {
+        brush_text_gray_->SetOpacity(0.95f);
+        d2d_render_target_->DrawText(
+            subText.c_str(),
+            static_cast<UINT32>(subText.length()),
+            tf_small_.Get(),
+            &subRect,
+            brush_text_gray_.Get()
+        );
+    }
+
+    // Buttons
+    // [接听 (Enter/F3)] (only if incoming)
+    // [挂断 (Esc/F4)]
+    const float btnH = 34.0f;
+    const float btnY = cardY + (cardH - btnH) * 0.5f;
+
+    if (call.is_incoming) {
+        const float acceptW = 76.0f;
+        const float acceptX = cardX + cardW - 170.0f;
+        call_accept_btn_rect_ = D2D1::RectF(acceptX, btnY, acceptX + acceptW, btnY + btnH);
+        D2D1_ROUNDED_RECT acceptRRect = D2D1::RoundedRect(call_accept_btn_rect_, 8.0f, 8.0f);
+        if (brush_status_green_) {
+            brush_status_green_->SetOpacity(0.9f);
+            d2d_render_target_->FillRoundedRectangle(&acceptRRect, brush_status_green_.Get());
+        }
+        D2D1_RECT_F acceptTextRect = D2D1::RectF(acceptX, btnY + 7.0f, acceptX + acceptW, btnY + btnH);
+        if (brush_text_white_ && tf_small_) {
+            d2d_render_target_->DrawText(
+                L"接听",
+                2,
+                tf_small_.Get(),
+                &acceptTextRect,
+                brush_text_white_.Get()
+            );
+        }
+    } else {
+        call_accept_btn_rect_ = {};
+    }
+
+    const float rejectW = 76.0f;
+    const float rejectX = cardX + cardW - 86.0f;
+    call_reject_btn_rect_ = D2D1::RectF(rejectX, btnY, rejectX + rejectW, btnY + btnH);
+    D2D1_ROUNDED_RECT rejectRRect = D2D1::RoundedRect(call_reject_btn_rect_, 8.0f, 8.0f);
+    if (brush_log_error_) {
+        brush_log_error_->SetOpacity(0.9f);
+        d2d_render_target_->FillRoundedRectangle(&rejectRRect, brush_log_error_.Get());
+    }
+    D2D1_RECT_F rejectTextRect = D2D1::RectF(rejectX, btnY + 7.0f, rejectX + rejectW, btnY + btnH);
+    const std::wstring rejectLabel = call.is_incoming ? L"拒接" : L"挂断";
+    if (brush_text_white_ && tf_small_) {
+        d2d_render_target_->DrawText(
+            rejectLabel.c_str(),
+            static_cast<UINT32>(rejectLabel.length()),
+            tf_small_.Get(),
+            &rejectTextRect,
+            brush_text_white_.Get()
         );
     }
 }
@@ -462,6 +577,12 @@ void OverlayRenderer::DrawStatusPill(float width, float height) {
             statusText = L"已连接: " + dev + L" | " +
                 std::to_wstring(w) + L"x" + std::to_wstring(h) + L" @ " +
                 std::to_wstring(fps ? fps : settings_.video.fps) + L" FPS " + codec + hwText;
+            if (ui_state_.now_playing.is_playing && !ui_state_.now_playing.title.empty()) {
+                statusText += L" | 🎵 " + Utf8ToWide(ui_state_.now_playing.title);
+                if (!ui_state_.now_playing.artist.empty()) {
+                    statusText += L" - " + Utf8ToWide(ui_state_.now_playing.artist);
+                }
+            }
             dotBrush = brush_status_green_.Get();
             break;
         }
@@ -836,6 +957,31 @@ bool OverlayRenderer::OnMouseDown(float clientX, float clientY) {
             show_settings_drawer_ = !show_settings_drawer_;
             CPS_LOG_INFO("Overlay", "Gear button clicked, show_settings_drawer_ = ", show_settings_drawer_ ? "true" : "false");
             return true;
+        }
+
+        // 1.2 Check Telephony Call Banner buttons
+        if (ui_state_.call_state.has_call) {
+            if (ui_state_.call_state.is_incoming &&
+                clientX >= call_accept_btn_rect_.left && clientX <= call_accept_btn_rect_.right &&
+                clientY >= call_accept_btn_rect_.top && clientY <= call_accept_btn_rect_.bottom) {
+                CPS_LOG_INFO("Overlay", "Call Banner [接听] clicked");
+                if (app_api_) {
+                    (void)app_api_->AcceptCall();
+                }
+                return true;
+            }
+            if (clientX >= call_reject_btn_rect_.left && clientX <= call_reject_btn_rect_.right &&
+                clientY >= call_reject_btn_rect_.top && clientY <= call_reject_btn_rect_.bottom) {
+                CPS_LOG_INFO("Overlay", "Call Banner [挂断/拒接] clicked");
+                if (app_api_) {
+                    (void)app_api_->EndCall();
+                }
+                return true;
+            }
+            if (clientX >= call_card_rect_.left && clientX <= call_card_rect_.right &&
+                clientY >= call_card_rect_.top && clientY <= call_card_rect_.bottom) {
+                return true; // Click inside call banner background consumed
+            }
         }
 
         // 1.5 Check standalone Log Panel (independent of the settings drawer)

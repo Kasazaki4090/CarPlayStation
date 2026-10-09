@@ -122,6 +122,13 @@ public:
         settings_callback_ = std::move(callback);
     }
 
+    /**
+     * @brief Set application API facade for call accept/end interactions.
+     */
+    void SetAppApi(std::shared_ptr<Application::IApplicationApi> app_api) {
+        app_api_ = std::move(app_api);
+    }
+
     void Shutdown();
 
     // --- Accessors ---
@@ -135,6 +142,7 @@ private:
     // Push palette_ into the live brushes (created in CreateDeviceResources).
     void ApplyPaletteToBrushes();
     void DrawStatusPill(float width, float height);
+    void DrawCallBanner(float width, float height);
     void DrawSettingsDrawer(float width, float height);
     void DrawWelcomeGuide(float width, float height);
     void DrawLogPanel(float width, float height);
@@ -196,6 +204,12 @@ private:
 
     // Standalone log panel: number of most-recent lines to display.
     int log_panel_line_count_{12};
+
+    // Telephony Call Floating Banner
+    D2D1_RECT_F call_card_rect_{};
+    D2D1_RECT_F call_accept_btn_rect_{};
+    D2D1_RECT_F call_reject_btn_rect_{};
+    std::shared_ptr<Application::IApplicationApi> app_api_;
 
     // Appearance follows the Windows app light/dark setting; the palette is
     // rebuilt only when that setting changes.

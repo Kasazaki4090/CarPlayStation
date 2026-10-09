@@ -2,8 +2,23 @@
 #include "VideoAdaptationHelper.h"
 #include "Core/Common/Logging.h"
 #include <cstdio>
+#include <windows.h>
 
 namespace CarPlayStation::UI {
+
+namespace {
+std::wstring Utf8ToWide(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(),
+                                         static_cast<int>(utf8.size()), nullptr, 0);
+    std::wstring wide(static_cast<std::size_t>(wlen), L'\0');
+    if (wlen > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()),
+                            wide.data(), wlen);
+    }
+    return wide;
+}
+} // namespace
 
 AppController::AppController() = default;
 
@@ -113,6 +128,7 @@ Core::Common::Status AppController::Initialize(
 
     // 4. Initialize Direct2D Overlay Renderer
     (void)overlay_.Init(renderer_.GetSwapChain(), renderer_.GetBackBufferIndex());
+    overlay_.SetAppApi(app_api_);
     overlay_.UpdateSettings(settings_);
     overlay_.SetSettingsCallback([this](const Application::AppSettings& s) {
         OnSettingsChanged(s);
@@ -377,6 +393,18 @@ void AppController::OnUiStateChanged(const Application::AppUiState& state) {
     pushed_video_height_ = state.current_video_height;
     pushed_video_fps_ = state.current_video_fps;
     pushed_video_codec_ = state.current_video_codec;
+
+    // Update window title with Now Playing track if playing
+    if (state.now_playing.is_playing && !state.now_playing.title.empty()) {
+        std::wstring title = L"🎵 " + Utf8ToWide(state.now_playing.title);
+        if (!state.now_playing.artist.empty()) {
+            title += L" — " + Utf8ToWide(state.now_playing.artist);
+        }
+        title += L" | CarPlayStation";
+        window_.SetTitle(title);
+    } else {
+        window_.SetTitle(L"CarPlayStation — Wireless CarPlay Receiver");
+    }
 
     // Persist the recorded phone (iPhone) addresses to the INI so the device
     // does not need to be re-paired on the next launch. Only write when the

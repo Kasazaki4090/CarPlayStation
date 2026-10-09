@@ -237,6 +237,17 @@ public:
      */
     [[nodiscard]] Common::Status SetNightMode(bool night_mode);
 
+    enum class SiriAction : uint8_t {
+        Prewarm = 1,
+        ButtonDown = 2,
+        ButtonUp = 3,
+    };
+
+    /**
+     * @brief Trigger or signal Siri button action over the encrypted event channel (requestSiri).
+     */
+    [[nodiscard]] Common::Status SendRequestSiri(SiriAction action);
+
     /**
      * @brief Contacts declared by the advertised uuid 1 touchscreen descriptor.
      *

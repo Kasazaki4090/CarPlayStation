@@ -101,6 +101,23 @@ public:
         return Core::Common::Status::Ok();
     }
 
+    Core::Common::Status AcceptCall(std::string_view callUuid = {}) override {
+        (void)callUuid;
+        accept_call_count_++;
+        return Core::Common::Status::Ok();
+    }
+
+    Core::Common::Status EndCall(std::string_view callUuid = {}) override {
+        (void)callUuid;
+        end_call_count_++;
+        return Core::Common::Status::Ok();
+    }
+
+    Core::Common::Status TriggerSiri(bool isPressed) override {
+        siri_records_.push_back(isPressed);
+        return Core::Common::Status::Ok();
+    }
+
     Application::AppUiState GetCurrentState() const override {
         return ui_state_;
     }
@@ -124,6 +141,9 @@ public:
     std::vector<KnobRecord> knob_records_;
     std::vector<ButtonRecord> button_records_;
     std::vector<bool> night_mode_records_;
+    std::vector<bool> siri_records_;
+    int accept_call_count_{0};
+    int end_call_count_{0};
 };
 
 } // namespace

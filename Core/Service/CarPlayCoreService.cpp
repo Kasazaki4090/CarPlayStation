@@ -180,9 +180,42 @@ public:
         return Common::Status::Ok();
     }
 
+    using ActionCallback = std::function<Common::Status()>;
+
+    void SetCallCallbacks(ActionCallback accept_fn, ActionCallback reject_fn) {
+        call_accept_fn_ = std::move(accept_fn);
+        call_reject_fn_ = std::move(reject_fn);
+    }
+
     [[nodiscard]] Common::Status SendButtonEvent(
         Input::ButtonType button,
         bool isPressed) override {
+        auto server = rtsp_server_.lock();
+        if (!server) {
+            return Common::MakeError(Common::StatusCode::Unavailable,
+                "AirPlay RTSP server is unavailable");
+        }
+
+        if (button == Input::ButtonType::Siri) {
+            auto action = isPressed ? Session::AirPlayRtspServer::SiriAction::ButtonDown
+                                    : Session::AirPlayRtspServer::SiriAction::ButtonUp;
+            return server->SendRequestSiri(action);
+        }
+
+        if (button == Input::ButtonType::CallAccept) {
+            if (isPressed && call_accept_fn_) {
+                return call_accept_fn_();
+            }
+            return Common::Status::Ok();
+        }
+
+        if (button == Input::ButtonType::CallReject) {
+            if (isPressed && call_reject_fn_) {
+                return call_reject_fn_();
+            }
+            return Common::Status::Ok();
+        }
+
         uint8_t usage = 0;
         if (isPressed) {
             switch (button) {
@@ -193,12 +226,6 @@ public:
                     return Common::MakeError(Common::StatusCode::NotSupported,
                         "This receiver does not advertise the requested HID button");
             }
-        }
-
-        auto server = rtsp_server_.lock();
-        if (!server) {
-            return Common::MakeError(Common::StatusCode::Unavailable,
-                "AirPlay RTSP server is unavailable");
         }
         return server->SendHidReport(2, Common::ByteSpan(&usage, 1));
     }
@@ -383,6 +410,8 @@ private:
     std::unique_ptr<std::thread> gesture_worker_;
     bool gesture_stop_ = false;
     uint64_t gesture_dropped_ = 0;
+    ActionCallback call_accept_fn_;
+    ActionCallback call_reject_fn_;
 };
 
 // MFi authentication message IDs (iAP2 control session, session 1).
@@ -443,6 +472,30 @@ public:
         bt_mac_ = bt_mac;
     }
 
+    void SetEventBus(CoreEventBus* bus) {
+        event_bus_ = bus;
+    }
+
+    Common::Status AcceptCall(std::string_view callUuid = {}) {
+        if (!send_fn_) {
+            return Common::MakeError(Common::StatusCode::Unavailable, "iAP2 send function unavailable");
+        }
+        std::string_view uuid = callUuid.empty() ? std::string_view(last_call_uuid_) : callUuid;
+        auto body = Protocol::Iap2MessageCatalog::BuildAcceptCall(0, uuid);
+        CPS_LOG_INFO("CoreService", "Sending iAP2 AcceptCall (0x415B) callUuid='", uuid, "'");
+        return send_fn_(Protocol::Iap2MsgId::AcceptCall, Common::ByteSpan(body.data(), body.size()));
+    }
+
+    Common::Status EndCall(std::string_view callUuid = {}) {
+        if (!send_fn_) {
+            return Common::MakeError(Common::StatusCode::Unavailable, "iAP2 send function unavailable");
+        }
+        std::string_view uuid = callUuid.empty() ? std::string_view(last_call_uuid_) : callUuid;
+        auto body = Protocol::Iap2MessageCatalog::BuildEndCall(0, uuid);
+        CPS_LOG_INFO("CoreService", "Sending iAP2 EndCall (0x415C) callUuid='", uuid, "'");
+        return send_fn_(Protocol::Iap2MsgId::EndCall, Common::ByteSpan(body.data(), body.size()));
+    }
+
     void OnIap2Message(uint8_t sessionId, Common::ByteSpan payload) override {
         // Only the control session carries MFi authentication & identification.
         if (sessionId != static_cast<uint8_t>(Protocol::Iap2SessionId::Control)) {
@@ -489,6 +542,47 @@ public:
                         rejStr += std::to_string(pid);
                     }
                     CPS_LOG_WARN("CoreService", "iAP2 IdentifyRejected (0x1D03) received from iPhone; rejected params: [", rejStr, "]");
+                    break;
+                }
+                case Protocol::Iap2MsgId::NowPlayingUpdate: { // 0x5001
+                    auto delta = Protocol::Iap2MessageCatalog::ParseNowPlayingUpdate(groups);
+                    if (delta.title) now_playing_title_ = *delta.title;
+                    if (delta.artist) now_playing_artist_ = *delta.artist;
+                    if (delta.album) now_playing_album_ = *delta.album;
+                    if (delta.playback_status) {
+                        now_playing_is_playing_ = (*delta.playback_status == 1); // 1 = Playing
+                    }
+                    if (delta.elapsed_ms) {
+                        now_playing_pos_sec_ = *delta.elapsed_ms / 1000;
+                    }
+                    CPS_LOG_INFO("CoreService", "NowPlaying: '", now_playing_title_, "' - '", now_playing_artist_,
+                                 "' (", now_playing_album_, ") status=", now_playing_is_playing_ ? "playing" : "paused",
+                                 " pos=", now_playing_pos_sec_, "s");
+                    if (event_bus_) {
+                        event_bus_->PublishNowPlaying(now_playing_title_, now_playing_artist_, now_playing_album_,
+                                                      now_playing_is_playing_, now_playing_pos_sec_);
+                    }
+                    break;
+                }
+                case Protocol::Iap2MsgId::CallStateUpdate: { // 0x4155
+                    auto call = Protocol::Iap2MessageCatalog::ParseCallStateUpdate(groups);
+                    if (call) {
+                        CPS_LOG_INFO("CoreService", "CallStateUpdate: status=", static_cast<int>(call->status),
+                                     " dir=", static_cast<int>(call->direction),
+                                     " name='", call->display_name, "' remote='", call->remote_id, "' uuid='", call->call_uuid, "'");
+                        // status: 0=Disconnected, 1=Sending/Dialing, 2=Incoming/Ringing, 3=Active/Connected, 4=Holding, 5=Disconnecting
+                        // direction: 1=Incoming, 2=Outgoing
+                        bool is_incoming = (call->direction == 1 && (call->status == 2 || call->status == 1));
+                        bool is_active = (call->status == 1 || call->status == 2 || call->status == 3 || call->status == 4);
+                        if (!call->call_uuid.empty()) {
+                            last_call_uuid_ = call->call_uuid;
+                        }
+                        if (event_bus_) {
+                            event_bus_->PublishCallState(call->remote_id, call->display_name,
+                                                         call->status, call->direction, call->call_uuid,
+                                                         is_active, is_incoming);
+                        }
+                    }
                     break;
                 }
                 default: {
@@ -696,6 +790,13 @@ private:
     std::string fallback_passphrase_{"CarPlayStationSecret123"};
     Protocol::Iap2WirelessControlPlane control_;
     Protocol::Iap2WirelessControlPlane::SessionParams session_params_;
+    CoreEventBus* event_bus_{nullptr};
+    std::string now_playing_title_;
+    std::string now_playing_artist_;
+    std::string now_playing_album_;
+    bool now_playing_is_playing_{false};
+    uint32_t now_playing_pos_sec_{0};
+    std::string last_call_uuid_;
 };
 
 } // anonymous namespace
@@ -1107,9 +1208,17 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
         handler->SetAirPlayReceiver(env_config_.network.rtsp_port != 0 ? env_config_.network.rtsp_port : 5000,
                                     device_id_, Common::ToHexCompact(ltpk));
     }
+    handler->SetEventBus(&event_bus_);
     iap2_handler_ = handler;
     if (iap2_link_) {
         iap2_link_->SetPacketHandler(iap2_handler_.get());
+    }
+
+    if (auto airplay_sink = std::dynamic_pointer_cast<AirPlayInputSink>(input_sink_)) {
+        airplay_sink->SetCallCallbacks(
+            [this]() { return AcceptCall(); },
+            [this]() { return EndCall(); }
+        );
     }
 
     // Wire Transport connection state to Session
@@ -1214,6 +1323,44 @@ Common::Status CarPlayCoreService::SetHostNightMode(bool night_mode) {
         return Common::MakeError(Common::StatusCode::InvalidState, "Core service not initialized");
     }
     return rtsp->SetNightMode(night_mode);
+}
+
+Common::Status CarPlayCoreService::AcceptCall(std::string_view callUuid) {
+    std::shared_ptr<CoreIap2PacketHandler> handler;
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        handler = std::dynamic_pointer_cast<CoreIap2PacketHandler>(iap2_handler_);
+    }
+    if (!handler) {
+        return Common::MakeError(Common::StatusCode::InvalidState, "iAP2 handler not available");
+    }
+    return handler->AcceptCall(callUuid);
+}
+
+Common::Status CarPlayCoreService::EndCall(std::string_view callUuid) {
+    std::shared_ptr<CoreIap2PacketHandler> handler;
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        handler = std::dynamic_pointer_cast<CoreIap2PacketHandler>(iap2_handler_);
+    }
+    if (!handler) {
+        return Common::MakeError(Common::StatusCode::InvalidState, "iAP2 handler not available");
+    }
+    return handler->EndCall(callUuid);
+}
+
+Common::Status CarPlayCoreService::TriggerSiri(bool isPressed) {
+    std::shared_ptr<Session::AirPlayRtspServer> rtsp;
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        rtsp = rtsp_server_;
+    }
+    if (!rtsp) {
+        return Common::MakeError(Common::StatusCode::InvalidState, "AirPlay RTSP server not available");
+    }
+    auto action = isPressed ? Session::AirPlayRtspServer::SiriAction::ButtonDown
+                            : Session::AirPlayRtspServer::SiriAction::ButtonUp;
+    return rtsp->SendRequestSiri(action);
 }
 
 Common::Status CarPlayCoreService::UpdateEnvironment(const Common::CoreEnvironmentConfig& env) {

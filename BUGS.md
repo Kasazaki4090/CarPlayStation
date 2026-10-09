@@ -234,7 +234,7 @@ No option exists in the UI to view or change video resolution (e.g. 1280x720, 19
 ### Reproduction
 
 1. Launch `CarPlayStation.exe`.
-2. Click "设置" (Settings) button.
+2. Click the Settings button.
 3. Observe that drawer only contains 4 audio sliders.
 
 ### Expected
@@ -243,7 +243,7 @@ Settings panel provides options to switch resolution, frame rate (30/60 FPS), an
 
 ### Actual
 
-The drawer was titled `音频与音量控制面板 (3-Lane WASAPI)` and had no video controls whatsoever.
+The drawer was titled `Audio & Volume Control Panel (3-Lane WASAPI)` and had no video controls whatsoever.
 
 ### Fix
 
@@ -272,7 +272,7 @@ Clicking anywhere in the settings drawer or on a slider causes the application t
 ### Reproduction
 
 1. Launch `CarPlayStation.exe`.
-2. Click "设置" (Settings) button.
+2. Click the Settings button.
 3. Click or drag a volume slider or the close button.
 4. Window freezes permanently.
 
@@ -342,8 +342,8 @@ Built and compiled cleanly with MSVC 14.44; test suite 100% passed (6/6). Ready 
 
 ### Symptom
 
-1. "按了x和设置，这个框不会关掉": When closing the settings drawer via [X] or gear button, the huge centered Welcome Guide card in the middle of the screen remained permanently visible with no way to close or hide it.
-2. "视频还没进来，是没渲染成功还是关了？": Live log revealed iPhone sent TEARDOWN for stream `type: 110, uuid: E0CB6FB0-0000-0000-0000-0000C0FFEE01` immediately upon receiving the SETUP Phase 2 response. Furthermore, receiving TEARDOWN caused the RTSP server to close the RTSP socket immediately, severing the iPhone's incoming TCP video connection at the same millisecond.
+1. "Pressed [X] and Settings, but this dialog will not close": When closing the settings drawer via [X] or gear button, the huge centered Welcome Guide card in the middle of the screen remained permanently visible with no way to close or hide it.
+2. "Video has not arrived yet, did rendering fail or was the stream closed?": Live log revealed iPhone sent TEARDOWN for stream `type: 110, uuid: E0CB6FB0-0000-0000-0000-0000C0FFEE01` immediately upon receiving the SETUP Phase 2 response. Furthermore, receiving TEARDOWN caused the RTSP server to close the RTSP socket immediately, severing the iPhone's incoming TCP video connection at the same millisecond.
 
 ### Reproduction
 
@@ -380,7 +380,7 @@ Built and compiled cleanly with MSVC 14.44; test suite 100% passed (6/6). Ready 
 
 ### Symptom
 
-"现在341的读取有问题": with a WCH CH341 (or CH347) bridge attached to an MFi
+"CH341 reads are failing": with a WCH CH341 (or CH347) bridge attached to an MFi
 coprocessor, register reads returned all `0xFF` / garbage, `FetchCertificate()`
 failed or produced a corrupt certificate, and the CH347 adapter never loaded its
 driver at all.
@@ -452,7 +452,7 @@ driver at all.
 
 ### Symptom
 
-"怎么现在连不上去了？卡(0x5703)": the iPhone connects over Bluetooth, iAP2
+"Connection fails now, stuck on (0x5703)": the iPhone connects over Bluetooth, iAP2
 authentication and identify both succeed, the accessory sends
 `AccessoryWiFiConfig` (0x5703), and then nothing happens. No station join, no
 mDNS discovery, no RTSP connection.
@@ -523,7 +523,7 @@ answering 0x5703 forever. The iPhone never advances to the CarPlay session.
 
 ## BUG-010 — iPhone never opens RTSP after `0x4301 CarPlayStartSession` (mDNS discovery silent)
 
-**Status:** Fix applied, awaiting hardware retest
+**Status:** `Fixed` (hardware verified)
 **Component:** Core/Transport (mDNS), Windows host configuration
 **Severity:** Critical
 **Found In:** `0184078`
@@ -624,13 +624,13 @@ connection on port 5000. The iPhone keeps showing the "checking" spinner.
 
 ## BUG-011 — Hardware signer reads `Invalid MFi certificate length: 65535` (coprocessor never answered)
 
-**Status:** `Fix applied (second round: combined I2C transactions), awaiting hardware retest`
+**Status:** `Fixed` (hardware verified)
 
 **Date:** 2026-10-07
 
 ### Symptom
 
-"读取了，但没拉起来？" With `BackendType=2` the CH341 backend loads and is
+"Certificate read succeeded, but session was not brought up": With `BackendType=2` the CH341 backend loads and is
 selected (`MFi signer active: HardwareI2C: driver=0 slave=0x11`), the Bluetooth
 link comes up, iAP2 reaches `0xAA00 MfiMsgReqAuthCert` — and 7 ms later the log
 says:
@@ -766,7 +766,7 @@ That produced two more findings.
 
 ## BUG-012 — Bus scan reported every address as present; reset pulse could be a silent no-op
 
-**Status:** `Fix applied, awaiting hardware retest`
+**Status:** `Fixed` (hardware verified)
 
 **Date:** 2026-10-07
 

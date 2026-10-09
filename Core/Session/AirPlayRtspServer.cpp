@@ -530,6 +530,20 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
         return ok;
     }
 
+    bool SendRequestSiri(AirPlayRtspServer::SiriAction action) {
+        using namespace Pairing;
+        BplistDict params;
+        params.emplace_back("siriAction", BplistValue(static_cast<uint64_t>(action)));
+        BplistDict d;
+        d.emplace_back("type", BplistValue("requestSiri"));
+        d.emplace_back("params", BplistValue(std::move(params)));
+        auto body = BplistEncoder::Encode(BplistValue(d));
+        bool ok = SendEventCommand(body);
+        CPS_LOG_INFO("AirPlayRtsp", "Sent event command: requestSiri (siriAction=",
+                     static_cast<int>(action), "), success=", ok ? "true" : "false");
+        return ok;
+    }
+
     // The host's appearance at the moment this session was created. The event channel
     // only exists after the phone connects, so the value has to be remembered and sent
     // as soon as it is usable.
@@ -1018,6 +1032,30 @@ public:
         if (sent) return Common::Status::Ok();
         return Common::MakeError(Common::StatusCode::Unavailable,
             "No active AirPlay event channel is available for setNightMode");
+    }
+
+    Common::Status SendRequestSiri(SiriAction action) {
+        std::vector<std::shared_ptr<ClientSession>> candidates;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            candidates.reserve(sessions_.size());
+            for (const auto& [socket, session] : sessions_) {
+                (void)socket;
+                candidates.push_back(session);
+            }
+        }
+
+        bool sent = false;
+        for (const auto& session : candidates) {
+            if (session->HasEventChannel()) {
+                if (session->SendRequestSiri(action)) {
+                    sent = true;
+                }
+            }
+        }
+        if (sent) return Common::Status::Ok();
+        return Common::MakeError(Common::StatusCode::Unavailable,
+            "No active AirPlay event channel is available for requestSiri");
     }
 
     RtspResponse ProcessSimulatedRequest(const RtspRequest& req) {
@@ -2307,6 +2345,10 @@ Common::Status AirPlayRtspServer::SendHidReport(uint32_t deviceUid, Common::Byte
 
 Common::Status AirPlayRtspServer::SetNightMode(bool night_mode) {
     return impl_->SetNightMode(night_mode);
+}
+
+Common::Status AirPlayRtspServer::SendRequestSiri(SiriAction action) {
+    return impl_->SendRequestSiri(action);
 }
 
 int AirPlayRtspServer::hid_touch_contacts() const noexcept {

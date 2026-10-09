@@ -344,26 +344,34 @@ bool Win32InputRouter::HandleKeyboard(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
     const bool isPressed = (msg == WM_KEYDOWN);
 
+    // Ctrl + F4 toggles the standalone log panel (to prevent accidental trigger)
+    if (wParam == VK_F4 && (GetKeyState(VK_CONTROL) & 0x8000) && isPressed && overlay_) {
+        overlay_->ToggleLogPanel();
+        return true;
+    }
+
     // F2 toggles overlay settings drawer
     if (wParam == VK_F2 && isPressed && overlay_) {
         overlay_->ToggleSettingsDrawer();
         return true;
     }
 
-    // F4 toggles the standalone log panel
-    if (wParam == VK_F4 && isPressed && overlay_) {
-        overlay_->ToggleLogPanel();
-        return true;
-    }
+    // Context-sensitive call handling for Enter and Esc
+    const auto ui_state = app_api_->GetCurrentState();
+    const bool has_call = ui_state.call_state.has_call;
 
     // ESC closes settings drawer or welcome guide if visible
-    if (wParam == VK_ESCAPE && isPressed && overlay_) {
-        if (overlay_->IsSettingsDrawerOpen()) {
+    if (wParam == VK_ESCAPE && isPressed) {
+        if (overlay_ && overlay_->IsSettingsDrawerOpen()) {
             overlay_->ToggleSettingsDrawer();
             return true;
         }
-        if (overlay_->IsWelcomeGuideVisible()) {
+        if (overlay_ && overlay_->IsWelcomeGuideVisible()) {
             overlay_->DismissWelcomeGuide();
+            return true;
+        }
+        if (has_call) {
+            (void)app_api_->EndCall();
             return true;
         }
     }
@@ -399,10 +407,14 @@ bool Win32InputRouter::HandleKeyboard(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             (void)app_api_->ForwardKnobEvent(Core::Input::KnobAction::PressRight, 1);
             return true;
 
-        // Rotary knob select / push
+        // Rotary knob select / push or Call Accept
         case VK_RETURN:
             // Ignore Alt+Enter (handled by MainWindow for fullscreen)
             if (!(GetKeyState(VK_MENU) & 0x8000)) {
+                if (has_call && ui_state.call_state.is_incoming) {
+                    (void)app_api_->AcceptCall();
+                    return true;
+                }
                 (void)app_api_->ForwardKnobEvent(Core::Input::KnobAction::PushDown, 1);
                 return true;
             }

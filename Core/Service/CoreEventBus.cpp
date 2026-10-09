@@ -68,6 +68,20 @@ void CoreEventBus::PublishDeviceConnected(std::string bluetooth_mac, std::string
     Publish(DeviceConnectedEvent{std::move(bluetooth_mac), std::move(wifi_mac), std::move(device_name)});
 }
 
+void CoreEventBus::PublishCallState(std::string remote_id, std::string display_name,
+                                    uint8_t status, uint8_t direction, std::string call_uuid,
+                                    bool is_active, bool is_incoming) {
+    Publish(CallStateEvent{
+        std::move(remote_id),
+        std::move(display_name),
+        status,
+        direction,
+        std::move(call_uuid),
+        is_active,
+        is_incoming
+    });
+}
+
 size_t CoreEventBus::ListenerCount() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return listeners_.size();

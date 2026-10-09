@@ -305,6 +305,27 @@ Core::Common::Status ApplicationService::ForwardButtonEvent(
     return sink->SendButtonEvent(button, isPressed);
 }
 
+Core::Common::Status ApplicationService::AcceptCall(std::string_view callUuid) {
+    if (!core_api_) {
+        return Core::Common::MakeError(Core::Common::StatusCode::InvalidState, "Core API not available");
+    }
+    return core_api_->AcceptCall(callUuid);
+}
+
+Core::Common::Status ApplicationService::EndCall(std::string_view callUuid) {
+    if (!core_api_) {
+        return Core::Common::MakeError(Core::Common::StatusCode::InvalidState, "Core API not available");
+    }
+    return core_api_->EndCall(callUuid);
+}
+
+Core::Common::Status ApplicationService::TriggerSiri(bool isPressed) {
+    if (!core_api_) {
+        return Core::Common::MakeError(Core::Common::StatusCode::InvalidState, "Core API not available");
+    }
+    return core_api_->TriggerSiri(isPressed);
+}
+
 Core::Common::Status ApplicationService::SetHostNightMode(bool night_mode) {
     // Pure pass-through: Core owns the event channel and the remembered value.
     return core_api_->SetHostNightMode(night_mode);
@@ -334,10 +355,39 @@ void ApplicationService::OnCoreEvent(const Core::Service::CoreEvent& event) {
             ui_state_.session_state = conn.new_state;
             ui_state_.is_streaming = (conn.new_state == Core::Session::SessionState::AirPlayStreaming);
             ui_state_.status_message = std::string(Core::Session::SessionStateToString(conn.new_state));
+            if (!ui_state_.is_streaming) {
+                ui_state_.now_playing = {};
+                ui_state_.call_state = {};
+            }
         }
         else if (std::holds_alternative<Core::Service::NowPlayingEvent>(event)) {
             auto& np = std::get<Core::Service::NowPlayingEvent>(event);
-            ui_state_.status_message = np.track_title + " — " + np.artist;
+            ui_state_.now_playing.title = np.track_title;
+            ui_state_.now_playing.artist = np.artist;
+            ui_state_.now_playing.album = np.album;
+            ui_state_.now_playing.is_playing = np.is_playing;
+            ui_state_.now_playing.position_seconds = np.position_seconds;
+            if (np.is_playing && !np.track_title.empty()) {
+                ui_state_.status_message = np.track_title + " — " + np.artist;
+            }
+        }
+        else if (std::holds_alternative<Core::Service::CallStateEvent>(event)) {
+            auto& call = std::get<Core::Service::CallStateEvent>(event);
+            ui_state_.call_state.remote_id = call.remote_id;
+            ui_state_.call_state.display_name = call.display_name.empty() ? call.remote_id : call.display_name;
+            ui_state_.call_state.status = call.status;
+            ui_state_.call_state.direction = call.direction;
+            ui_state_.call_state.call_uuid = call.call_uuid;
+            ui_state_.call_state.has_call = call.is_active;
+            ui_state_.call_state.is_incoming = call.is_incoming;
+
+            if (call.is_incoming) {
+                ui_state_.status_message = "来电: " + ui_state_.call_state.display_name;
+            } else if (call.is_active) {
+                ui_state_.status_message = "通话中: " + ui_state_.call_state.display_name;
+            } else {
+                ui_state_.status_message = "通话结束";
+            }
         }
         else if (std::holds_alternative<Core::Service::AudioRouteChangedEvent>(event)) {
             auto& route = std::get<Core::Service::AudioRouteChangedEvent>(event);

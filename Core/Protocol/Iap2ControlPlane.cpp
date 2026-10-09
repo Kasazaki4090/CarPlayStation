@@ -161,6 +161,11 @@ Iap2WirelessControlPlane::OnControlMessage(uint16_t msgId, Common::ByteSpan body
             CPS_LOG_DEBUG(kLogTag, id, " CarPlay session message received");
             break;
         }
+        case Iap2MsgId::NowPlayingUpdate:
+        case Iap2MsgId::CallStateUpdate: {
+            // Handled by CoreService packet handler
+            break;
+        }
         default:
             break;
     }

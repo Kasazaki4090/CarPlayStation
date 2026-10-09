@@ -977,7 +977,7 @@ required hand-editing a config file.
    `host:port`, the port as `1..65535`, and rejects a host containing a URL scheme.
 4. **The wizard offers one network option, not two.** The TCP signing daemon and the Remote MFi HTTP service are the
    same thing from the user's point of view — a signing service reached over the network — so the first-run wizard
-   shows a single "网络 MFi 认证服务" radio with one shared address/port/token field set. *(Amended below: the
+   shows a single "Network MFi Authentication Service" radio with one shared address/port/token field set. *(Amended below: the
    protocol sub-selector that briefly accompanied this, and the TCP backend itself, have since been removed.)*
 5. **`protocolMajor` is mapped onto the existing chip-identity fields.** `MFiChipInfo` has no protocol field, and
    `Core/Session/Pairing/AuthSetup.h` selects the v2 vs v3 digest from `chip_id` bits 16-23 or from substrings of
@@ -1172,7 +1172,7 @@ Negative / limitations:
 ### Context
 
 `DEC-012` made the window, letterbox bars and HUD follow the Windows light/dark setting. The user's reaction was that
-nothing had changed, and the follow-up made the actual goal explicit: "是通知carplay变化主题，跟windows和app界面一起变化即可"
+nothing had changed, and the follow-up made the actual goal explicit: "Notify CarPlay of the theme change so it changes synchronously with Windows and the app UI"
 — tell CarPlay to change its theme so it changes together with Windows and the app.
 
 That is a different thing from recolouring our own drawing. The pixels on screen are rendered by the iPhone and arrive

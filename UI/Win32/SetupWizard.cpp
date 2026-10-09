@@ -61,11 +61,32 @@ int Scaled(UINT dpi, int design) {
 HFONT CreateScaledUiFont(UINT dpi) {
     NONCLIENTMETRICSW ncm{};
     ncm.cbSize = sizeof(ncm);
+
+    // Prefer SystemParametersInfoForDpi (Windows 10 1607+) so non-client metrics
+    // are queried directly at the target DPI without double-scaling.
+    using SystemParametersInfoForDpiFn = BOOL(WINAPI*)(UINT, UINT, PVOID, UINT, UINT);
+    static auto pfnSystemParametersInfoForDpi = reinterpret_cast<SystemParametersInfoForDpiFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "SystemParametersInfoForDpi"));
+
+    if (pfnSystemParametersInfoForDpi) {
+        if (pfnSystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, dpi)) {
+            return CreateFontIndirectW(&ncm.lfMessageFont);
+        }
+    }
+
     if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0) == 0) {
         return nullptr;
     }
+
     LOGFONTW lf = ncm.lfMessageFont;
-    lf.lfHeight = MulDiv(lf.lfHeight, static_cast<int>(dpi), kBaseDpi);
+    using GetDpiForSystemFn = UINT(WINAPI*)();
+    static auto pfnGetDpiForSystem = reinterpret_cast<GetDpiForSystemFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForSystem"));
+    UINT sysDpi = pfnGetDpiForSystem ? pfnGetDpiForSystem() : static_cast<UINT>(kBaseDpi);
+    if (sysDpi == 0) {
+        sysDpi = kBaseDpi;
+    }
+    lf.lfHeight = MulDiv(lf.lfHeight, static_cast<int>(dpi), static_cast<int>(sysDpi));
     return CreateFontIndirectW(&lf);
 }
 
@@ -496,7 +517,7 @@ static LRESULT CALLBACK DisclaimerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 L"2. 本软件仅供车载辅助互联与导航显示，驾驶员须全程保持专注于路况。\r\n"
                 L"3. 点击确认即代表您已充分知晓并承诺安全驾驶。",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                24, 20, 480, 110,
+                24, 20, 492, 120,
                 hwnd, nullptr
             );
 
@@ -506,7 +527,7 @@ static LRESULT CALLBACK DisclaimerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 0, L"BUTTON",
                 L"我已熟知，下次启动不再提示",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                24, 140, 280, 24,
+                24, 150, 280, 26,
                 hwnd, (HMENU)101
             );
 
@@ -516,7 +537,7 @@ static LRESULT CALLBACK DisclaimerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
                 0, L"BUTTON",
                 L"确认进入 (5s)",
                 WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_DEFPUSHBUTTON,
-                340, 138, 160, 32,
+                336, 146, 180, 34,
                 hwnd, (HMENU)IDOK
             );
 
@@ -603,7 +624,7 @@ bool SetupWizard::ShowSafetyDisclaimer(HWND parent, bool headless) {
     int width = 0;
     int height = 0;
     ScaledWindowSize(ctx.dpi, WS_POPUP | WS_CAPTION | WS_SYSMENU,
-                     WS_EX_DLGMODALFRAME, 540, 230, width, height);
+                     WS_EX_DLGMODALFRAME, 540, 210, width, height);
     int posX = parentRc.left + ((parentRc.right - parentRc.left) - width) / 2;
     int posY = parentRc.top + ((parentRc.bottom - parentRc.top) - height) / 2;
 
@@ -789,7 +810,7 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 L"【法律合规声明】本软件为中立开源互联引擎，不内置任何专有证书或私钥材料。"
                 L"请依据自身环境选择合适的方式：",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                24, 16, 520, 64,
+                24, 16, 540, 80,
                 hwnd, nullptr
             );
 
@@ -799,7 +820,7 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 0, L"BUTTON",
                 L"1. 本地证书/私钥文件导入 (LocalFile: 默认读取 certs/ 目录)",
                 WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
-                24, 88, 500, 24,
+                24, 104, 540, 24,
                 hwnd, (HMENU)201
             );
 
@@ -810,7 +831,7 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 0, L"BUTTON",
                 L"选择证书文件 (.p7b)…",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-                40, 116, 150, 26,
+                40, 134, 165, 26,
                 hwnd, (HMENU)210
             );
             ctx->hwnd_lbl_cert = CreateScaledChild(
@@ -818,7 +839,7 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 0, L"STATIC",
                 L"(未选择证书文件)",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                196, 120, 348, 20,
+                215, 137, 345, 20,
                 hwnd, nullptr
             );
 
@@ -827,7 +848,7 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 0, L"BUTTON",
                 L"选择私钥文件 (.pk8)…",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
-                40, 146, 150, 26,
+                40, 166, 165, 26,
                 hwnd, (HMENU)211
             );
             ctx->hwnd_lbl_key = CreateScaledChild(
@@ -835,7 +856,7 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 0, L"STATIC",
                 L"(未选择私钥文件)",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                196, 150, 348, 20,
+                215, 169, 345, 20,
                 hwnd, nullptr
             );
 
@@ -845,49 +866,49 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 0, L"BUTTON",
                 L"2. 网络 MFi 认证服务 (远程签名服务, 需填写服务地址与端口)",
                 WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-                24, 176, 500, 24,
+                24, 200, 540, 24,
                 hwnd, (HMENU)202
             );
             CreateScaledChild(
                 ctx->dpi, ctx->font,
                 0, L"STATIC", L"服务地址:",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                40, 208, 56, 20,
+                40, 232, 64, 20,
                 hwnd, nullptr
             );
             ctx->hwnd_edit_host = CreateScaledChild(
                 ctx->dpi, ctx->font,
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-                100, 206, 200, 22,
+                108, 230, 196, 24,
                 hwnd, (HMENU)222
             );
             CreateScaledChild(
                 ctx->dpi, ctx->font,
                 0, L"STATIC", L"端口:",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                312, 208, 36, 20,
+                314, 232, 40, 20,
                 hwnd, nullptr
             );
             ctx->hwnd_edit_port = CreateScaledChild(
                 ctx->dpi, ctx->font,
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP,
-                350, 206, 60, 22,
+                358, 230, 60, 24,
                 hwnd, (HMENU)223
             );
             CreateScaledChild(
                 ctx->dpi, ctx->font,
                 0, L"STATIC", L"令牌(可选):",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                40, 238, 80, 20,
+                40, 264, 84, 20,
                 hwnd, nullptr
             );
             ctx->hwnd_edit_token = CreateScaledChild(
                 ctx->dpi, ctx->font,
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP,
-                124, 236, 286, 22,
+                128, 262, 290, 24,
                 hwnd, (HMENU)224
             );
             CreateScaledChild(
@@ -895,7 +916,7 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 0, L"STATIC",
                 L"提示: 服务提供 GET /mfi/certificate、POST /mfi/sign、POST /mfi/reset。",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                40, 264, 500, 20,
+                40, 294, 520, 22,
                 hwnd, nullptr
             );
 
@@ -905,7 +926,7 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 0, L"BUTTON",
                 L"3. 物理 USB-to-I2C 桥接芯片 (HardwareI2C: CH341/CH347/FTDI)",
                 WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
-                24, 290, 500, 24,
+                24, 324, 540, 24,
                 hwnd, (HMENU)203
             );
 
@@ -935,7 +956,7 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 0, L"BUTTON",
                 L"确定并进入",
                 WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
-                380, 322, 140, 32,
+                394, 360, 146, 34,
                 hwnd, (HMENU)IDOK
             );
 
@@ -1050,7 +1071,7 @@ bool SetupWizard::ShowMFiWizard(HWND parent, Application::AppSettings& settings,
     int width = 0;
     int height = 0;
     ScaledWindowSize(ctx.dpi, WS_POPUP | WS_CAPTION | WS_SYSMENU,
-                     WS_EX_DLGMODALFRAME, 570, 400, width, height);
+                     WS_EX_DLGMODALFRAME, 580, 414, width, height);
     int posX = parentRc.left + ((parentRc.right - parentRc.left) - width) / 2;
     int posY = parentRc.top + ((parentRc.bottom - parentRc.top) - height) / 2;
 

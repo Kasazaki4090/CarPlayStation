@@ -168,7 +168,47 @@ Unreal Engine UI
 
 ## Detailed Architecture
 
-Detailed protocol flows, session states, transport behavior, media pipelines and other implementation details should be added here as the project develops.
+### 1. Transport & Session Lifecycle Flow
+```text
+[Bluetooth RFCOMM]
+   │  (AF_BTH channel 1, Wireless iAP2 SDP record)
+   ▼
+[iAP2 Link Setup (0xFF 0x5A)]
+   │  SYN -> ACK/SYN -> ACK -> DETECT -> StartIdentification (0x1D00)
+   ▼
+[MFi Challenge / Certificate Exchange]
+   │  ReqAuthCert (0xAA00) -> Cert (0xAA01) -> ReqAuthChallenge (0xAA02) -> Response (0xAA03)
+   ▼
+[Accessory Identification (0x1D01) & Subscriptions]
+   │  IdentifyAccepted (0x1D02) -> Subscriptions (0x5000, 0x4154, 0x4157, 0x5200, 0xAE00)
+   ▼
+[Wi-Fi SoftAP Handoff (0x5702 / 0x5703)]
+   │  Accessory provides SSID & WPA2 passphrase -> iPhone associates to Windows Hotspot
+   ▼
+[mDNS / DNS-SD & AirPlay Control Connect]
+   │  Accessory advertises _airplay._tcp & _carplay-ctrl._tcp -> Dials iPhone ephemeral control port
+   ▼
+[AirPlay RTSP Handshake]
+   │  POST /pair-setup / pair-verify (SRP / Ed25519) -> OPTIONS -> /info -> SETUP phase 1 & 2 -> RECORD
+   ▼
+[Media Streaming & Multiplexed Input]
+   ├─ TCP 7100: Encrypted H.264/HEVC Video Stream -> libmpv -> D3D11 Shared Texture Render
+   ├─ UDP 7000/7001/7002: 3-Lane Audio Downlink (Media/Nav/Siri) -> fdk-aac -> WASAPI Shared Mode Pump
+   ├─ UDP Uplink: PC Microphone Capture -> Opus/AAC-ELD Encrypt -> RTP -> iPhone
+   └─ Encrypted Event Channel: Touch/HID reports, requestSiri, setNightMode, Call Controls
+```
+
+### 2. Media Pipeline & Clock Resynchronization
+* **Video Pipeline**: TCP 7100 receives 128-byte header frames containing AVCC length-prefixed NALUs. Frames are decrypted via ChaCha20-Poly1305 with per-connection monotonic counter, converted to Annex-B (`00 00 00 01`), and pushed to libmpv's custom stream buffer (`carplay://video`). Libmpv runs with `untimed=yes`, `cache=no`, and `video-latency-hacks=yes` to guarantee ultra-low display latency (<50ms).
+* **Audio Pipeline**: 3 independent software mix lanes (`MainMedia`, `AltNavigation`, `SiriTelephony`) render over a non-exclusive WASAPI Shared Mode device. Jitter and clock drift between iPhone RTP packets and host soundcards are absorbed using bounded playback FIFOs and pre-buffered event-driven WASAPI render pumps.
+
+### 3. Wired CarPlay & Platform Feasibility Note (x86/x64 vs ARM64)
+* **The xHCI Dual-Role / Device Mode Reality on x86/x64**:
+  * Intel architecture specifications define the xDCI (Synopsys DesignWare USB 3.0 Device Controller Interface, [Intel Developer Zone](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-atom-processor-for-smartphone-and-tablet-usb-otg-xdci-driver.html)) capable of USB Dual-Role / OTG operation in silicon.
+  * However, on consumer PC motherboards and laptops (x86/x64), **OEM BIOS/UEFI firmware universally disables or hides the xDCI Device Mode option**, forcing the USB controller into exclusive xHCI Host Mode. Windows on x86/x64 also lacks native inbox USB Function/Device controller drivers for host-to-host Type-C cables.
+  * Consequently, **native direct USB-to-USB wired CarPlay is not feasible on x86/x64 Windows PCs**. Direct USB Device Mode support in the Windows ecosystem is realistic only on **Windows on ARM64** devices (e.g. Snapdragon X Elite / QC chips with exposed UDC/Dual-Role controllers) or via external bridge hardware (e.g. RP2350 / Linux SBC running NCM/CDC composite).
+
+---
 
 ## Documentation Corrections
 

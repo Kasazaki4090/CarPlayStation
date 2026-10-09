@@ -53,6 +53,10 @@ public:
         Core::Input::ButtonType button,
         bool isPressed) override;
 
+    [[nodiscard]] Core::Common::Status AcceptCall(std::string_view callUuid = {}) override;
+    [[nodiscard]] Core::Common::Status EndCall(std::string_view callUuid = {}) override;
+    [[nodiscard]] Core::Common::Status TriggerSiri(bool isPressed) override;
+
     [[nodiscard]] Core::Common::Status SetHostNightMode(bool night_mode) override;
 
     [[nodiscard]] AppUiState GetCurrentState() const override;

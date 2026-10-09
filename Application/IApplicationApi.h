@@ -11,6 +11,24 @@
 
 namespace CarPlayStation::Application {
 
+struct NowPlayingUi {
+    std::string title;
+    std::string artist;
+    std::string album;
+    bool is_playing{false};
+    uint32_t position_seconds{0};
+};
+
+struct CallStateUi {
+    std::string remote_id;     // Phone number
+    std::string display_name;  // Contact name or number
+    std::string call_uuid;
+    uint8_t status{0};         // 0=Disconnected, 1=Dialing, 2=Ringing, 3=Active, etc.
+    uint8_t direction{0};      // 1=Incoming, 2=Outgoing
+    bool has_call{false};      // Call session in progress (ringing or active)
+    bool is_incoming{false};   // Specifically incoming ring
+};
+
 struct AppUiState {
     Core::Session::SessionState session_state{Core::Session::SessionState::Idle};
     std::string connected_device_name;
@@ -25,6 +43,10 @@ struct AppUiState {
     std::string connected_device_bt_mac;   // iPhone Bluetooth MAC
     std::string connected_device_wifi_mac; // iPhone Wi-Fi MAC (SoftAP station)
     AppSettings active_settings;          // Snapshot of last-applied user settings
+
+    // Now Playing & Telephony states
+    NowPlayingUi now_playing;
+    CallStateUi call_state;
 };
 
 using UiStateChangeCallback = std::function<void(const AppUiState& state)>;
@@ -64,6 +86,11 @@ public:
     [[nodiscard]] virtual Core::Common::Status ForwardTouchEvent(Core::Input::TouchAction action, const Core::Input::TouchPoint& point) = 0;
     [[nodiscard]] virtual Core::Common::Status ForwardKnobEvent(Core::Input::KnobAction action, uint32_t stepCount = 1) = 0;
     [[nodiscard]] virtual Core::Common::Status ForwardButtonEvent(Core::Input::ButtonType button, bool isPressed) = 0;
+
+    // Telephony & Voice Assistant controls
+    [[nodiscard]] virtual Core::Common::Status AcceptCall(std::string_view callUuid = {}) = 0;
+    [[nodiscard]] virtual Core::Common::Status EndCall(std::string_view callUuid = {}) = 0;
+    [[nodiscard]] virtual Core::Common::Status TriggerSiri(bool isPressed) = 0;
 
     // Tell the phone which appearance the host window is showing (CarPlay night mode).
     // night_mode = true means dark. The value is remembered by Core and re-sent to the

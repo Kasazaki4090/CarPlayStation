@@ -73,6 +73,15 @@ public:
     void ApplyTheme(UiTheme theme);
 
     /**
+     * @brief Set window title text.
+     */
+    void SetTitle(const std::wstring& title) {
+        if (hwnd_) {
+            SetWindowTextW(hwnd_, title.c_str());
+        }
+    }
+
+    /**
      * @brief Run a non-blocking pump iteration of window messages.
      * @return false if WM_QUIT received, true otherwise.
      */

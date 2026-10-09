@@ -49,13 +49,25 @@ struct DeviceConnectedEvent {
     std::string device_name;    // Human-readable device name, if known
 };
 
+// Emitted when call state changes (0x4155 CallStateUpdate).
+struct CallStateEvent {
+    std::string remote_id;       // phone number
+    std::string display_name;    // contact name
+    uint8_t status{0};           // raw iAP2 status
+    uint8_t direction{0};        // 1=Incoming, 2=Outgoing
+    std::string call_uuid;
+    bool is_active{false};
+    bool is_incoming{false};
+};
+
 // Variant type for all Core events.
 using CoreEvent = std::variant<
     ConnectionStateChangedEvent,
     NowPlayingEvent,
     AlbumArtworkEvent,
     AudioRouteChangedEvent,
-    DeviceConnectedEvent
+    DeviceConnectedEvent,
+    CallStateEvent
 >;
 
 using CoreEventCallback = std::function<void(const CoreEvent&)>;
@@ -112,6 +124,11 @@ public:
     // Convenience: publish a device-connected event (recorded phone addresses).
     void PublishDeviceConnected(std::string bluetooth_mac, std::string wifi_mac,
                                 std::string device_name = {});
+
+    // Convenience: publish a call state event.
+    void PublishCallState(std::string remote_id, std::string display_name,
+                         uint8_t status, uint8_t direction, std::string call_uuid,
+                         bool is_active, bool is_incoming);
 
     // Number of currently registered listeners.
     [[nodiscard]] size_t ListenerCount() const noexcept;

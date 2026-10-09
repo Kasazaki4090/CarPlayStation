@@ -178,6 +178,46 @@ public:
     [[nodiscard]] static Common::ByteBuffer BuildStartCommunicationsUpdates();
     [[nodiscard]] static Common::ByteBuffer BuildStartCallState();
 
+    // Build AcceptCall (0x415B) body. AcceptAction: 0=Accept/HoldAndAccept, 1=EndAndAccept.
+    [[nodiscard]] static Common::ByteBuffer BuildAcceptCall(uint8_t acceptAction = 0, std::string_view callUuid = {});
+
+    // Build EndCall (0x415C) body. EndAction: 0=End/Decline, 1=EndAll.
+    [[nodiscard]] static Common::ByteBuffer BuildEndCall(uint8_t endAction = 0, std::string_view callUuid = {});
+
+    // NowPlaying delta update parsed from 0x5001.
+    struct NowPlayingDelta {
+        std::optional<std::string> title;
+        std::optional<std::string> artist;
+        std::optional<std::string> album;
+        std::optional<std::string> genre;
+        std::optional<std::string> composer;
+        std::optional<uint32_t> duration_ms;
+        std::optional<uint16_t> track_number;
+        std::optional<uint16_t> track_count;
+        std::optional<uint32_t> elapsed_ms;
+        std::optional<uint8_t> playback_status; // 0=Stopped, 1=Playing, 2=Paused, 3=SeekForward, 4=SeekBackward
+        std::optional<std::string> app_name;
+        std::optional<std::string> app_bundle_id;
+    };
+    [[nodiscard]] static NowPlayingDelta ParseNowPlayingUpdate(Common::ByteSpan body);
+
+    // Call state update parsed from 0x4155.
+    struct CallStateInfo {
+        std::string remote_id;       // pid 0, phone number
+        std::string display_name;    // pid 1, contact name
+        uint8_t status = 0;          // pid 2: 0=Disconnected, 1=Active/Sending, 2=Incoming/Ringing...
+        uint8_t direction = 0;       // pid 3: 1=Incoming, 2=Outgoing
+        std::string call_uuid;       // pid 4
+        std::string address_book_id; // pid 6
+        std::string label;           // pid 7
+        uint8_t service = 0;         // pid 8
+        bool is_conferenced = false; // pid 9
+        uint8_t conference_group = 0;// pid 10
+        uint8_t disconnect_reason = 0;// pid 11
+        uint64_t start_timestamp = 0;// pid 12
+    };
+    [[nodiscard]] static std::optional<CallStateInfo> ParseCallStateUpdate(Common::ByteSpan body);
+
     // --- CarPlay session handshake (0x4300 -> 0x4301) -------------------------
     struct CarPlayAvailabilityInfo {
         bool hasWired = false;
