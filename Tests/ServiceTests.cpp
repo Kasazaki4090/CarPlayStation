@@ -488,6 +488,36 @@ void TestApplicationServiceApplySettingsNotRunning() {
     std::cout << "[PASS] TestApplicationServiceApplySettingsNotRunning\n";
 }
 
+// The host appearance must be accepted before the protocol stack exists.
+// Regression test: the UI pushes the theme while building the window, which
+// happens before ApplicationService::StartCarPlay() creates the RTSP server.
+// Dropping that request used to leave the phone in its own appearance forever.
+void TestHostNightModeBeforeInitialize() {
+    auto mock_session = std::make_shared<MockSession>();
+    auto mock_decoder = std::make_shared<MockVideoDecoder>();
+    auto mock_audio = std::make_shared<MockAudioPipeline>();
+    auto mock_input = std::make_shared<MockInputSink>();
+
+    auto service = MakeMockCoreService(mock_session, mock_decoder, mock_audio, mock_input);
+
+    // No RTSP server yet: the request is remembered, not rejected.
+    auto status = service->SetHostNightMode(true);
+    assert(status.IsOk());
+
+    Core::Common::CoreEnvironmentConfig env;
+    env.identity.device_name = "TestDevice";
+    assert(service->Initialize(env).IsOk());
+
+    // The remembered value has been replayed into the RTSP server. There is no
+    // event channel yet, so the write reports Unavailable instead of InvalidState.
+    status = service->SetHostNightMode(false);
+    assert(status.Code() != Core::Common::StatusCode::InvalidState);
+
+    service->Stop();
+
+    std::cout << "[PASS] TestHostNightModeBeforeInitialize\n";
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -498,6 +528,7 @@ int main() {
     TestCoreEventBus();
     TestCoreEventBusMultipleListeners();
     TestCarPlayCoreServiceWithMocks();
+    TestHostNightModeBeforeInitialize();
     TestApplicationServiceWithMocks();
     TestApplicationServiceUiStateCallback();
     TestApplicationServiceDoubleStart();

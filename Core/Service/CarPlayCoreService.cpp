@@ -928,6 +928,17 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
         }
         rtsp_server_ = std::make_shared<Session::AirPlayRtspServer>(rtsp_opts);
 
+        // UI 可能早于本次初始化就推送过主题（启动时先建窗口，后启动协议栈）。
+        // 把记住的主机偏好补发给刚创建的 RTSP 服务器；之后每条事件通道
+        // 建立时都会由它自动下发 setNightMode。
+        if (host_night_mode_known_) {
+            (void)rtsp_server_->SetNightMode(host_night_mode_);
+            Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+                std::string("Replayed remembered host night mode (nightMode=") +
+                (host_night_mode_ ? "true" : "false") +
+                ") to the RTSP server; it is sent when the event channel opens");
+        }
+
         // Persistent mDNS advertiser: owned by the service so it can keep
         // broadcasting for the whole service lifetime (continuous discovery),
         // not just during an active session.
@@ -1315,12 +1326,17 @@ Common::Status CarPlayCoreService::SetHostNightMode(bool night_mode) {
     std::shared_ptr<Session::AirPlayRtspServer> rtsp;
     {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        // 先记住请求值：UI 可能在 Core 初始化之前（启动时先建窗口，后启动
+        // 协议栈）就推送主题，记住的值会在 RTSP 服务器创建时补发。
+        host_night_mode_known_ = true;
+        host_night_mode_ = night_mode;
         rtsp = rtsp_server_;
     }
     // The RTSP server owns the event channel and remembers the value, so a call
     // before any phone is connected still reaches it on the next session.
     if (!rtsp) {
-        return Common::MakeError(Common::StatusCode::InvalidState, "Core service not initialized");
+        // 协议栈尚未启动：值已记录，Initialize() 会自动下发。
+        return Common::Status::Ok();
     }
     return rtsp->SetNightMode(night_mode);
 }

@@ -1192,6 +1192,11 @@ the letterbox bars do not even exist. The only way the CarPlay UI itself follows
    is flushed next to `SendRequestUI()` / `SendTakeScreen()` / `SendForceKeyFrame()`. Without this, a theme change
    made before the phone connects — which is the normal case, since the theme is applied at window creation — would be
    lost.
+   `CarPlayCoreService` keeps a second copy (`host_night_mode_known_` / `host_night_mode_`) and replays it into the
+   RTSP server immediately after creating it. The window is built before `StartCarPlay()` runs, so the startup push
+   arrives while no RTSP server exists; storing the request only in the RTSP server would drop it and leave the phone
+   in its own appearance for the whole session. `SetHostNightMode()` therefore never fails with `InvalidState` before
+   initialization — the request is accepted and applied later.
 3. **It is a Core capability exposed upward, not a UI detail.** `ICarPlayCoreApi::SetHostNightMode(bool)` and
    `IApplicationApi::SetHostNightMode(bool)` forward to the RTSP server, mirroring how `SetVideoStreamSpec` is
    threaded. The UI still owns the *decision* (`ThemeHelper::CurrentTheme()`); Core owns the *transport*, so

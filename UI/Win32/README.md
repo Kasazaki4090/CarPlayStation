@@ -126,6 +126,12 @@ to every session that has an event channel. A session that is not connected yet,
 whose event channel has not been accepted yet, receives the stored value as soon as
 the channel appears, so the phone is never left with a stale appearance.
 
+The window is built before the protocol stack starts, so this call usually arrives
+before `AirPlayRtspServer` exists. `CarPlayCoreService` therefore keeps the requested
+value itself and replays it into the RTSP server right after creating it
+(`Replayed remembered host night mode …` in the log). Without that second store the
+startup push would be dropped and the phone would keep its own appearance.
+
 Each theme transition logs two lines: `UI theme switched to …` followed by
 `CarPlay night mode requested=…, commandWritten=…`. `commandWritten=1` only proves
 the frame was queued on the event channel — whether the phone actually re-colours its

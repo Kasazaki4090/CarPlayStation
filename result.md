@@ -150,6 +150,27 @@
 
 ---
 
+### Record [9]: Night-Mode Startup Ordering Fix (Core/Service, Tests, Documentation)
+
+* **Timestamp**: `2026-10-09 22:30:00 (UTC+8)`
+* **Agent**: `GitHub Copilot (Copilot SDK in VS Code)`
+* **Background & Implementation**:
+  Reported symptom: after the recent cleanup the iPhone no longer followed the PC's dark/light theme. `git log -S` showed nothing had been deleted — the regression was an ordering bug that had existed since the feature landed:
+  1. **Root cause**: `AppController::Init` applies the theme while building the window, before `ApplicationService::StartCarPlay()`. `AirPlayRtspServer` is only constructed inside `CarPlayCoreService::Initialize()`, so the startup `SetHostNightMode` returned `InvalidState "Core service not initialized"` and the value was discarded. The per-second `ApplyCurrentTheme()` then early-returns (the UI theme already equals `applied_theme_`), so nothing was re-sent for the whole session.
+  2. **Fix**: `CarPlayCoreService` now stores the request (`host_night_mode_known_` / `host_night_mode_`) under `lifecycle_mutex_` and replays it immediately after creating the RTSP server in `Initialize()`. `SetHostNightMode()` returns `Ok()` when no RTSP server exists, because the value is guaranteed to be applied later. `AirPlayRtspServer`'s own per-session inheritance and `FlushNightMode()` were already correct and needed no change.
+  3. **Regression test**: `Tests/ServiceTests.cpp` → `TestHostNightModeBeforeInitialize()` asserts the pre-`Initialize()` push is accepted and that the post-`Initialize()` call is no longer `InvalidState`.
+  4. **Documentation**: DEC-013 in `DECISIONS.md`, `UI/Win32/README.md` and the theme item in `TODO.md` now state that the value is cached in two layers and why.
+* **Build & Test Metrics**:
+  - Clean rebuild of `build-release` succeeded with 0 errors (pre-existing warnings unchanged).
+  - CTest 10/10 test suites passed 100%, including the new `ServiceTests` case.
+  - Runtime evidence (`build-release/UI/Win32/carplaystation.log`): startup now logs `UI theme switched to dark, CarPlay night mode requested=true, commandWritten=true` (previously `false`) followed by `Replayed remembered host night mode (nightMode=true) to the RTSP server`.
+* **Key Defects & Insights**:
+  1. Anything the UI pushes at window-creation time must be accepted by a Core service that does not exist yet; the value has to be stored above the component that consumes it.
+  2. A one-shot "apply if changed" path (`applied_theme_` deduplication) hides a dropped initial write forever — the first write must be guaranteed to land.
+  3. End-to-end confirmation on the wire (`Sent event command: setNightMode`) still requires the iPhone to complete an RTSP session; in these runs it joined the Mobile Hotspot but no event channel was accepted, so host-side verification stops at "the value reached the RTSP server".
+
+---
+
 ## 5. Architectural Completeness Audit (Against `TODO.md` and Source Code)
 
 ### 5.1 Implemented Items

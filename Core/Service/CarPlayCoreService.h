@@ -166,6 +166,12 @@ private:
     // real Bluetooth MAC becomes known (the BT connection establishes after
     // the WiFi join, so the event must be emitted from the BT path).
     std::string last_wifi_mac_;
+    // 主机（PC）深浅色偏好。UI 可能在 Core 初始化（RTSP 服务器创建）之前
+    // 就推送主题，因此这里记住请求值，等 RTSP 服务器创建时补发。
+    // AirPlayRtspServer 自己会把它转发给每条新的事件通道。
+    bool host_night_mode_known_{false};
+    bool host_night_mode_{false};
+
     bool initialized_{false};
     bool started_{false};
     mutable std::mutex lifecycle_mutex_;
