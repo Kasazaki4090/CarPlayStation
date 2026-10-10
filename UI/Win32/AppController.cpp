@@ -128,7 +128,6 @@ Core::Common::Status AppController::Initialize(
 
     // 4. Initialize Direct2D Overlay Renderer
     (void)overlay_.Init(renderer_.GetSwapChain(), renderer_.GetBackBufferIndex());
-    overlay_.SetAppApi(app_api_);
     overlay_.UpdateSettings(settings_);
     overlay_.SetSettingsCallback([this](const Application::AppSettings& s) {
         OnSettingsChanged(s);

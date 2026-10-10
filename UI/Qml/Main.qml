@@ -35,20 +35,12 @@ Window {
 
     Shortcut {
         sequence: "F3"
-        onActivated: {
-            if (callBanner.bannerVisible) {
-                console.log("[Shortcut] Accept Call")
-            }
-        }
+        onActivated: console.log("[Shortcut] Accept Call (vehicle button event)")
     }
 
     Shortcut {
         sequence: "F4"
-        onActivated: {
-            if (callBanner.bannerVisible) {
-                console.log("[Shortcut] Reject Call")
-            }
-        }
+        onActivated: console.log("[Shortcut] Reject Call (vehicle button event)")
     }
 
     Shortcut {
@@ -72,8 +64,6 @@ Window {
                 logPanel.isOpen = false
             } else if (welcomeCard.visible) {
                 welcomeCard.visible = false
-            } else if (callBanner.bannerVisible) {
-                console.log("[Shortcut] Reject Call via Esc")
             }
         }
     }
@@ -121,19 +111,6 @@ Window {
                     appWindow.visibility = (appWindow.visibility === Window.FullScreen) ? Window.Windowed : Window.FullScreen
                 }
             }
-        }
-
-        // Incoming Call Banner (Center-Top Notification)
-        CallBanner {
-            id: callBanner
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.top: statusPill.bottom
-            anchors.topMargin: 12
-            callState: appWindow.callState
-            callerName: appWindow.callerName
-            callerNumber: appWindow.callerNumber
-            onAcceptTriggered: console.log("[QML] Accept Call")
-            onDeclineTriggered: console.log("[QML] Decline Call")
         }
 
         // Center Welcome Card (Visible prior to streaming)

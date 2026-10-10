@@ -189,7 +189,7 @@
 | Item | Evidence |
 | --- | --- |
 | Now Playing metadata display | `0x5001 NowPlayingUpdate` parsed with incremental field caching in `Iap2ControlPlane`; published via `CoreEventBus::PublishNowPlaying`; displayed in status bar pill and dynamic window title |
-| Telephony & Call handling | `0x4155 CallStateUpdate` parsed and published; `AcceptCall (0x415B)` and `EndCall (0x415C)` implemented. Floating HUD Call Banner with click-to-accept/hangup; F3/Enter (answer) and F4/Esc (hangup/reject) hotkeys wired |
+| Telephony & Call handling | `0x4155 CallStateUpdate` parsed and published; `AcceptCall (0x415B)` and `EndCall (0x415C)` implemented. Uses native CarPlay in-stream call UI; dedicated F3 (answer) and F4 (hangup/reject) vehicle button hotkeys wired |
 | Siri button activation | `requestSiri` implemented over encrypted Event Channel (`SendRequestSiri` with ButtonDown/Up action), dedicated F1 hotkey wired, `IApplicationApi::TriggerSiri` exposed |
 | iAP2 specification & SSOT | Authoritative TLV definitions, framing models, and parameter catalog documented in `docs/IAP2_SPECIFICATION.md` |
 | Low latency & frame-drop resync policy | Documented in `ARCHITECTURE.md`: libmpv low latency configuration (`untimed=yes`, `cache=no`, `demuxer-max-bytes=128KiB`) and WASAPI event pump 100ms cushion with underrun self-healing |

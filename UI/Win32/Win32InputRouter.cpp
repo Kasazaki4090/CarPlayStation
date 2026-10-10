@@ -356,10 +356,6 @@ bool Win32InputRouter::HandleKeyboard(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         return true;
     }
 
-    // Context-sensitive call handling for Enter and Esc
-    const auto ui_state = app_api_->GetCurrentState();
-    const bool has_call = ui_state.call_state.has_call;
-
     // ESC closes settings drawer or welcome guide if visible
     if (wParam == VK_ESCAPE && isPressed) {
         if (overlay_ && overlay_->IsSettingsDrawerOpen()) {
@@ -368,10 +364,6 @@ bool Win32InputRouter::HandleKeyboard(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         }
         if (overlay_ && overlay_->IsWelcomeGuideVisible()) {
             overlay_->DismissWelcomeGuide();
-            return true;
-        }
-        if (has_call) {
-            (void)app_api_->EndCall();
             return true;
         }
     }
@@ -407,14 +399,10 @@ bool Win32InputRouter::HandleKeyboard(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             (void)app_api_->ForwardKnobEvent(Core::Input::KnobAction::PressRight, 1);
             return true;
 
-        // Rotary knob select / push or Call Accept
+        // Rotary knob select / push
         case VK_RETURN:
             // Ignore Alt+Enter (handled by MainWindow for fullscreen)
             if (!(GetKeyState(VK_MENU) & 0x8000)) {
-                if (has_call && ui_state.call_state.is_incoming) {
-                    (void)app_api_->AcceptCall();
-                    return true;
-                }
                 (void)app_api_->ForwardKnobEvent(Core::Input::KnobAction::PushDown, 1);
                 return true;
             }

@@ -17,7 +17,6 @@ UI/Qml/
 └── components/
     ├── CarPlayVideoSurface.qml     # Video viewport item with aspect-ratio letterboxing
     ├── StatusPill.qml              # Header status pill showing link state and Now Playing song
-    ├── CallBanner.qml              # Incoming & active telephony banner with accept/reject buttons
     ├── SettingsDrawer.qml          # Slide-out drawer for volume mixer, video resolution & codec
     ├── WelcomeCard.qml             # Startup pairing guidance card with dismiss hotzone
     ├── LogPanel.qml                # Collapsible in-app diagnostic console
@@ -35,7 +34,6 @@ The QML UI layer mirrors the architectural principles defined in [`DEC-002`](../
 2. **C++ Bridge (`QmlAppController` / `QmlCarPlayBridge`)**:
    - Exposes reactive `Q_PROPERTY` attributes for UI bindings:
      - `isStreaming`, `statusText`, `songTitle`, `artistName`
-     - `callState`, `callerName`, `callerNumber`
      - `isNightMode`, `mediaVolume`, `navigationVolume`, `telephonyVolume`
    - Maps QML signals to API commands:
      - `triggerSiri()`, `acceptCall()`, `endCall()`
@@ -48,11 +46,10 @@ The QML UI layer mirrors the architectural principles defined in [`DEC-002`](../
 
 | Component | Responsibility |
 | :--- | :--- |
-| `Main.qml` | Top-level window hosting keyboard shortcuts (`F1` Siri, `F2` Settings, `F3` Answer, `F4` Hangup, `Ctrl+F4` Log, `F11` Fullscreen, `Esc` Dismiss), video viewport, and overlay hierarchy. |
+| `Main.qml` | Top-level window hosting keyboard shortcuts (`F1` Siri, `F2` Settings, `F3` Answer, `F4` Hangup, `Ctrl+F4` Log, `F11` Fullscreen, `Esc` Dismiss), video viewport, and overlay hierarchy. Incoming calls use native CarPlay in-stream UI. |
 | `theme/Theme.qml` | Centralized design tokens (colors, radii, spacing, typography). Follows system dark/light mode dynamically. |
 | `CarPlayVideoSurface.qml` | Manages letterbox / pillarbox scaling to maintain pixel aspect ratios across diverse display geometries. Serves as the host for the hardware video texture. |
 | `StatusPill.qml` | Pill indicator displaying connection health, status pulses, and real-time Now Playing metadata. |
-| `CallBanner.qml` | Floating call banner for incoming and active calls (`0x4155 CallStateUpdate`) with one-touch answer/reject buttons. |
 | `SettingsDrawer.qml` | Interactive settings panel with sliders for the 3-Lane WASAPI audio mixer (`MainMedia`, `AltNavigation`, `SiriTelephony`), and selectors for video resolution (720p / 1080p / 1440p), frame rate (30 / 60 FPS), and codec (H.264 / HEVC). |
 | `WelcomeCard.qml` | Pairing guide presented before streaming begins, showing accessory identity and wireless setup instructions. |
 | `LogPanel.qml` | Real-time rolling diagnostic console for runtime protocol and pipeline inspection. |

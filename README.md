@@ -33,7 +33,7 @@ Features:
       (see `DEC-010`)
 - [x] Microphone uplink — WASAPI capture, sealed and sent as RTP (PT 100)
 - [x] Siri activation — triggers `requestSiri` over encrypted AirPlay event channel (`F1`)
-- [x] Telephony & Call handling — iAP2 `0x4155 CallStateUpdate` parsing, floating HUD Call Banner with click-to-accept/hangup, `0x415B AcceptCall` (`F3` / `Enter`) and `0x415C EndCall` (`F4` / `Esc`)
+- [x] Telephony & Call handling — iAP2 `0x4155 CallStateUpdate` session tracking, native in-stream CarPlay call UI, `0x415B AcceptCall` (`F3`) and `0x415C EndCall` (`F4`)
 - [x] Now Playing — delta metadata stream (`0x5001 NowPlayingUpdate`) with incremental field caching, HUD pill display, and dynamic window title
 - [x] Touch / Input — Win32 input router, single- and multi-touch HID
 - [x] Day/night theme sync — follows the Windows light/dark theme locally
@@ -195,8 +195,8 @@ same touchscreen device.
 | Right mouse, `Backspace` | Back button |
 | `↑` `↓` `←` `→`, `W` `A` `S` `D` | Swipe up / down / left / right |
 | Mouse wheel | Swipe down / up (scroll) |
-| `Enter` | Tap at the centre of the screen (or Answer incoming call when call banner is active) |
-| `Esc` | Back button (or Reject / End active call when call banner is active) |
+| `Enter` | Tap at the centre of the screen |
+| `Esc` | Back button |
 | `Space`, media keys | Play-pause / next / previous |
 | `F1` | Siri activation (`requestSiri` button event) |
 | `F2` | Settings drawer (local only) |
