@@ -232,17 +232,88 @@ void WriteIniUtf8(const std::wstring& ini, const wchar_t* section, const wchar_t
 
 } // namespace
 
+namespace {
+
+// Case-insensitive string equality check
+bool EqualsIgnoreCase(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Trim whitespace from string
+std::string Trim(std::string_view s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string_view::npos) return "";
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return std::string(s.substr(start, end - start + 1));
+}
+
+} // namespace
+
 void SetupWizard::LoadMFiSettings(Application::AppSettings& settings) const {
     const auto& ini = preferences_.config_file_path;
 
-    // Backend type (only override when the key is present).
-    UINT backend = GetPrivateProfileIntW(L"MFi", L"BackendType", -1, ini.c_str());
-    if (backend != static_cast<UINT>(-1)) {
-        settings.mfi.backend_type = static_cast<Application::MFiBackendType>(backend);
-        // Value 1 used to be the binary TCP signing daemon, which no longer exists.
-        // Such configs wanted a network signing service, so they get the HTTP one.
-        if (backend == 1) {
+    // Backend type: support readable text names as well as legacy numeric values.
+    // Text: HardwareI2C, Hardware, I2C, CH341, CH347, FTDI -> HardwareI2C
+    //       RemoteHttp, Remote, Network, Http               -> RemoteHttp
+    //       LocalFile, Local, File                         -> LocalFile
+    // Numeric: 0 or 1 -> LocalFile (Option 1 in UI, or enum 0)
+    //          2      -> RemoteHttp (Option 2 in UI) OR legacy HardwareI2C (if host is empty)
+    //          3      -> HardwareI2C (Option 3 in UI) OR RemoteHttp (enum 3)
+    std::string backend_str = Trim(ReadIniUtf8(ini, L"MFi", L"BackendType"));
+    if (!backend_str.empty()) {
+        if (EqualsIgnoreCase(backend_str, "HardwareI2C") ||
+            EqualsIgnoreCase(backend_str, "Hardware") ||
+            EqualsIgnoreCase(backend_str, "I2C") ||
+            EqualsIgnoreCase(backend_str, "CH341") ||
+            EqualsIgnoreCase(backend_str, "CH347") ||
+            EqualsIgnoreCase(backend_str, "FTDI")) {
+            settings.mfi.backend_type = Application::MFiBackendType::HardwareI2C;
+        } else if (EqualsIgnoreCase(backend_str, "RemoteHttp") ||
+                   EqualsIgnoreCase(backend_str, "Remote") ||
+                   EqualsIgnoreCase(backend_str, "Network") ||
+                   EqualsIgnoreCase(backend_str, "Http")) {
             settings.mfi.backend_type = Application::MFiBackendType::RemoteHttp;
+        } else if (EqualsIgnoreCase(backend_str, "LocalFile") ||
+                   EqualsIgnoreCase(backend_str, "Local") ||
+                   EqualsIgnoreCase(backend_str, "File")) {
+            settings.mfi.backend_type = Application::MFiBackendType::LocalFile;
+        } else {
+            // Numeric parsing
+            try {
+                int backend_num = std::stoi(backend_str);
+                if (backend_num == 0) {
+                    settings.mfi.backend_type = Application::MFiBackendType::LocalFile;
+                } else if (backend_num == 1) {
+                    // UI Option 1: LocalFile. (Or legacy TCP daemon migrated to RemoteHttp)
+                    // If cert paths exist or are referenced, it's LocalFile; default to LocalFile for 1.
+                    settings.mfi.backend_type = Application::MFiBackendType::LocalFile;
+                } else if (backend_num == 2) {
+                    // Could be UI Option 2 (RemoteHttp) or enum value 2 (HardwareI2C).
+                    // Distinguish by checking whether RemoteHost was specified:
+                    std::string r_host = ReadIniUtf8(ini, L"MFi", L"RemoteHost");
+                    if (!r_host.empty()) {
+                        settings.mfi.backend_type = Application::MFiBackendType::RemoteHttp;
+                    } else {
+                        settings.mfi.backend_type = Application::MFiBackendType::HardwareI2C;
+                    }
+                } else if (backend_num == 3) {
+                    // Could be UI Option 3 (HardwareI2C) or enum value 3 (RemoteHttp).
+                    // If RemoteHost was specified, treat as RemoteHttp; else HardwareI2C.
+                    std::string r_host = ReadIniUtf8(ini, L"MFi", L"RemoteHost");
+                    if (!r_host.empty()) {
+                        settings.mfi.backend_type = Application::MFiBackendType::RemoteHttp;
+                    } else {
+                        settings.mfi.backend_type = Application::MFiBackendType::HardwareI2C;
+                    }
+                }
+            } catch (...) {}
         }
     }
 
@@ -265,23 +336,46 @@ void SetupWizard::LoadMFiSettings(Application::AppSettings& settings) const {
     if (remote_port != 0) {
         settings.mfi.remote_mfi.port = static_cast<uint16_t>(remote_port);
     }
-    // The legacy daemon keys are not used for the port: the old default (9000) is
-    // not the HTTP service's port, so a half-migrated port would only mislead.
     std::string remote_token = ReadIniUtf8(ini, L"MFi", L"RemoteToken");
     if (!remote_token.empty()) {
         settings.mfi.remote_mfi.bearer_token = std::move(remote_token);
     }
 
     // HardwareI2C preferences.
-    UINT driver = GetPrivateProfileIntW(L"MFi", L"I2cDriver", -1, ini.c_str());
-    if (driver != static_cast<UINT>(-1)) {
-        settings.mfi.hardware_i2c.driver_type = static_cast<Application::HardwareI2cDriverType>(driver);
+    std::string driver_str = Trim(ReadIniUtf8(ini, L"MFi", L"I2cDriver"));
+    if (!driver_str.empty()) {
+        if (EqualsIgnoreCase(driver_str, "CH341")) {
+            settings.mfi.hardware_i2c.driver_type = Application::HardwareI2cDriverType::CH341;
+        } else if (EqualsIgnoreCase(driver_str, "CH347")) {
+            settings.mfi.hardware_i2c.driver_type = Application::HardwareI2cDriverType::CH347;
+        } else if (EqualsIgnoreCase(driver_str, "FTDI")) {
+            settings.mfi.hardware_i2c.driver_type = Application::HardwareI2cDriverType::FTDI;
+        } else if (EqualsIgnoreCase(driver_str, "Mock")) {
+            settings.mfi.hardware_i2c.driver_type = Application::HardwareI2cDriverType::Mock;
+        } else if (EqualsIgnoreCase(driver_str, "Auto")) {
+            settings.mfi.hardware_i2c.driver_type = Application::HardwareI2cDriverType::Auto;
+        } else {
+            try {
+                int d = std::stoi(driver_str);
+                if (d >= 0 && d <= 4) {
+                    settings.mfi.hardware_i2c.driver_type = static_cast<Application::HardwareI2cDriverType>(d);
+                }
+            } catch (...) {}
+        }
     }
-    UINT slave = GetPrivateProfileIntW(L"MFi", L"I2cSlaveAddress", 0, ini.c_str());
-    if (slave != 0) {
-        // Older releases persisted the default 0x10; the known MFi coprocessor uses 0x11.
-        settings.mfi.hardware_i2c.slave_address = static_cast<uint8_t>(slave == 0x10 ? 0x11 : slave);
+
+    // Slave address: support hex (0x11, 0x10) or decimal (17, 16)
+    std::string slave_str = Trim(ReadIniUtf8(ini, L"MFi", L"I2cSlaveAddress"));
+    if (!slave_str.empty()) {
+        try {
+            int slave = std::stoi(slave_str, nullptr, 0); // handles 0x prefix
+            if (slave > 0 && slave <= 127) {
+                // If 0x10 was read, map to standard 0x11
+                settings.mfi.hardware_i2c.slave_address = static_cast<uint8_t>(slave == 0x10 ? 0x11 : slave);
+            }
+        } catch (...) {}
     }
+
     UINT speed = GetPrivateProfileIntW(L"MFi", L"I2cSpeedKhz", 0, ini.c_str());
     if (speed != 0) {
         settings.mfi.hardware_i2c.speed_khz = speed;
@@ -296,9 +390,14 @@ void SetupWizard::SaveMFiSettings(const Application::AppSettings& settings) cons
     const auto& ini = preferences_.config_file_path;
     const auto& mfi = settings.mfi;
 
-    WritePrivateProfileStringW(
-        L"MFi", L"BackendType",
-        std::to_wstring(static_cast<unsigned>(mfi.backend_type)).c_str(), ini.c_str());
+    // Write readable backend name
+    const wchar_t* backend_text = L"HardwareI2C";
+    switch (mfi.backend_type) {
+        case Application::MFiBackendType::LocalFile:   backend_text = L"LocalFile"; break;
+        case Application::MFiBackendType::RemoteHttp:  backend_text = L"RemoteHttp"; break;
+        case Application::MFiBackendType::HardwareI2C: backend_text = L"HardwareI2C"; break;
+    }
+    WritePrivateProfileStringW(L"MFi", L"BackendType", backend_text, ini.c_str());
 
     WriteIniUtf8(ini, L"MFi", L"CertificatePath", mfi.certificate_path);
     WriteIniUtf8(ini, L"MFi", L"PrivateKeyPath", mfi.private_key_path);
@@ -309,12 +408,22 @@ void SetupWizard::SaveMFiSettings(const Application::AppSettings& settings) cons
         std::to_wstring(static_cast<unsigned>(mfi.remote_mfi.port)).c_str(), ini.c_str());
     WriteIniUtf8(ini, L"MFi", L"RemoteToken", mfi.remote_mfi.bearer_token);
 
-    WritePrivateProfileStringW(
-        L"MFi", L"I2cDriver",
-        std::to_wstring(static_cast<unsigned>(mfi.hardware_i2c.driver_type)).c_str(), ini.c_str());
-    WritePrivateProfileStringW(
-        L"MFi", L"I2cSlaveAddress",
-        std::to_wstring(static_cast<unsigned>(mfi.hardware_i2c.slave_address)).c_str(), ini.c_str());
+    // Write readable driver name
+    const wchar_t* driver_text = L"Auto";
+    switch (mfi.hardware_i2c.driver_type) {
+        case Application::HardwareI2cDriverType::Auto:  driver_text = L"Auto"; break;
+        case Application::HardwareI2cDriverType::CH341: driver_text = L"CH341"; break;
+        case Application::HardwareI2cDriverType::CH347: driver_text = L"CH347"; break;
+        case Application::HardwareI2cDriverType::FTDI:  driver_text = L"FTDI"; break;
+        case Application::HardwareI2cDriverType::Mock:  driver_text = L"Mock"; break;
+    }
+    WritePrivateProfileStringW(L"MFi", L"I2cDriver", driver_text, ini.c_str());
+
+    // Write address in standard hex format (0x11)
+    wchar_t addr_buf[16];
+    swprintf_s(addr_buf, L"0x%02X", mfi.hardware_i2c.slave_address);
+    WritePrivateProfileStringW(L"MFi", L"I2cSlaveAddress", addr_buf, ini.c_str());
+
     WritePrivateProfileStringW(
         L"MFi", L"I2cSpeedKhz",
         std::to_wstring(mfi.hardware_i2c.speed_khz).c_str(), ini.c_str());
@@ -360,9 +469,32 @@ void SetupWizard::LoadVideoAudioSettings(Application::AppSettings& settings) con
     const auto& ini = preferences_.config_file_path;
 
     // --- [Video] ---
-    UINT preset = GetPrivateProfileIntW(L"Video", L"ResolutionPreset", -1, ini.c_str());
-    if (preset != static_cast<UINT>(-1) && preset <= 7) {
-        settings.video.resolution_preset = static_cast<Application::VideoResolutionPreset>(preset);
+    std::string preset_str = Trim(ReadIniUtf8(ini, L"Video", L"ResolutionPreset"));
+    if (!preset_str.empty()) {
+        if (EqualsIgnoreCase(preset_str, "720P") || EqualsIgnoreCase(preset_str, "Res720P")) {
+            settings.video.resolution_preset = Application::VideoResolutionPreset::Res720P;
+        } else if (EqualsIgnoreCase(preset_str, "1080P") || EqualsIgnoreCase(preset_str, "Res1080P")) {
+            settings.video.resolution_preset = Application::VideoResolutionPreset::Res1080P;
+        } else if (EqualsIgnoreCase(preset_str, "1440P") || EqualsIgnoreCase(preset_str, "2K") || EqualsIgnoreCase(preset_str, "Res1440P")) {
+            settings.video.resolution_preset = Application::VideoResolutionPreset::Res1440P;
+        } else if (EqualsIgnoreCase(preset_str, "2160P") || EqualsIgnoreCase(preset_str, "4K") || EqualsIgnoreCase(preset_str, "Res2160P")) {
+            settings.video.resolution_preset = Application::VideoResolutionPreset::Res2160P;
+        } else if (EqualsIgnoreCase(preset_str, "Auto")) {
+            settings.video.resolution_preset = Application::VideoResolutionPreset::Auto;
+        } else if (EqualsIgnoreCase(preset_str, "Custom")) {
+            settings.video.resolution_preset = Application::VideoResolutionPreset::Custom;
+        } else if (EqualsIgnoreCase(preset_str, "Car1280x480") || EqualsIgnoreCase(preset_str, "1280x480")) {
+            settings.video.resolution_preset = Application::VideoResolutionPreset::Car1280x480;
+        } else if (EqualsIgnoreCase(preset_str, "Car1920x720") || EqualsIgnoreCase(preset_str, "1920x720")) {
+            settings.video.resolution_preset = Application::VideoResolutionPreset::Car1920x720;
+        } else {
+            try {
+                int p = std::stoi(preset_str);
+                if (p >= 0 && p <= 7) {
+                    settings.video.resolution_preset = static_cast<Application::VideoResolutionPreset>(p);
+                }
+            } catch (...) {}
+        }
     }
 
     // A hand-written custom size is accepted as-is, then clamped into a legal
@@ -376,14 +508,12 @@ void SetupWizard::LoadVideoAudioSettings(Application::AppSettings& settings) con
             settings.video.custom_height = (ch + 1) & ~1u;
 
             // If the user specified a custom dimension in the INI file and preset
-            // was set to Custom (5) or not specified, ensure Custom mode is active.
-            if (preset == static_cast<UINT>(Application::VideoResolutionPreset::Custom) ||
-                (preset == static_cast<UINT>(-1) && (cw != 1280 || ch != 720))) {
+            // was set to Custom or not specified, ensure Custom mode is active.
+            if (settings.video.resolution_preset == Application::VideoResolutionPreset::Custom ||
+                (preset_str.empty() && (cw != 1280 || ch != 720))) {
                 settings.video.resolution_preset = Application::VideoResolutionPreset::Custom;
             }
         } else {
-            // Out-of-range typo: keep the app usable rather than opening a
-            // window the compositor will refuse.
             CPS_LOG_WARN("Settings",
                 "Ignoring out-of-range custom resolution ", std::to_string(cw), "x", std::to_string(ch));
             settings.video.resolution_preset = Application::VideoResolutionPreset::Res720P;
@@ -394,14 +524,43 @@ void SetupWizard::LoadVideoAudioSettings(Application::AppSettings& settings) con
     if (fps == 30 || fps == 60) {
         settings.video.fps = fps;
     }
-    UINT codec = GetPrivateProfileIntW(L"Video", L"PreferredCodec", -1, ini.c_str());
-    if (codec != static_cast<UINT>(-1) && codec <= 2) {
-        settings.video.preferred_codec = static_cast<Application::VideoCodecPreference>(codec);
+
+    std::string codec_str = Trim(ReadIniUtf8(ini, L"Video", L"PreferredCodec"));
+    if (!codec_str.empty()) {
+        if (EqualsIgnoreCase(codec_str, "H264") || EqualsIgnoreCase(codec_str, "AVC")) {
+            settings.video.preferred_codec = Application::VideoCodecPreference::H264;
+        } else if (EqualsIgnoreCase(codec_str, "HEVC") || EqualsIgnoreCase(codec_str, "H265")) {
+            settings.video.preferred_codec = Application::VideoCodecPreference::HEVC;
+        } else if (EqualsIgnoreCase(codec_str, "Auto")) {
+            settings.video.preferred_codec = Application::VideoCodecPreference::Auto;
+        } else {
+            try {
+                int c = std::stoi(codec_str);
+                if (c >= 0 && c <= 2) {
+                    settings.video.preferred_codec = static_cast<Application::VideoCodecPreference>(c);
+                }
+            } catch (...) {}
+        }
     }
-    UINT display_mode = GetPrivateProfileIntW(L"Video", L"DisplayMode", -1, ini.c_str());
-    if (display_mode != static_cast<UINT>(-1) && display_mode <= 2) {
-        settings.video.display_mode = static_cast<Application::WindowDisplayMode>(display_mode);
+
+    std::string disp_str = Trim(ReadIniUtf8(ini, L"Video", L"DisplayMode"));
+    if (!disp_str.empty()) {
+        if (EqualsIgnoreCase(disp_str, "Windowed")) {
+            settings.video.display_mode = Application::WindowDisplayMode::Windowed;
+        } else if (EqualsIgnoreCase(disp_str, "BorderlessFullscreen") || EqualsIgnoreCase(disp_str, "Borderless")) {
+            settings.video.display_mode = Application::WindowDisplayMode::BorderlessFullscreen;
+        } else if (EqualsIgnoreCase(disp_str, "ExclusiveFullscreen") || EqualsIgnoreCase(disp_str, "Fullscreen")) {
+            settings.video.display_mode = Application::WindowDisplayMode::ExclusiveFullscreen;
+        } else {
+            try {
+                int dm = std::stoi(disp_str);
+                if (dm >= 0 && dm <= 2) {
+                    settings.video.display_mode = static_cast<Application::WindowDisplayMode>(dm);
+                }
+            } catch (...) {}
+        }
     }
+
     UINT hwdec = GetPrivateProfileIntW(L"Video", L"HardwareDecode", 1, ini.c_str());
     settings.video.hardware_decode = (hwdec != 0);
 
@@ -426,18 +585,42 @@ void SetupWizard::SaveVideoAudioSettings(const Application::AppSettings& setting
     const auto& video = settings.video;
     const auto& audio = settings.audio;
 
-    WritePrivateProfileStringW(L"Video", L"ResolutionPreset",
-        std::to_wstring(static_cast<unsigned>(video.resolution_preset)).c_str(), ini.c_str());
+    const wchar_t* preset_text = L"720P";
+    switch (video.resolution_preset) {
+        case Application::VideoResolutionPreset::Res720P:     preset_text = L"720P"; break;
+        case Application::VideoResolutionPreset::Res1080P:    preset_text = L"1080P"; break;
+        case Application::VideoResolutionPreset::Res1440P:    preset_text = L"2K"; break;
+        case Application::VideoResolutionPreset::Res2160P:    preset_text = L"4K"; break;
+        case Application::VideoResolutionPreset::Auto:        preset_text = L"Auto"; break;
+        case Application::VideoResolutionPreset::Custom:      preset_text = L"Custom"; break;
+        case Application::VideoResolutionPreset::Car1280x480: preset_text = L"Car1280x480"; break;
+        case Application::VideoResolutionPreset::Car1920x720: preset_text = L"Car1920x720"; break;
+    }
+    WritePrivateProfileStringW(L"Video", L"ResolutionPreset", preset_text, ini.c_str());
+
     WritePrivateProfileStringW(L"Video", L"CustomWidth",
         std::to_wstring(video.custom_width).c_str(), ini.c_str());
     WritePrivateProfileStringW(L"Video", L"CustomHeight",
         std::to_wstring(video.custom_height).c_str(), ini.c_str());
     WritePrivateProfileStringW(L"Video", L"Fps",
         std::to_wstring(video.fps).c_str(), ini.c_str());
-    WritePrivateProfileStringW(L"Video", L"PreferredCodec",
-        std::to_wstring(static_cast<unsigned>(video.preferred_codec)).c_str(), ini.c_str());
-    WritePrivateProfileStringW(L"Video", L"DisplayMode",
-        std::to_wstring(static_cast<unsigned>(video.display_mode)).c_str(), ini.c_str());
+
+    const wchar_t* codec_text = L"H264";
+    switch (video.preferred_codec) {
+        case Application::VideoCodecPreference::H264: codec_text = L"H264"; break;
+        case Application::VideoCodecPreference::HEVC: codec_text = L"HEVC"; break;
+        case Application::VideoCodecPreference::Auto: codec_text = L"Auto"; break;
+    }
+    WritePrivateProfileStringW(L"Video", L"PreferredCodec", codec_text, ini.c_str());
+
+    const wchar_t* mode_text = L"Windowed";
+    switch (video.display_mode) {
+        case Application::WindowDisplayMode::Windowed:             mode_text = L"Windowed"; break;
+        case Application::WindowDisplayMode::BorderlessFullscreen: mode_text = L"BorderlessFullscreen"; break;
+        case Application::WindowDisplayMode::ExclusiveFullscreen:  mode_text = L"ExclusiveFullscreen"; break;
+    }
+    WritePrivateProfileStringW(L"Video", L"DisplayMode", mode_text, ini.c_str());
+
     WritePrivateProfileStringW(L"Video", L"HardwareDecode",
         video.hardware_decode ? L"1" : L"0", ini.c_str());
 

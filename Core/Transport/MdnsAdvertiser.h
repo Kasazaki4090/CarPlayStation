@@ -6,6 +6,8 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <unordered_map>
+#include <chrono>
 #include <optional>
 
 #ifdef _WIN32
@@ -58,8 +60,10 @@ private:
     MdnsServiceConfig m_config{};
     size_t m_broadcastCount{0};
     Common::ByteBuffer m_lastPacket{};
-    std::vector<std::string> m_dialedTargets{};
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> m_dialedTargets{};
     std::string m_ctrlInstance{};
+    std::chrono::steady_clock::time_point m_lastLookupTime{};
+    std::chrono::steady_clock::time_point m_lastBroadcastTime{};
 
 #ifdef _WIN32
     SOCKET m_socket{INVALID_SOCKET};

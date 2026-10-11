@@ -439,7 +439,7 @@ MFiChipInfo I2cMfiSigner::GetChipInfo() const noexcept {
     if (res.IsOk() && !res.Value().empty() && !IsBusIdleFill(res.Value())) {
         uint8_t major = res.Value()[0];
         info.present = true;
-        info.chip_id = 0x00020000 | major;
+        info.chip_id = (static_cast<uint32_t>(major) << 16) | major;
         info.firmware_version = "MFi-CP-v" + std::to_string(major);
     }
 

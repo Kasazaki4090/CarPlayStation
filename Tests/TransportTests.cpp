@@ -221,6 +221,7 @@ void TestBluetoothAddressFormattingAndParsing() {
 }
 
 void TestBtRfcommTransportLifecycleAndSimulation() {
+    std::cout << "[DEBUG] Step 1: creating BtRfcommTransport...\n" << std::flush;
     auto bt = std::make_shared<BtRfcommTransport>(1);
     assert(bt->GetType() == TransportType::BluetoothRfcomm);
     assert(bt->GetMtu() == 1012);
@@ -228,14 +229,16 @@ void TestBtRfcommTransportLifecycleAndSimulation() {
     assert(bt->GetState() == TransportState::Disconnected);
     assert(!bt->IsListening());
 
-    // Enable simulation mode for deterministic test
+    std::cout << "[DEBUG] Step 2: EnableSimulatedMode...\n" << std::flush;
     bt->EnableSimulatedMode(true);
     assert(bt->IsSimulatedMode());
 
+    std::cout << "[DEBUG] Step 3: StartServer...\n" << std::flush;
     Status startRes = bt->StartServer(1);
     assert(startRes.IsOk());
     assert(bt->IsListening());
 
+    std::cout << "[DEBUG] Step 4: Callbacks...\n" << std::flush;
     std::vector<uint8_t> received;
     bt->SetDataCallback([&](ByteSpan data) {
         received.assign(data.begin(), data.end());
@@ -246,31 +249,31 @@ void TestBtRfcommTransportLifecycleAndSimulation() {
         latestState = newState;
     });
 
-    // Simulate iPhone connect
+    std::cout << "[DEBUG] Step 5: SimulatePeerConnect...\n" << std::flush;
     bt->SimulatePeerConnect("DC:A9:04:12:34:56");
     assert(bt->GetState() == TransportState::Connected);
     assert(latestState == TransportState::Connected);
     assert(bt->GetRemoteEndpoint().find("DC:A9:04:12:34:56") != std::string::npos);
 
-    // Simulate inbound iAP2 packet
+    std::cout << "[DEBUG] Step 6: SimulatePeerData...\n" << std::flush;
     const uint8_t iap2Frame[] = {0xFF, 0x5A, 0x00, 0x0A, 0x01, 0x02};
     bt->SimulatePeerData(ByteSpan(iap2Frame, sizeof(iap2Frame)));
     assert(received.size() == sizeof(iap2Frame));
     assert(received[0] == 0xFF && received[1] == 0x5A);
     assert(bt->GetStats().bytes_received == sizeof(iap2Frame));
 
-    // Outbound send
+    std::cout << "[DEBUG] Step 7: Send...\n" << std::flush;
     const uint8_t replyFrame[] = {0xFF, 0x5A, 0x00, 0x08, 0xAA, 0xBB};
     Status sendRes = bt->Send(ByteSpan(replyFrame, sizeof(replyFrame)));
     assert(sendRes.IsOk());
     assert(bt->GetStats().bytes_sent == sizeof(replyFrame));
 
-    // Simulate iPhone disconnect
+    std::cout << "[DEBUG] Step 8: SimulatePeerDisconnect...\n" << std::flush;
     bt->SimulatePeerDisconnect();
     assert(bt->GetState() == TransportState::Disconnected);
     assert(latestState == TransportState::Disconnected);
 
-    // Stop server
+    std::cout << "[DEBUG] Step 9: StopServer...\n" << std::flush;
     bt->StopServer();
     assert(!bt->IsListening());
 

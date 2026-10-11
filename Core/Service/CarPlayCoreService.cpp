@@ -1101,6 +1101,7 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
                     // (ephemeral) control port, restoring the HTTP 200
                     // handshake and enabling automatic reconnection.
                     if (!station.ipAddress.empty() && mdns_advertiser_) {
+                        mdns_advertiser_->ClearDialedTargets();
                         bool is_known = false;
                         if (pairing_store_ && !station.macAddress.empty()) {
                             uint64_t wifi_bth = Transport::BtSdpHelper::ParseBluetoothAddress(station.macAddress);

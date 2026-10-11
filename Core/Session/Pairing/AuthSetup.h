@@ -93,14 +93,15 @@ public:
         // Detect whether the backend is MFi 2.0 (2代 / RSA / SHA-1) or MFi 3.0 (3代 / ECDSA / SHA-256)
         bool is_v2 = false;
         auto chip_info = signer_->GetChipInfo();
-        if ((chip_info.chip_id & 0x00FF0000) == 0x00020000 ||
-            chip_info.firmware_version.find("v2") != std::string::npos ||
-            chip_info.firmware_version.find("2.0") != std::string::npos) {
-            is_v2 = true;
-        } else if ((chip_info.chip_id & 0x00FF0000) == 0x00030000 ||
-                   chip_info.firmware_version.find("v3") != std::string::npos ||
-                   chip_info.firmware_version.find("3.0") != std::string::npos) {
+        if ((chip_info.chip_id & 0x00FF0000) == 0x00030000 ||
+            (chip_info.chip_id & 0x000000FF) == 0x03 ||
+            chip_info.firmware_version.find("v3") != std::string::npos ||
+            chip_info.firmware_version.find("3.0") != std::string::npos) {
             is_v2 = false;
+        } else if ((chip_info.chip_id & 0x00FF0000) == 0x00020000 ||
+                   chip_info.firmware_version.find("v2") != std::string::npos ||
+                   chip_info.firmware_version.find("2.0") != std::string::npos) {
+            is_v2 = true;
         } else {
             // Fallback heuristics based on certificate inspection:
             // MFi 3.0 P-256 certificates are ~600 bytes and contain ECDSA OID 1.2.840.10045.2.1

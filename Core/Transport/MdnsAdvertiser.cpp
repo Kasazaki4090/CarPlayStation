@@ -204,6 +204,18 @@ Common::Status MdnsAdvertiser::Start(const MdnsServiceConfig& config) {
         return Common::Status::Error(Common::StatusCode::Unavailable, "Failed to create UDP socket: code " + std::to_string(err));
     }
 
+    u_long nonBlocking = 1;
+    ioctlsocket(m_socket, FIONBIO, &nonBlocking);
+
+    // Disable SIO_UDP_CONNRESET so ICMP port unreachable doesn't fail subsequent UDP sendto/recvfrom
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+    DWORD dwBytes = 0;
+    BOOL bNewBehavior = FALSE;
+    WSAIoctl(m_socket, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior),
+             nullptr, 0, &dwBytes, nullptr, nullptr);
+
     BOOL reuse = TRUE;
     setsockopt(m_socket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
 
@@ -297,6 +309,7 @@ Common::Status MdnsAdvertiser::BroadcastAnnouncement() {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_lastPacket = packet;
         m_broadcastCount++;
+        m_lastBroadcastTime = std::chrono::steady_clock::now();
     }
 
     if (m_simulatedMode.load()) {
@@ -329,8 +342,13 @@ Common::Status MdnsAdvertiser::AnnounceTo(const std::string& targetIp) {
             auto query = MdnsPacketBuilder::BuildCarPlayControlQuery();
             int n2 = sendto(m_socket, reinterpret_cast<const char*>(query.data()), static_cast<int>(query.size()), 0,
                             reinterpret_cast<const sockaddr*>(&targetAddr), sizeof(targetAddr));
-            CPS_LOG_INFO("MdnsAdvertiser", "AnnounceTo: sent AirPlay announcement (", std::to_string(n1),
-                         " bytes) and _carplay-ctrl query (", std::to_string(n2), " bytes) to ", targetIp, ":5353");
+            if (n1 == SOCKET_ERROR || n2 == SOCKET_ERROR) {
+                int err = WSAGetLastError();
+                CPS_LOG_WARN("MdnsAdvertiser", "AnnounceTo sendto ", targetIp, ":5353 returned error (code ", std::to_string(err), ")");
+            } else {
+                CPS_LOG_INFO("MdnsAdvertiser", "AnnounceTo: sent AirPlay announcement (", std::to_string(n1),
+                             " bytes) and _carplay-ctrl query (", std::to_string(n2), " bytes) to ", targetIp, ":5353");
+            }
         }
     }
 #endif
@@ -389,6 +407,7 @@ void MdnsAdvertiser::ClearDialedTargets() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_dialedTargets.clear();
     m_ctrlInstance.clear();
+    m_lastLookupTime = {};
 }
 
 void MdnsAdvertiser::SendCtrlLookup(const std::string& instanceName) {
@@ -416,15 +435,6 @@ void MdnsAdvertiser::SendCtrlLookup(const std::string& instanceName) {
 void MdnsAdvertiser::DialCarPlayControl(const std::string& host, uint16_t port) {
 #ifdef _WIN32
     if (host.empty() || port == 0) return;
-
-    std::string key = host + ":" + std::to_string(port);
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (std::find(m_dialedTargets.begin(), m_dialedTargets.end(), key) != m_dialedTargets.end()) {
-            return;
-        }
-        m_dialedTargets.push_back(key);
-    }
 
     std::string devId;
     {
@@ -493,14 +503,30 @@ void MdnsAdvertiser::DialCarPlayControl(const std::string& host, uint16_t port) 
 
 void MdnsAdvertiser::BroadcastWorkerLoop() {
     while (m_running.load()) {
-        (void)BroadcastAnnouncement();
+        auto now = std::chrono::steady_clock::now();
+        uint32_t interval = 10;
+        std::chrono::steady_clock::time_point lastBcast{};
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            interval = m_config.broadcastIntervalSeconds;
+            lastBcast = m_lastBroadcastTime;
+        }
+        if (interval == 0) interval = 10;
+
+        if (now - lastBcast >= std::chrono::seconds(interval)) {
+            (void)BroadcastAnnouncement();
+
+#ifdef _WIN32
+            if (m_socket != INVALID_SOCKET) {
+                // Multicast query for _carplay-ctrl._tcp.local.
+                auto query = MdnsPacketBuilder::BuildCarPlayControlQuery();
+                SendRawMulticast(Common::ByteSpan(query.data(), query.size()));
+            }
+#endif
+        }
 
 #ifdef _WIN32
         if (m_socket != INVALID_SOCKET) {
-            // Multicast query for _carplay-ctrl._tcp.local.
-            auto query = MdnsPacketBuilder::BuildCarPlayControlQuery();
-            SendRawMulticast(Common::ByteSpan(query.data(), query.size()));
-
             // Listen for responses using select() with 1s timeout
             fd_set readfds;
             FD_ZERO(&readfds);
@@ -512,15 +538,14 @@ void MdnsAdvertiser::BroadcastWorkerLoop() {
 
             int res = select(0, &readfds, nullptr, nullptr, &tv);
             if (res > 0 && FD_ISSET(m_socket, &readfds)) {
-                // Drain all packets available in this window (the targeted query from
-                // AnnounceTo may have produced a response on the same socket).
-                for (int drain = 0; drain < 8; ++drain) {
+                // Drain all packets available in this window
+                for (int drain = 0; drain < 16; ++drain) {
                     sockaddr_in fromAddr{};
                     int fromLen = sizeof(fromAddr);
                     uint8_t rxBuf[2048];
                     int bytesRead = recvfrom(m_socket, reinterpret_cast<char*>(rxBuf), sizeof(rxBuf), 0,
                                              reinterpret_cast<sockaddr*>(&fromAddr), &fromLen);
-                    if (bytesRead <= 12) {
+                    if (bytesRead == SOCKET_ERROR || bytesRead <= 12) {
                         break;
                     }
                     char ipStr[INET_ADDRSTRLEN] = {0};
@@ -534,29 +559,37 @@ void MdnsAdvertiser::BroadcastWorkerLoop() {
 
                     // A browse answer gives us the instance name but not the port;
                     // chase it with an SRV/A query (RFC 6767 two-step resolution).
+                    // Re-query every 2 seconds if the port remains unresolved.
                     if (rx.port == 0 && !rx.ctrlInstance.empty()) {
-                        std::string known;
+                        bool shouldLookup = false;
                         {
                             std::lock_guard<std::mutex> lock(m_mutex);
-                            known = m_ctrlInstance;
-                        }
-                        if (known != rx.ctrlInstance) {
-                            {
-                                std::lock_guard<std::mutex> lock(m_mutex);
+                            auto current = std::chrono::steady_clock::now();
+                            if (m_ctrlInstance != rx.ctrlInstance ||
+                                (current - m_lastLookupTime) >= std::chrono::seconds(2)) {
                                 m_ctrlInstance = rx.ctrlInstance;
+                                m_lastLookupTime = current;
+                                shouldLookup = true;
                             }
+                        }
+                        if (shouldLookup) {
                             SendCtrlLookup(rx.ctrlInstance);
                         }
                     }
 
                     if (rx.port > 0) {
-                        bool already_dialed = false;
+                        bool shouldDial = false;
                         {
                             std::lock_guard<std::mutex> lock(m_mutex);
                             std::string key = std::string(ipStr) + ":" + std::to_string(rx.port);
-                            already_dialed = (std::find(m_dialedTargets.begin(), m_dialedTargets.end(), key) != m_dialedTargets.end());
+                            auto current = std::chrono::steady_clock::now();
+                            auto it = m_dialedTargets.find(key);
+                            if (it == m_dialedTargets.end() || (current - it->second) >= std::chrono::seconds(5)) {
+                                m_dialedTargets[key] = current;
+                                shouldDial = true;
+                            }
                         }
-                        if (!already_dialed) {
+                        if (shouldDial) {
                             CPS_LOG_INFO("MdnsAdvertiser", "Discovered iPhone _carplay-ctrl service at ", ipStr, ":", std::to_string(rx.port));
                             DialCarPlayControl(ipStr, rx.port);
                         }

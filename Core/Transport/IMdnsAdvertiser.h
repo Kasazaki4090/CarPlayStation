@@ -22,6 +22,7 @@ struct MdnsServiceConfig {
     std::string pi{"dd52a0b0-5435-42ea-99dc-0a6b96bb433b"};
     std::string srcvers{"320.17"};
     std::map<std::string, std::string> customTxtProps{};
+    uint32_t broadcastIntervalSeconds{10};
 };
 
 /**
