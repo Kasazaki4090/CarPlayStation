@@ -76,11 +76,11 @@ CarPlay requires an Apple-licensed MFi coprocessor to sign the authentication
 challenge. CarPlayStation can satisfy that requirement in three ways, chosen in
 the first-run wizard or in the settings drawer (`F2`):
 
-| Backend | What it uses | When |
-| --- | --- | --- |
-| Local file | Imported certificate + private key, signed in software | Development without hardware |
-| USB-to-I2C hardware | An MFi authentication coprocessor (CP 2.0C / 3.0) on I2C behind a WCH CH341 / CH347 or FTDI D2XX bridge | Real accessory behaviour, both MFi 2.x and 3.0 (SHA-256) certificates |
-| Remote MFi HTTP | An HTTP service that performs the signing (see `Reference/remote-mfi-for-xcertplay`, `DEC-011`) | Sharing one accessory certificate across machines |
+| Backend | What it uses | When | Hardware & Reference Projects |
+| --- | --- | --- | --- |
+| Local file | Imported certificate + private key, signed in software | Development without hardware | — |
+| USB-to-I2C hardware (MFi Key) | An MFi authentication coprocessor (CP 2.0C / 3.0) on I2C behind a WCH CH341 / CH347 or FTDI D2XX bridge | Real accessory behaviour, both MFi 2.x and 3.0 (SHA-256) certificates | • [shilapi/ch341-to-mfi-chip](https://github.com/shilapi/ch341-to-mfi-chip)<br>• [OSHWHUB: project_hutacjoq (takeru94)](https://oshwhub.com/takeru94/project_hutacjoq)<br>• [OSHWHUB: project_oxrbwdbe (wzn556)](https://oshwhub.com/wzn556/project_oxrbwdbe) |
+| Remote MFi HTTP | An HTTP service that performs the signing | Sharing one accessory certificate across machines | • [cuckoohello/remote-mfi-for-xcertplay](https://github.com/cuckoohello/remote-mfi-for-xcertplay) (`DEC-011`) |
 
 The Core never hardcodes a file path, a driver, or a server address: the
 Application layer builds the right `Core::Hardware::IMfiSigner` from

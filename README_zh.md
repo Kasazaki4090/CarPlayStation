@@ -55,6 +55,18 @@ CarPlayStation 能够将您的 Windows 电脑变成一台车载中控主机（He
 
 ---
 
+## 🔑 MFi 认证方案与开源硬件参考
+
+CarPlay 协议在连接建立时，需要 MFi 认证协处理器（或配套的证书私钥）对挑战随机数进行签名。CarPlayStation 支持三种可插拔后端，并在首次向导或设置抽屉（`F2`）中无缝切换：
+
+| 认证后端 | 机制说明 | 适用场景 | 开源硬件与参考项目 |
+| --- | --- | --- | --- |
+| **本地证书文件** | 导入配套的 `identity.pk8` 私钥与 `certificate.p7b` 证书，由软件执行签名计算 | 适合开发调试与无外设环境 | 本地导入即可 |
+| **USB-I2C 硬件直连 (MFi Key)** | 通过 USB 接入真实的 Apple MFi 协处理器芯片（CP 2.0C / 3.0），由 WCH CH341 / CH347 或 FTDI 桥接芯片执行硬件鉴权 | 完整车规级硬件行为，支持硬件原生证书 | • [shilapi/ch341-to-mfi-chip](https://github.com/shilapi/ch341-to-mfi-chip)<br>• [立创开源: project_hutacjoq (takeru94)](https://oshwhub.com/takeru94/project_hutacjoq)<br>• [立创开源: project_oxrbwdbe (wzn556)](https://oshwhub.com/wzn556/project_oxrbwdbe) |
+| **远程 HTTP 签名** | 通过 HTTP 请求转发 Challenge 给签名服务端进行远程鉴权 | 多台设备共享同一套证书或签名服务 | • [cuckoohello/remote-mfi-for-xcertplay](https://github.com/cuckoohello/remote-mfi-for-xcertplay) (`DEC-011`) |
+
+---
+
 ## 🚀 快速上手指南
 
 ### 1. 系统要求
