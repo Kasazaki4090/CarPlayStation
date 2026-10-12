@@ -1,6 +1,11 @@
 # CarPlayStation
 
+[English](README.md) | [简体中文](README_zh.md)
+
 A Windows CarPlay receiver.
+
+> [!NOTE]  
+> **Language Notice:** The application UI and setup wizard are currently available in **Simplified Chinese only**. Multi-language support (including English) is planned for upcoming releases.
 
 CarPlayStation turns a PC into the head unit of a car. It advertises itself as a
 CarPlay accessory, pairs with an iPhone over Bluetooth (RFCOMM) and Wi-Fi
@@ -178,6 +183,17 @@ elevated PowerShell:
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\Set-UpFirewall.ps1
 ```
+
+#### Wi-Fi Hotspot Requirements (Crucial)
+
+When configuring the Windows Mobile Hotspot (*Settings → Network & internet → Mobile hotspot*), the following settings are strictly required:
+
+1. **Network band MUST be set to 5 GHz:**  
+   CarPlay audio/video streaming is extremely latency-sensitive. The 2.4 GHz band shares radio spectrum with Bluetooth, causing severe packet collisions and handshake timeouts. Always edit your hotspot and explicitly select **5 GHz** (do NOT choose 2.4 GHz or "Any available band").
+2. **Security / Encryption type (Must be WPA2 or WPA2/WPA3 hybrid):**  
+   - **Windows 11:** Must be set to **WPA2/WPA3-Personal** or **WPA2-Personal** (⚠️ **Pure WPA3 is NOT supported** by the CarPlay Wi-Fi provisioning handshake and will fail!).  
+   - **Windows 10:** Must be set to **WPA2-Personal (AES)**.  
+   - ⚠️ Open (unsecured) networks and pure WPA3 are rejected by iOS. Password must be 8–63 characters.
 
 The app writes a rolling log next to the executable (`carplaystation.log`), and
 `Ctrl + F4` opens the in-app log panel.
