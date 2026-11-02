@@ -835,6 +835,132 @@ prove one had been.
 
 ---
 
+## BUG-013 — Multi-touch non-functional on Surface (log advertises 2-contact, but input behaves as single-touch)
+
+**Status:** `Open`
+
+**Date:** 2026-11-03
+
+### Symptom
+
+On touchscreen devices like Microsoft Surface, log shows multi-touch enabled (`advertising a 2-contact touchscreen`), but in CarPlay sessions, gestures with 2 fingers do not take effect and only single-touch works.
+
+### Reproduction
+
+1. Launch CarPlayStation on a Surface Pro / touchscreen device with a multi-touch digitizer.
+2. Establish a wired or wireless CarPlay session with iPhone.
+3. Attempt two-finger pinch-to-zoom or scroll in Apple Maps.
+4. Observe that only one contact point is recognized; multi-touch does not work.
+
+### Expected
+
+Two-finger gestures (pinch, scroll, multi-touch) work smoothly on multi-touch digitizers.
+
+### Actual
+
+Only single-touch input is forwarded; two-finger gestures fail.
+
+### Root Cause / Investigation
+
+- In `UI/Win32/AppController.cpp`, `RegisterTouchWindow(window_.GetHwnd(), 0)` is called.
+- In Windows 8/10/11, calling `RegisterTouchWindow` instructs the OS to deliver legacy `WM_TOUCH` messages to the window, which suppresses modern `WM_POINTER*` (`WM_POINTERDOWN`, `WM_POINTERUPDATE`, `WM_POINTERUP`) messages.
+- `Win32InputRouter` only listens to `WM_POINTER*` messages and does not handle `WM_TOUCH`.
+- Unhandled `WM_TOUCH` messages fall through to `DefWindowProc`, which degrades them into legacy mouse messages (`WM_LBUTTONDOWN`, `WM_MOUSEMOVE`), handled by `Win32InputRouter::HandleMouse` where the touch slot index is hardcoded to 0 (single contact).
+
+### Planned Fix
+
+Remove `RegisterTouchWindow` so the modern `WM_POINTER*` message pipeline remains active and multiple contacts reach `Win32InputRouter::HandlePointer`.
+
+---
+
+## BUG-014 — High-DPI logical scaling causes video stream resolution fallback to 720P on high-DPI displays
+
+**Status:** `Open`
+
+**Date:** 2026-11-03
+
+### Symptom
+
+On high-DPI displays (such as Surface with 2880x1800 or 2736x1824 physical resolution at 200% scaling), the desktop size is recognized as 1440x900 / 1440x960, and configuring 1080P or higher triggers an "unusable window size" warning that forcefully degrades video resolution to 1280x720.
+
+### Reproduction
+
+1. Run CarPlayStation on a display with 175% or 200% Windows display scaling (e.g., Surface Pro).
+2. Configure video resolution preset to 1080P or higher in settings.
+3. Observe log: `Ignoring unusable window size 1920x1080 (desktop 1440x900)`.
+4. The window and video stream fall back to 1280x720.
+
+### Expected
+
+Video stream resolution negotiation and client window size respect physical display resolution and user settings without being truncated by logical DPI scaling dimensions.
+
+### Actual
+
+DPI-scaled logical dimensions (1440x900) are compared against physical video stream dimensions, falsely rejecting 1080P (1920x1080) and 2K (2560x1440) configurations.
+
+### Root Cause / Investigation
+
+- In `UI/Win32/AppController.cpp`:
+  ```cpp
+  const uint32_t maxW = static_cast<uint32_t>(::GetSystemMetrics(SM_CXSCREEN));
+  const uint32_t maxH = static_cast<uint32_t>(::GetSystemMetrics(SM_CYSCREEN));
+  if (winW == 0 || winW > maxW || winH == 0 || winH > maxH) {
+      CPS_LOG_WARN("AppController", "Ignoring unusable window size ", winW, "x", winH, ...);
+      winW = 1280;
+      winH = 720;
+  }
+  ```
+- `GetSystemMetrics(SM_CXSCREEN)` is queried before the window is created and before Per-Monitor V2 DPI awareness is set, returning DPI-scaled logical coordinates (e.g., 1440x900 on 200% Surface).
+- When `winW` is 1920, `winW > maxW` evaluates to true, triggering an unintended fallback to 1280x720.
+
+### Planned Fix
+
+- Query true physical monitor dimensions (e.g. via `GetMonitorInfo` with `MONITORINFOF_PRIMARY` / physical screen bounds or DPI-unscaled metrics).
+- Ensure Per-Monitor V2 DPI awareness is initialized before querying monitor bounds.
+- Allow video stream resolution to operate at true physical resolution without division by DPI.
+
+---
+
+## BUG-015 — Setup wizard third option (HardwareI2C / Local Authenticator) cannot be selected
+
+**Status:** `Open`
+
+**Date:** 2026-11-03
+
+### Symptom
+
+In the initial MFi setup wizard dialog, clicking the third radio option ("3. 物理 USB-to-I2C 桥接芯片 (HardwareI2C: CH341/CH347/FTDI)") fails to select or keep it selected. Only the first two options can be toggled.
+
+### Reproduction
+
+1. Launch CarPlayStation without existing MFi configuration (or delete `carplay_settings.ini`).
+2. When the MFi setup wizard appears, attempt to click option 3 ("物理 USB-to-I2C 桥接芯片").
+3. Notice option 3 cannot be selected or radio state does not stick.
+
+### Expected
+
+All three MFi authentication options (LocalFile, RemoteHttp, HardwareI2C) can be selected via radio buttons.
+
+### Actual
+
+Option 3 cannot be checked; user is unable to choose HardwareI2C from the wizard UI.
+
+### Root Cause / Investigation
+
+- In `UI/Win32/SetupWizard.cpp`:
+  - Radio button 1 (`hwnd_rad_file`, ID 201) has `BS_AUTORADIOBUTTON | WS_GROUP`.
+  - Radio button 2 (`hwnd_rad_net`, ID 202) has `BS_AUTORADIOBUTTON`.
+  - Multiple `EDIT` controls with `WS_TABSTOP` were created between radio 2 and radio 3.
+  - Radio button 3 (`hwnd_rad_hw`, ID 203) erroneously includes `WS_GROUP`, breaking the Win32 radio group chain.
+- Additionally, `WM_COMMAND` does not handle `BN_CLICKED` notifications for IDs 201, 202, and 203 to explicitly call `CheckRadioButton` or update selection.
+
+### Planned Fix
+
+- Fix control styles (`WS_GROUP`) so all three radio buttons belong to the same radio group.
+- Add explicit button click handling in `WM_COMMAND` with `CheckRadioButton(hwnd, 201, 203, control_id)` to ensure reliable selection.
+
+---
+
 ## Bug Template
 
 Copy the following template when adding a new bug:
