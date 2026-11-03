@@ -862,14 +862,16 @@ Only single-touch input is forwarded; two-finger gestures fail.
 
 ### Root Cause / Investigation
 
-- In `UI/Win32/AppController.cpp`, `RegisterTouchWindow(window_.GetHwnd(), 0)` is called.
-- In Windows 8/10/11, calling `RegisterTouchWindow` instructs the OS to deliver legacy `WM_TOUCH` messages to the window, which suppresses modern `WM_POINTER*` (`WM_POINTERDOWN`, `WM_POINTERUPDATE`, `WM_POINTERUP`) messages.
-- `Win32InputRouter` only listens to `WM_POINTER*` messages and does not handle `WM_TOUCH`.
-- Unhandled `WM_TOUCH` messages fall through to `DefWindowProc`, which degrades them into legacy mouse messages (`WM_LBUTTONDOWN`, `WM_MOUSEMOVE`), handled by `Win32InputRouter::HandleMouse` where the touch slot index is hardcoded to 0 (single contact).
+- In `UI/Win32/AppController.cpp`, `RegisterTouchWindow(window_.GetHwnd(), 0)` was previously called, suppressing `WM_POINTER*` messages.
+- Even after removing `RegisterTouchWindow`, `Win32InputRouter::HandlePointer` checked `FindPointerSlot(pointerId)` for non-overlay touches without calling `AddPointerSlot(pointerId)` on `WM_POINTERDOWN`. Consequently, every touch pointer ID had no pre-existing slot, resulting in `slot >= kMaxPointers` and triggering `CPS_LOG_DEBUG("InputRouter", "Ignoring pointer beyond the advertised contact count")` while returning `false`.
+- Returning `false` on `WM_POINTERDOWN` caused Windows to fall back to synthesizing legacy mouse messages (`WM_LBUTTONDOWN`), which only ever drives single-touch (slot 0).
+- Furthermore, `RemovePointerSlot` compacted arrays via shifting, which altered slot IDs for surviving contacts during multi-finger gestures.
 
 ### Fix
 
-Removed `RegisterTouchWindow` call in `UI/Win32/AppController.cpp`. By default in Windows 8+, touch inputs are dispatched as modern `WM_POINTER*` messages, allowing multiple contact points to reach `Win32InputRouter` directly.
+1. Removed `RegisterTouchWindow` call in `UI/Win32/AppController.cpp`.
+2. In `Win32InputRouter::HandlePointer`, added `slot = AddPointerSlot(pointerId)` upon `WM_POINTERDOWN` when the pointer is not yet assigned.
+3. Changed `AddPointerSlot` and `RemovePointerSlot` to assign stable fixed slots (0 and 1) without shifting/compacting active slots, preserving touch contact continuity.
 
 ---
 
@@ -961,6 +963,62 @@ Option 3 cannot be checked; user is unable to choose HardwareI2C from the wizard
 3. Initialized selection with `CheckRadioButton(hwnd, 201, 203, initial_id)`.
 4. Handled `WM_COMMAND` for IDs 201-203 with `CheckRadioButton(hwnd, 201, 203, control_id)`.
 5. Checked selection on confirm using `IsDlgButtonChecked(hwnd, 201/202/203) == BST_CHECKED`.
+
+---
+
+## BUG-016 — Multi-touch HID touch up resets coordinates to (0,0), cancelling button clicks (press animation shows but action never executes)
+
+**Status:** `Fixed`
+
+**Date:** 2026-11-03
+
+### Symptom
+
+On multi-touch capable devices (e.g. Surface), left-hand sidebar buttons (Dock icons, settings, app drawer) in the CarPlay interface show press/highlight animations when clicked or tapped, but the actions never execute. On desktops without touchscreens, clicking the same buttons works properly.
+
+### Reproduction
+
+1. Launch CarPlayStation on a Surface Pro or a PC with a multi-touch digitizer (`server->hid_touch_contacts() >= 2`).
+2. Connect an iPhone and enter CarPlay.
+3. Tap or click with mouse on any left dock icon (e.g., App List button or music icon).
+4. Notice the button displays the pressed animation, but releasing mouse/finger fails to open the app.
+
+### Expected
+
+Tapping or clicking left dock buttons triggers their action upon release (Touch Up Inside).
+
+### Actual
+
+The button animates on down, but nothing happens on up.
+
+### Root Cause / Investigation
+
+- On desktop machines without touchscreen digitizers, `CoreService` detects `max_contacts < 2` and operates in 1-contact single-touch mode (`SendTouchReport`). When mouse release (`TouchAction::Up`) occurs, `SendTouchReport` preserves the contact's `x_normalized` and `y_normalized` with `contact = 0`, correctly signaling `touchUpInside` to iOS.
+- On Surface, `max_contacts >= 2` activates multi-contact mode (`SendMultiContact`).
+- In `Core/Service/CarPlayCoreService.cpp`:
+  ```cpp
+  switch (action) {
+      case Input::TouchAction::Down:
+      case Input::TouchAction::Move:
+          slots_[slot] = Slot{ true, point.x_normalized, point.y_normalized };
+          break;
+      case Input::TouchAction::Up:
+          slots_[slot] = Slot{}; // <-- zeros out x and y to 0.0f
+          break;
+  ```
+- Because `Slot{}` zero-initializes `x` and `y` to `0.0f`, the generated HID report for `Up` sends `down = 0` at coordinates `(0, 0)`.
+- iOS receives the touch-down event at `(62, 314)` (triggering press animation), but then sees the contact release at `(0, 0)`. iOS interprets this as the finger/pointer dragging out of the button boundaries, triggering `touchUpOutside` / swipe cancel rather than `touchUpInside`.
+- Hence the button animation played, but the action was discarded by iOS.
+
+### Fix
+
+In `CarPlayCoreService.cpp` `SendMultiContact`, updated `TouchAction::Up` to retain the release coordinates:
+```cpp
+case Input::TouchAction::Up:
+    slots_[slot] = Slot{ false, point.x_normalized, point.y_normalized };
+    break;
+```
+This ensures the release report accurately communicates the contact point where the finger or mouse lifted.
 
 ---
 

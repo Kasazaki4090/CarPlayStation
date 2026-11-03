@@ -300,7 +300,7 @@ private:
                 slots_[slot] = Slot{ true, point.x_normalized, point.y_normalized };
                 break;
             case Input::TouchAction::Up:
-                slots_[slot] = Slot{};
+                slots_[slot] = Slot{ false, point.x_normalized, point.y_normalized };
                 break;
             case Input::TouchAction::Cancel:
                 slots_.fill(Slot{});

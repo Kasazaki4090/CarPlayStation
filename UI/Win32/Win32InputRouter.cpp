@@ -49,8 +49,9 @@ void Win32InputRouter::Reset() {
     is_overlay_capturing_ = false;
 
     // Cancel every live touch contact, not just the pointer the mouse path tracks.
-    for (size_t slot = 0; slot < pointer_count_; ++slot) {
-        if (!pointer_slots_[slot].down || pointer_slots_[slot].overlay || !app_api_) {
+    for (size_t slot = 0; slot < kMaxPointers; ++slot) {
+        if (pointer_ids_[slot] == 0 || !pointer_slots_[slot].down ||
+            pointer_slots_[slot].overlay || !app_api_) {
             continue;
         }
         Core::Input::TouchPoint tp{ static_cast<uint32_t>(slot),
@@ -75,7 +76,7 @@ void Win32InputRouter::Reset() {
 }
 
 size_t Win32InputRouter::FindPointerSlot(UINT pointerId) const noexcept {
-    for (size_t i = 0; i < pointer_count_; ++i) {
+    for (size_t i = 0; i < kMaxPointers; ++i) {
         if (pointer_ids_[i] == pointerId) return i;
     }
     return kMaxPointers;
@@ -85,23 +86,26 @@ size_t Win32InputRouter::AddPointerSlot(UINT pointerId) noexcept {
     if (const size_t existing = FindPointerSlot(pointerId); existing < kMaxPointers) {
         return existing;
     }
-    if (pointer_count_ >= kMaxPointers) return kMaxPointers;
-    const size_t slot = pointer_count_++;
-    pointer_ids_[slot] = pointerId;
-    pointer_slots_[slot] = PointerSlot{};
-    return slot;
+    for (size_t i = 0; i < kMaxPointers; ++i) {
+        if (pointer_ids_[i] == 0) {
+            pointer_ids_[i] = pointerId;
+            pointer_slots_[i] = PointerSlot{};
+            ++pointer_count_;
+            return i;
+        }
+    }
+    return kMaxPointers;
 }
 
 void Win32InputRouter::RemovePointerSlot(size_t slot) noexcept {
-    if (slot >= pointer_count_) return;
-    // Compact the arrays so a later finger reuses the freed slot index.
-    for (size_t i = slot; i + 1 < pointer_count_; ++i) {
-        pointer_ids_[i] = pointer_ids_[i + 1];
-        pointer_slots_[i] = pointer_slots_[i + 1];
+    if (slot >= kMaxPointers) return;
+    if (pointer_ids_[slot] != 0) {
+        pointer_ids_[slot] = 0;
+        pointer_slots_[slot] = PointerSlot{};
+        if (pointer_count_ > 0) {
+            --pointer_count_;
+        }
     }
-    --pointer_count_;
-    pointer_ids_[pointer_count_] = 0;
-    pointer_slots_[pointer_count_] = PointerSlot{};
 }
 
 bool Win32InputRouter::HandlePointer(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -145,9 +149,14 @@ bool Win32InputRouter::HandlePointer(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         }
     }
 
-    const size_t slot = FindPointerSlot(pointerId);
+    size_t slot = FindPointerSlot(pointerId);
     if (slot >= kMaxPointers) {
-        if (slot == kMaxPointers && msg != WM_POINTERUP && msg != WM_POINTERLEAVE) {
+        if (msg == WM_POINTERDOWN) {
+            slot = AddPointerSlot(pointerId);
+        }
+    }
+    if (slot >= kMaxPointers) {
+        if (msg != WM_POINTERUP && msg != WM_POINTERLEAVE) {
             // A third finger: more contacts than the advertised descriptor declares.
             CPS_LOG_DEBUG("InputRouter", "Ignoring pointer beyond the advertised contact count");
         }
