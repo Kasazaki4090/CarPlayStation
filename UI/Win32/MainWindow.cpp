@@ -89,16 +89,37 @@ Core::Common::Status MainWindow::Create(const WindowConfig& config) {
     // letterboxes to keep the video aspect.
     RECT rc = { 0, 0, static_cast<LONG>(client_width_), static_cast<LONG>(client_height_) };
     DWORD dwStyle = WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
-    AdjustWindowRectEx(&rc, dwStyle, FALSE, 0);
+
+    UINT initDpi = 96;
+    using GetDpiForSystemFn = UINT(WINAPI*)();
+    static auto pfnGetDpiForSystem = reinterpret_cast<GetDpiForSystemFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForSystem"));
+    if (pfnGetDpiForSystem) {
+        initDpi = pfnGetDpiForSystem();
+    }
+    if (initDpi == 0) initDpi = 96;
+
+    if (!AdjustWindowRectExForDpi(&rc, dwStyle, FALSE, 0, initDpi)) {
+        AdjustWindowRectEx(&rc, dwStyle, FALSE, 0);
+    }
 
     int windowWidth = rc.right - rc.left;
     int windowHeight = rc.bottom - rc.top;
 
-    // Center window on primary monitor
-    int posX = (GetSystemMetrics(SM_CXSCREEN) - windowWidth) / 2;
-    int posY = (GetSystemMetrics(SM_CYSCREEN) - windowHeight) / 2;
-    if (posX < 0) posX = CW_USEDEFAULT;
-    if (posY < 0) posY = CW_USEDEFAULT;
+    // Center window within primary monitor's work area
+    HMONITOR hMon = MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    int posX = CW_USEDEFAULT;
+    int posY = CW_USEDEFAULT;
+    if (GetMonitorInfoW(hMon, &mi)) {
+        int monW = mi.rcWork.right - mi.rcWork.left;
+        int monH = mi.rcWork.bottom - mi.rcWork.top;
+        posX = mi.rcWork.left + (monW - windowWidth) / 2;
+        posY = mi.rcWork.top + (monH - windowHeight) / 2;
+        if (posX < mi.rcWork.left) posX = mi.rcWork.left;
+        if (posY < mi.rcWork.top) posY = mi.rcWork.top;
+    }
 
     // 5. Create Window
     hwnd_ = CreateWindowExW(

@@ -53,6 +53,8 @@ foreach ($f in $binFiles) {
     }
 }
 
+Copy-Item -Path "scripts\Set-UpFirewall.bat" -Destination (Join-Path $pkgDir "scripts") -Force
+Copy-Item -Path "scripts\Set-UpFirewall.bat" -Destination $pkgDir -Force
 Copy-Item -Path "scripts\Set-UpFirewall.ps1" -Destination (Join-Path $pkgDir "scripts") -Force
 Copy-Item -Path "README.md" -Destination $pkgDir -Force
 Copy-Item -Path "README_zh.md" -Destination $pkgDir -Force

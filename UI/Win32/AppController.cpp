@@ -18,6 +18,27 @@ std::wstring Utf8ToWide(const std::string& utf8) {
     }
     return wide;
 }
+
+std::pair<uint32_t, uint32_t> GetPrimaryMonitorPhysicalResolution() {
+    DEVMODEW dm{};
+    dm.dmSize = sizeof(dm);
+    if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) &&
+        dm.dmPelsWidth > 0 && dm.dmPelsHeight > 0) {
+        return { static_cast<uint32_t>(dm.dmPelsWidth), static_cast<uint32_t>(dm.dmPelsHeight) };
+    }
+    HDC hdc = GetDC(nullptr);
+    if (hdc) {
+        int w = GetDeviceCaps(hdc, DESKTOPHORZRES);
+        int h = GetDeviceCaps(hdc, DESKTOPVERTRES);
+        ReleaseDC(nullptr, hdc);
+        if (w > 0 && h > 0) {
+            return { static_cast<uint32_t>(w), static_cast<uint32_t>(h) };
+        }
+    }
+    int w = ::GetSystemMetrics(SM_CXSCREEN);
+    int h = ::GetSystemMetrics(SM_CYSCREEN);
+    return { static_cast<uint32_t>(w > 0 ? w : 1920), static_cast<uint32_t>(h > 0 ? h : 1080) };
+}
 } // namespace
 
 AppController::AppController() = default;
@@ -37,6 +58,10 @@ Core::Common::Status AppController::Initialize(
 
     app_api_ = std::move(appApi);
     headless_ = headless;
+
+    // Ensure Per-Monitor V2 DPI awareness is initialized early so display queries
+    // and window sizing operate on physical pixels rather than logical DIPs.
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     // 1. Restore persisted settings, then create the native Win32 window.
     //
@@ -58,23 +83,22 @@ Core::Common::Status AppController::Initialize(
     if (!headless_) {
         uint32_t winW = 0;
         uint32_t winH = 0;
+        const auto [maxW, maxH] = GetPrimaryMonitorPhysicalResolution();
         if (settings_.video.resolution_preset == Application::VideoResolutionPreset::Custom) {
             // A hand written size (e.g. 1920x720) is used as is. The renderer
             // letterboxes to the video aspect, so an off aspect window is safe.
             winW = settings_.video.custom_width;
             winH = settings_.video.custom_height;
         } else if (settings_.video.resolution_preset == Application::VideoResolutionPreset::Auto) {
-            winW = static_cast<uint32_t>(::GetSystemMetrics(SM_CXSCREEN));
-            winH = static_cast<uint32_t>(::GetSystemMetrics(SM_CYSCREEN));
+            winW = maxW;
+            winH = maxH;
         } else {
             auto dims = settings_.video.GetEffectiveDimensions();
             winW = dims.first;
             winH = dims.second;
         }
 
-        // Never ask for a window that is bigger than the desktop.
-        const uint32_t maxW = static_cast<uint32_t>(::GetSystemMetrics(SM_CXSCREEN));
-        const uint32_t maxH = static_cast<uint32_t>(::GetSystemMetrics(SM_CYSCREEN));
+        // Never ask for a window that is bigger than the physical desktop.
         if (winW == 0 || winW > maxW || winH == 0 || winH > maxH) {
             CPS_LOG_WARN("AppController", "Ignoring unusable window size ", winW, "x", winH,
                          " (desktop ", maxW, "x", maxH, ")");
@@ -149,11 +173,10 @@ Core::Common::Status AppController::Initialize(
         return false;
     });
 
-    // Ask for raw pointer messages so a second finger is visible. Without this the
-    // window only ever receives the synthesized single-point WM_MOUSE* stream.
-    if (!RegisterTouchWindow(window_.GetHwnd(), 0)) {
-        CPS_LOG_WARN("AppController", "RegisterTouchWindow failed; multi-touch disabled");
-    }
+    // Note: Do NOT call RegisterTouchWindow() here. In Windows 8/10/11, calling
+    // RegisterTouchWindow instructs the OS to deliver legacy WM_TOUCH messages instead
+    // of modern WM_POINTER* messages, suppressing multi-touch for Win32InputRouter.
+    // By leaving it unregistered, Windows delivers WM_POINTERDOWN/UPDATE/UP natively.
 
     window_.SetCloseCallback([this]() {
         Shutdown();

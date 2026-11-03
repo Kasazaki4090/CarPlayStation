@@ -1103,12 +1103,12 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 hwnd, nullptr
             );
 
-            // Radio 3: Hardware I2C Bridge
+            // Radio 3: Hardware I2C Bridge (part of 201-203 radio group)
             ctx->hwnd_rad_hw = CreateScaledChild(
                 ctx->dpi, ctx->font,
                 0, L"BUTTON",
                 L"3. 物理 USB-to-I2C 桥接芯片 (HardwareI2C: CH341/CH347/FTDI)",
-                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+                WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
                 24, 324, 540, 24,
                 hwnd, (HMENU)203
             );
@@ -1124,21 +1124,21 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             }
 
             // Restore the previously selected backend.
-            HWND initial = ctx->hwnd_rad_file;
+            int initial_id = 201;
             switch (ctx->selected_type) {
-                case Application::MFiBackendType::RemoteHttp: initial = ctx->hwnd_rad_net; break;
-                case Application::MFiBackendType::HardwareI2C: initial = ctx->hwnd_rad_hw; break;
+                case Application::MFiBackendType::RemoteHttp: initial_id = 202; break;
+                case Application::MFiBackendType::HardwareI2C: initial_id = 203; break;
                 case Application::MFiBackendType::LocalFile:
                 default: break;
             }
-            SendMessageW(initial, BM_SETCHECK, BST_CHECKED, 0);
+            CheckRadioButton(hwnd, 201, 203, initial_id);
 
-            // Confirm button
+            // Confirm button (starts next tab group, terminating the radio group)
             CreateScaledChild(
                 ctx->dpi, ctx->font,
                 0, L"BUTTON",
                 L"确定并进入",
-                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
+                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP | WS_GROUP,
                 394, 360, 146, 34,
                 hwnd, (HMENU)IDOK
             );
@@ -1148,8 +1148,14 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
         case WM_COMMAND: {
             if (!ctx) break;
+            const WORD control_id = LOWORD(wParam);
+            if (control_id >= 201 && control_id <= 203) {
+                CheckRadioButton(hwnd, 201, 203, control_id);
+                return 0;
+            }
+
             // Browse for the certificate file.
-            if (LOWORD(wParam) == 210) {
+            if (control_id == 210) {
                 std::string picked = PickFile(hwnd, L"选择 MFi 证书文件", L"证书文件 (*.p7b;*.cer;*.crt)\0*.p7b;*.cer;*.crt\0所有文件 (*.*)\0*.*\0");
                 if (!picked.empty()) {
                     ctx->cert_path = picked;
@@ -1158,7 +1164,7 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 return 0;
             }
             // Browse for the private key file.
-            if (LOWORD(wParam) == 211) {
+            if (control_id == 211) {
                 std::string picked = PickFile(hwnd, L"选择 MFi 私钥文件", L"私钥文件 (*.pk8;*.pem;*.key)\0*.pk8;*.pem;*.key\0所有文件 (*.*)\0*.*\0");
                 if (!picked.empty()) {
                     ctx->key_path = picked;
@@ -1166,12 +1172,12 @@ static LRESULT CALLBACK MfiWizardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 }
                 return 0;
             }
-            if (LOWORD(wParam) == IDOK) {
-                if (SendMessageW(ctx->hwnd_rad_file, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+            if (control_id == IDOK) {
+                if (IsDlgButtonChecked(hwnd, 201) == BST_CHECKED) {
                     ctx->selected_type = Application::MFiBackendType::LocalFile;
-                } else if (SendMessageW(ctx->hwnd_rad_net, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                } else if (IsDlgButtonChecked(hwnd, 202) == BST_CHECKED) {
                     ctx->selected_type = Application::MFiBackendType::RemoteHttp;
-                } else if (SendMessageW(ctx->hwnd_rad_hw, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                } else if (IsDlgButtonChecked(hwnd, 203) == BST_CHECKED) {
                     ctx->selected_type = Application::MFiBackendType::HardwareI2C;
                 }
 

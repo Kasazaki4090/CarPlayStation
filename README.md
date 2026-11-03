@@ -177,9 +177,12 @@ and select *CarPlayStation*. The app advertises `_airplay._tcp` and
 `_carplay-ctrl._tcp` over mDNS, accepts the Bluetooth RFCOMM identification,
 brings the phone onto the Windows hotspot, and continues over Wi-Fi. If the
 phone never appears, inbound mDNS and RTSP are almost certainly blocked — the
-hotspot interface is treated as a *Public* network profile. Fix it once from an
-elevated PowerShell:
+hotspot interface is treated as a *Public* network profile. Fix it once by running the firewall script as Administrator (right click `Set-UpFirewall.bat` and select **Run as administrator**, or run via terminal):
 
+```cmd
+scripts\Set-UpFirewall.bat
+```
+or via PowerShell:
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\Set-UpFirewall.ps1
 ```

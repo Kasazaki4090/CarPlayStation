@@ -77,8 +77,12 @@ CarPlay 协议在连接建立时，需要 MFi 认证协处理器（或配套的�
 
 ### 2. 运行准备（防火墙放行）
 
-由于 Windows 移动热点或局域网会将无线适配器归入“公用网络”配置文件，Windows 防火墙可能会拦截 mDNS 服务广播与 RTSP 音视频端口。首次使用前，建议以管理员身份运行防火墙配置脚本：
+由于 Windows 移动热点或局域网会将无线适配器归入“公用网络”配置文件，Windows 防火墙可能会拦截 mDNS 服务广播与 RTSP 音视频端口。首次使用前，建议右键 `scripts\Set-UpFirewall.bat` 选择 **“以管理员身份运行”** 进行一键配置：
 
+```cmd
+scripts\Set-UpFirewall.bat
+```
+或在管理员 PowerShell 中执行：
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\Set-UpFirewall.ps1
 ```

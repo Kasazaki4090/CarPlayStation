@@ -837,7 +837,7 @@ prove one had been.
 
 ## BUG-013 — Multi-touch non-functional on Surface (log advertises 2-contact, but input behaves as single-touch)
 
-**Status:** `Open`
+**Status:** `Fixed`
 
 **Date:** 2026-11-03
 
@@ -867,15 +867,15 @@ Only single-touch input is forwarded; two-finger gestures fail.
 - `Win32InputRouter` only listens to `WM_POINTER*` messages and does not handle `WM_TOUCH`.
 - Unhandled `WM_TOUCH` messages fall through to `DefWindowProc`, which degrades them into legacy mouse messages (`WM_LBUTTONDOWN`, `WM_MOUSEMOVE`), handled by `Win32InputRouter::HandleMouse` where the touch slot index is hardcoded to 0 (single contact).
 
-### Planned Fix
+### Fix
 
-Remove `RegisterTouchWindow` so the modern `WM_POINTER*` message pipeline remains active and multiple contacts reach `Win32InputRouter::HandlePointer`.
+Removed `RegisterTouchWindow` call in `UI/Win32/AppController.cpp`. By default in Windows 8+, touch inputs are dispatched as modern `WM_POINTER*` messages, allowing multiple contact points to reach `Win32InputRouter` directly.
 
 ---
 
 ## BUG-014 — High-DPI logical scaling causes video stream resolution fallback to 720P on high-DPI displays
 
-**Status:** `Open`
+**Status:** `Fixed`
 
 **Date:** 2026-11-03
 
@@ -913,17 +913,17 @@ DPI-scaled logical dimensions (1440x900) are compared against physical video str
 - `GetSystemMetrics(SM_CXSCREEN)` is queried before the window is created and before Per-Monitor V2 DPI awareness is set, returning DPI-scaled logical coordinates (e.g., 1440x900 on 200% Surface).
 - When `winW` is 1920, `winW > maxW` evaluates to true, triggering an unintended fallback to 1280x720.
 
-### Planned Fix
+### Fix
 
-- Query true physical monitor dimensions (e.g. via `GetMonitorInfo` with `MONITORINFOF_PRIMARY` / physical screen bounds or DPI-unscaled metrics).
-- Ensure Per-Monitor V2 DPI awareness is initialized before querying monitor bounds.
-- Allow video stream resolution to operate at true physical resolution without division by DPI.
+1. Called `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)` early in `AppController::Initialize()`.
+2. Implemented `GetPrimaryMonitorPhysicalResolution()` using `EnumDisplaySettingsW` (falling back to `GetDeviceCaps(DESKTOPHORZRES)` / `GetSystemMetrics`) to obtain native physical screen dimensions unscaled by DPI.
+3. In `MainWindow::Create()`, calculated outer window size using `AdjustWindowRectExForDpi()` and centered against the monitor work area.
 
 ---
 
 ## BUG-015 — Setup wizard third option (HardwareI2C / Local Authenticator) cannot be selected
 
-**Status:** `Open`
+**Status:** `Fixed`
 
 **Date:** 2026-11-03
 
@@ -951,13 +951,16 @@ Option 3 cannot be checked; user is unable to choose HardwareI2C from the wizard
   - Radio button 1 (`hwnd_rad_file`, ID 201) has `BS_AUTORADIOBUTTON | WS_GROUP`.
   - Radio button 2 (`hwnd_rad_net`, ID 202) has `BS_AUTORADIOBUTTON`.
   - Multiple `EDIT` controls with `WS_TABSTOP` were created between radio 2 and radio 3.
-  - Radio button 3 (`hwnd_rad_hw`, ID 203) erroneously includes `WS_GROUP`, breaking the Win32 radio group chain.
+  - Radio button 3 (`hwnd_rad_hw`, ID 203) erroneously included `WS_GROUP`, breaking the Win32 radio group chain.
 - Additionally, `WM_COMMAND` does not handle `BN_CLICKED` notifications for IDs 201, 202, and 203 to explicitly call `CheckRadioButton` or update selection.
 
-### Planned Fix
+### Fix
 
-- Fix control styles (`WS_GROUP`) so all three radio buttons belong to the same radio group.
-- Add explicit button click handling in `WM_COMMAND` with `CheckRadioButton(hwnd, 201, 203, control_id)` to ensure reliable selection.
+1. Removed `WS_GROUP` from Radio 3 (`hwnd_rad_hw`) so that Radio 1, 2, and 3 form a single contiguous Win32 radio group.
+2. Added `WS_GROUP` to the Confirm button (`IDOK`) to explicitly terminate the radio group.
+3. Initialized selection with `CheckRadioButton(hwnd, 201, 203, initial_id)`.
+4. Handled `WM_COMMAND` for IDs 201-203 with `CheckRadioButton(hwnd, 201, 203, control_id)`.
+5. Checked selection on confirm using `IsDlgButtonChecked(hwnd, 201/202/203) == BST_CHECKED`.
 
 ---
 
