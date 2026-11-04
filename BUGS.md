@@ -1022,6 +1022,128 @@ This ensures the release report accurately communicates the contact point where 
 
 ---
 
+## BUG-017 — Random UI hang/deadlock caused by cross-thread synchronous SetWindowTextW and unsynchronized Direct2D mutation
+
+**Status:** `Investigating`
+
+**Date:** 2026-11-04
+
+### Symptom
+
+During CarPlay operation, the application intermittently freezes and becomes completely unresponsive ("卡死在任何一个奇怪的地方"). The freeze can occur during Now Playing track changes, phone connection/disconnection, window resizing, or when attempting to close the window (where the process hangs indefinitely without exiting).
+
+### Reproduction
+
+1. Launch CarPlayStation.
+2. Connect iPhone wirelessly or switch tracks rapidly in Apple Music / Spotify.
+3. Observe intermittent complete UI freeze, or click the window Close (X) button and observe that the window remains or the background threads hang indefinitely without terminating.
+
+### Expected
+
+UI remains responsive at all times; background worker events do not block the UI message loop; application shuts down cleanly when closed.
+
+### Actual
+
+Process hangs in deadlocks; worker threads freeze waiting for UI thread; window close fails to terminate the process.
+
+### Root Cause / Investigation
+
+Investigation identified multiple thread synchronization issues:
+1. **Cross-thread synchronous `SetWindowTextW` deadlock:**
+   - In `AppController::OnUiStateChanged(const Application::AppUiState& state)`:
+     ```cpp
+     window_.SetTitle(title); // calls SetWindowTextW(hwnd_, title.c_str())
+     ```
+   - `OnUiStateChanged` is triggered via `ui_state_callbacks_` directly from background threads (Bluetooth RFCOMM, iAP2 link, RTSP event loop, and SoftAP watchdog loop).
+   - In Win32, calling `SetWindowTextW` across threads executes an inter-thread `SendMessage(WM_SETTEXT)`. This blocks the calling background thread until the UI thread dispatches the message.
+   - If the UI thread is concurrently executing `Step()` (e.g., rendering D3D11 frame, waiting on `Present(1, 0)` VSync, or holding locks), or entering a modal state (resizing window, settings drawer, message dialog), an **AB-BA deadlock** occurs.
+2. **SoftAP Watchdog and UI thread join inversion:**
+   - When the window close event (`WM_CLOSE`) arrives, `AppController::Shutdown()` calls `core_api_->Stop()`, which invokes `wifi_manager_->StopAccessPoint()`.
+   - `StopAccessPoint()` executes `m_watchdogThread.join()`.
+   - Meanwhile, if `m_watchdogThread` just detected a connected station or state change and fired `connCb`, it invoked `OnUiStateChanged` -> `SetWindowTextW`, waiting synchronously for the UI thread's message queue.
+   - The UI thread is blocked in `join()` waiting for the watchdog thread, while the watchdog thread is blocked in `SetWindowTextW` waiting for the UI thread — causing a permanent deadlock.
+3. **Unsynchronized Direct2D mutation:**
+   - Background threads directly invoke `overlay_.UpdateUiState(state)` from `OnUiStateChanged` while the UI thread is rendering HUD geometry with Direct2D in `overlay_.Draw(...)`. This lacks thread synchronization and can cause driver/Direct2D contention or access violations.
+4. **Disk I/O on background worker threads:**
+   - `wizard_.SaveDeviceAddresses(...)` writes to `carplaystation.ini` synchronously on worker threads during connection events.
+
+### Planned Fix
+
+1. **Decouple UI State Updates via Thread-Safe Snapshot / Message Queue:**
+   - In `AppController`, do not call `window_.SetTitle`, `overlay_.UpdateUiState`, or `wizard_.SaveDeviceAddresses` synchronously from worker thread callbacks.
+   - Store incoming `AppUiState` in a mutex-protected pending snapshot or post a custom message (`WM_APP_UISTATE`) to the window message queue (`PostMessageW`, which is asynchronous and non-blocking).
+   - Apply title changes and overlay updates safely during the UI thread's `Step()` loop.
+2. **Ensure SoftAP Watchdog callback does not block under locks:**
+   - Separate state mutation from callback invocation and ensure callbacks are never called while holding `m_mutex`.
+3. **Graceful thread shutdown without deadlocks:**
+   - Signal termination atomic flags before waiting on threads, and ensure message loop processes pending teardown messages.
+
+---
+
+## BUG-018 — Application crashes 3 times upon MFi certificate change before succeeding
+
+**Status:** `Investigating`
+
+**Date:** 2026-11-04
+
+### Symptom
+
+When replacing or updating the MFi certificate / private key (e.g. via Setup Wizard or editing configuration), the application crashes ("闪退") 3 consecutive times upon connection before finally connecting successfully on the fourth launch.
+
+### Reproduction
+
+1. Have a previously paired iPhone.
+2. Change the MFi certificate / backend in Setup Wizard or settings.
+3. Connect the iPhone.
+4. The application crashes immediately.
+5. Relaunch and attempt connection: crashes again (attempt 2).
+6. Relaunch and attempt connection: crashes again (attempt 3).
+7. Relaunch and attempt connection: connects successfully (attempt 4).
+
+### Expected
+
+Changing certificates renegotiates pairing or gracefully re-authenticates without crashing.
+
+### Actual
+
+The application crashes 3 times (with exception `0xE06D7363` / `std::_Throw_Cpp_error`) before stabilizing.
+
+### Root Cause / Investigation
+
+Crash dump analysis (`crash_dump.dmp`) and code audit identified two interrelated causes:
+1. **Crash on unjoined `std::thread` move-assignment in `WifiSoftApManager`:**
+   - In `Core/Transport/WifiSoftApManager.cpp`:
+     ```cpp
+     m_watchdogThread = std::thread(&WifiSoftApManager::WatchdogLoop, this);
+     ```
+   - When connection retries occur or `StartAccessPoint()` is invoked while `m_watchdogThread` is already running (`m_watchdogThread.joinable() == true`), move-assigning to a joinable `std::thread` immediately invokes `std::terminate()` under the C++ standard.
+   - In MSVC STL, system thread management operations throw `std::system_error` via `std::_Throw_Cpp_error` (exception `0xE06D7363`), which if unhandled causes immediate crash.
+2. **Stale pairing cache causing 3-attempt iOS pair-verify failure loop:**
+   - When MFi certificate / key materials change, the accessory identity Ed25519 keypair and MFi certificate signature change.
+   - However, existing pairing records in `carplay_pairings.json` still contain previous session keys for the controller.
+   - When iOS connects, it attempts `POST /pair-verify` using the previous pairing credentials. Because the MFi backend / accessory credentials changed, `pair-verify` fails with authentication error (`TlvError::Authentication`).
+   - The iOS CarPlay protocol standard specifies that when `pair-verify` fails, iOS retries connection up to **3 times** before concluding that the accessory was reset, purging its client-side cache, and falling back to a full `POST /pair-setup`.
+   - During each of the 3 failure attempts, disconnection teardown / retry triggered the thread re-assignment or unhandled exception crash. After 3 crashes/retries, the stale pairing state was finally bypassed or cleared, allowing normal operation on attempt 4.
+
+### Planned Fix
+
+1. **Safe Watchdog Thread Lifecycle in `WifiSoftApManager`:**
+   - Before launching a new watchdog thread, properly stop and join any existing thread:
+     ```cpp
+     if (m_watchdogThread.joinable()) {
+         m_watchdogRunning = false;
+         m_watchdogThread.join();
+     }
+     ```
+2. **Pairing Store Invalidation on MFi Certificate / Identity Change:**
+   - When certificate or MFi mode changes in `SetupWizard` or `ApplicationService::ApplyMfiSigner`:
+     - Invalidate or clear stale device pairings in `carplay_pairings.json`.
+     - Regenerate or re-synchronize `carplay_accessory_identity.json` so the phone detects the change immediately and starts a clean `/pair-setup` on attempt 1 without failing 3 times.
+3. **Catch exceptions across thread spawn and network endpoints:**
+   - Wrap thread creation and RTSP/iAP2 connection dispatchers in `try ... catch (const std::exception&)` with clear logging rather than allowing unhandled exceptions to terminate the process.
+
+---
+
 ## Bug Template
 
 Copy the following template when adding a new bug:
