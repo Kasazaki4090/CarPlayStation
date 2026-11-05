@@ -1259,3 +1259,65 @@ Negative / limitations:
 - `Reference/carplayd/docs/APPLE_BEHAVIORAL_REFERENCE.md` (`enablesUIAppearance`, `uiAppearanceModes`,
   `SessionState.nightMode`)
 - `Tests/UiTests.cpp` (`MockApplicationApi::SetHostNightMode`, `TestAppControllerHeadlessLifecycle`)
+
+---
+
+## DEC-014 — Visual Handshake Progress Stepper (Replacing Single-Dot Indicator)
+
+**Status:** `Accepted`
+
+**Date:** 2026-11-05
+
+### Context
+
+The current HUD in `OverlayRenderer.cpp` uses a top-left status pill (`DrawStatusPill`) with a single coloured status dot:
+- **Orange (Waiting / Idle / Paused):** `CarPlayStation — 等待 iPhone 连接`
+- **Blue (In Progress):** `检测到 iPhone 蓝牙配对请求...` / `iAP2 认证成功，建立 Wi-Fi 连接通道...` / `Wi-Fi AP 已握手，启动 AirPlay 会话...`
+- **Green (Streaming):** `已连接: iPhone | 1920x1080 @ 60 FPS H.264 [硬解]`
+
+While simple, the 3-color dot indicator provides insufficient granularity during multi-phase wireless handshakes. Wireless CarPlay involves five distinct asynchronous milestones:
+1. **Bluetooth RFCOMM Link & Wakeup:** Listening / actively dialing remembered iPhone.
+2. **iAP2 Session & MFi Authentication:** Control session establish, identification, MFi auth signature verification.
+3. **Wi-Fi SoftAP Association & IP Allocation:** Station 802.11 join, DHCP address lease, and ARP resolution.
+4. **mDNS Service Discovery & RTSP Control Channel:** `_airplay._tcp` announcement, `_carplay-ctrl` query, RTSP port 5000 pair-verify (`/pair-setup` / `/pair-verify`).
+5. **AirPlay RTSP Media Negotiation & Video Pipeline:** `/info`, `/setup`, `/record`, video receiver port 7100 H.264/HEVC stream decoding.
+
+Reference implementations (such as `xcertplay` and commercial automotive head units) present a visual, multi-step segmented progress bar or stepper indicating exactly what the system is currently doing. When an issue occurs (e.g. MFi chip unreachable, Wi-Fi DHCP pending, or RTSP verification stalled), a progress stepper instantly isolates the failed stage instead of leaving the user looking at a generic blue or orange dot.
+
+### Decision
+
+1. **Adopt a Segmented 5-Stage Visual Progress Bar in the HUD:**
+   Replace the single status dot with an expandable multi-step segmented visual progress bar and diagnostic pill:
+   - **Step 1: 蓝牙连接 (Bluetooth Link)** — RFCOMM link established / active wakeup.
+   - **Step 2: MFi 认证 (MFi Authentication)** — Coprocessor challenge-response / certificate verified.
+   - **Step 3: Wi-Fi 通道 (Wi-Fi Association)** — Hotspot association, DHCP lease acquired, ARP verified.
+   - **Step 4: 服务发现 (mDNS & RTSP)** — AirPlay discovery matched, RTSP control handshake complete.
+   - **Step 5: 视频渲染 (AirPlay Streaming)** — Port 7100 H.264/HEVC video pipeline running, input sink active.
+
+2. **Visual States Per Step:**
+   Each step in the visual stepper renders with standard states:
+   - `Pending / Inactive`: Subdued outline / gray label.
+   - `Active / Busy`: Pulsing accent-blue highlight with a concise activity label (e.g. `[2/5] 正在验证 MFi 证书...` or `[3/5] 等待分配 IP 地址...`).
+   - `Completed`: Solid green checkmark / filled bar.
+   - `Error / Stalled`: Amber/Red badge with contextual diagnosis and a 1-click retry button.
+
+3. **Behavior and Non-Intrusiveness:**
+   - **Pre-connection / Connecting Phase:** The stepper is visible and prominently indicates handshake progress and stage timing.
+   - **Streaming Phase:** Upon reaching Step 5 (`AirPlayStreaming`), the stepper transitions into the compact streaming telemetry readout (showing device name, resolution, FPS, codec, hardware acceleration tag, and NowPlaying metadata) and smoothly fades out after 3 seconds of inactivity to keep the screen distraction-free.
+   - **Clickable Action:** Clicking the pill during any waiting or stalled phase triggers `TriggerReconnection()`.
+
+### Alternatives
+
+- **Keep single-dot status pill and rely entirely on the standalone Log Panel (F4):** Rejected. The log panel contains raw text traces meant for debugging; ordinary car drivers and end users cannot parse raw hex dumps and socket WSA codes. A visual stepper provides instant, intuitive status at a glance.
+- **Modal blocking dialog for each stage:** Rejected. Handshakes take 1-3 seconds under normal conditions. A modal dialog would feel jarring, flicker, and block touch interaction with underlying controls.
+
+### Reason
+
+Aligning the UI experience with `xcertplay` and standard automotive HUD expectations makes CarPlayStation substantially more user-friendly, self-explanatory, and diagnoseable without requiring technical log inspection.
+
+### References
+
+- `DECISIONS.md` `DEC-002` (UI isolation & App layer)
+- `UI/Win32/OverlayRenderer.cpp` (`DrawStatusPill`, `ui_state_.session_state`)
+- `Reference/xcertplay/` UI progress indicators and stage machines
+- `BUGS.md` `BUG-010`, `BUG-019`
