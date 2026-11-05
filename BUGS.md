@@ -1024,7 +1024,7 @@ This ensures the release report accurately communicates the contact point where 
 
 ## BUG-017 — Random UI hang/deadlock caused by cross-thread synchronous SetWindowTextW and unsynchronized Direct2D mutation
 
-**Status:** `Investigating`
+**Status:** `Fixed`
 
 **Date:** 2026-11-04
 
@@ -1067,22 +1067,21 @@ Investigation identified multiple thread synchronization issues:
 4. **Disk I/O on background worker threads:**
    - `wizard_.SaveDeviceAddresses(...)` writes to `carplaystation.ini` synchronously on worker threads during connection events.
 
-### Planned Fix
+### Fix
 
-1. **Decouple UI State Updates via Thread-Safe Snapshot / Message Queue:**
-   - In `AppController`, do not call `window_.SetTitle`, `overlay_.UpdateUiState`, or `wizard_.SaveDeviceAddresses` synchronously from worker thread callbacks.
-   - Store incoming `AppUiState` in a mutex-protected pending snapshot or post a custom message (`WM_APP_UISTATE`) to the window message queue (`PostMessageW`, which is asynchronous and non-blocking).
-   - Apply title changes and overlay updates safely during the UI thread's `Step()` loop.
-2. **Ensure SoftAP Watchdog callback does not block under locks:**
-   - Separate state mutation from callback invocation and ensure callbacks are never called while holding `m_mutex`.
-3. **Graceful thread shutdown without deadlocks:**
-   - Signal termination atomic flags before waiting on threads, and ensure message loop processes pending teardown messages.
+1. **Decoupled UI State Updates via Non-blocking Queue:**
+   - In `AppController::OnUiStateChanged()`, background threads now update a mutex-protected `pending_ui_state_` and post an asynchronous non-blocking `WM_APP + 101` message via `::PostMessageW()`.
+   - The UI thread drains `pending_ui_state_` inside its message hook and `Step()` loop via `ApplyUiStateOnUiThread()`.
+   - `window_.SetTitle()`, `overlay_.UpdateUiState()`, and INI persistence are now executed strictly on the UI thread, completely preventing worker threads from blocking or deadlocking with Direct2D/VSync/Win32 message pumps.
+2. **Responsive Watchdog Thread Lifecycle:**
+   - Sliced `WatchdogLoop` wait time in `WifiSoftApManager` into 50ms intervals so thread termination signals are processed immediately.
+   - Added thread self-join prevention guards across `StopAccessPoint()` and `StartAccessPoint()`.
 
 ---
 
 ## BUG-018 — Application crashes 3 times upon MFi certificate change before succeeding
 
-**Status:** `Investigating`
+**Status:** `Fixed`
 
 **Date:** 2026-11-04
 
@@ -1125,22 +1124,18 @@ Crash dump analysis (`crash_dump.dmp`) and code audit identified two interrelate
    - The iOS CarPlay protocol standard specifies that when `pair-verify` fails, iOS retries connection up to **3 times** before concluding that the accessory was reset, purging its client-side cache, and falling back to a full `POST /pair-setup`.
    - During each of the 3 failure attempts, disconnection teardown / retry triggered the thread re-assignment or unhandled exception crash. After 3 crashes/retries, the stale pairing state was finally bypassed or cleared, allowing normal operation on attempt 4.
 
-### Planned Fix
+### Fix
 
-1. **Safe Watchdog Thread Lifecycle in `WifiSoftApManager`:**
-   - Before launching a new watchdog thread, properly stop and join any existing thread:
-     ```cpp
-     if (m_watchdogThread.joinable()) {
-         m_watchdogRunning = false;
-         m_watchdogThread.join();
-     }
-     ```
-2. **Pairing Store Invalidation on MFi Certificate / Identity Change:**
-   - When certificate or MFi mode changes in `SetupWizard` or `ApplicationService::ApplyMfiSigner`:
-     - Invalidate or clear stale device pairings in `carplay_pairings.json`.
-     - Regenerate or re-synchronize `carplay_accessory_identity.json` so the phone detects the change immediately and starts a clean `/pair-setup` on attempt 1 without failing 3 times.
-3. **Catch exceptions across thread spawn and network endpoints:**
-   - Wrap thread creation and RTSP/iAP2 connection dispatchers in `try ... catch (const std::exception&)` with clear logging rather than allowing unhandled exceptions to terminate the process.
+1. **Safe Watchdog and Server Thread Lifecycle:**
+   - Added join guards before thread assignment in `WifiSoftApManager::StartAccessPoint()` and `AirPlayRtspServer::Impl::Start()`. If a thread is joinable, it is properly stopped and joined first before launching a new worker thread.
+   - Wrapped thread spawning in `try ... catch (const std::exception&)` blocks.
+2. **Pairing Store and Accessory Identity Invalidation on Credential Change:**
+   - Implemented `AccessoryIdentityStore::Regenerate()` and `ICarPlayCoreApi::ResetPairingData()`.
+   - When MFi certificate, private key, or backend changes via `SetupWizard` or `AppController::OnSettingsChanged`, `ResetPairingData()` is called immediately:
+     - `pairing_store_->Clear()` deletes obsolete device pairings.
+     - `accessory_identity_->Regenerate()` generates and saves a fresh Ed25519 keypair.
+     - Re-registers pair-setup identity and pair-verify finder with `AirPlayRtspServer`.
+   - The iPhone immediately detects the new identity and starts a clean `/pair-setup` on attempt 1 without entering the 3-attempt crash retry loop.
 
 ---
 

@@ -100,6 +100,9 @@ public:
 
     // Query current application state snapshot
     [[nodiscard]] virtual AppUiState GetCurrentState() const = 0;
+
+    // Reset pairing records and regenerate accessory identity (called on certificate / credential change)
+    virtual void ResetPairingData() = 0;
 };
 
 } // namespace CarPlayStation::Application

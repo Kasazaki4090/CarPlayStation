@@ -1511,6 +1511,7 @@ Common::Status CarPlayCoreService::SetMfiSigner(std::shared_ptr<Hardware::IMfiSi
     if (!signer) {
         return Common::Status::Error(Common::StatusCode::InvalidArgument, "MFi signer is null");
     }
+    const bool changed = (mfi_signer_ != nullptr && mfi_signer_ != signer);
     mfi_signer_ = std::move(signer);
 
     if (auto handler = std::dynamic_pointer_cast<CoreIap2PacketHandler>(iap2_handler_)) {
@@ -1519,7 +1520,47 @@ Common::Status CarPlayCoreService::SetMfiSigner(std::shared_ptr<Hardware::IMfiSi
     if (rtsp_server_) {
         rtsp_server_->SetMfiSigner(mfi_signer_);
     }
+    if (changed) {
+        ResetPairingData();
+    }
     return Common::Status::Ok();
+}
+
+void CarPlayCoreService::ResetPairingData() {
+    CPS_LOG_INFO("CoreService", "ResetPairingData: clearing pairing store and regenerating accessory identity");
+    if (pairing_store_) {
+        pairing_store_->Clear();
+    }
+    if (accessory_identity_) {
+        accessory_identity_->Regenerate();
+    }
+    if (accessory_identity_ && rtsp_server_) {
+        Session::Pairing::AccessoryIdentity identity = accessory_identity_->Identity().ToAccessoryIdentity();
+        std::string id_str = device_id_.empty() ? "00:1A:7D:DA:71:05" : device_id_;
+        identity.id = std::vector<uint8_t>(id_str.begin(), id_str.end());
+        rtsp_server_->SetPairSetupIdentity(identity,
+            [store = pairing_store_](const uint8_t* id, size_t idLen, const uint8_t* ltpk) {
+                Session::PairedDevice dev;
+                dev.device_id = std::string(reinterpret_cast<const char*>(id), idLen);
+                dev.public_key.assign(ltpk, ltpk + 32);
+                dev.last_connected_timestamp = static_cast<uint64_t>(::time(nullptr));
+                (void)store->SaveDevice(dev);
+                CPS_LOG_INFO("CoreService", "Saved paired device to store: ", dev.device_id);
+            });
+        rtsp_server_->SetPairVerify(std::move(identity),
+            [store = pairing_store_](const uint8_t* id, size_t idLen) -> std::optional<std::array<uint8_t, 32>> {
+                std::string dev_id(reinterpret_cast<const char*>(id), idLen);
+                auto dev = store->GetDevice(dev_id);
+                if (dev.IsError() || dev.Value().public_key.size() != 32) {
+                    CPS_LOG_WARN("CoreService", "Device not found in pairing store: ", dev_id);
+                    return std::nullopt;
+                }
+                std::array<uint8_t, 32> ltpk;
+                memcpy(ltpk.data(), dev.Value().public_key.data(), 32);
+                CPS_LOG_INFO("CoreService", "Found paired device in store: ", dev_id);
+                return ltpk;
+            });
+    }
 }
 
 std::shared_ptr<Transport::ITransportChannel> CarPlayCoreService::GetTransport() const {

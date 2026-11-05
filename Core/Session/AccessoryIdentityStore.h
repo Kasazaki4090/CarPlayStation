@@ -36,6 +36,9 @@ public:
 
     std::string GetStoragePath() const { return path_; }
 
+    // Regenerate and persist a fresh Ed25519 keypair, invalidating old identity
+    void Regenerate();
+
 private:
     bool Load();
     bool Save() const;

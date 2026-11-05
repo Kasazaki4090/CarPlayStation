@@ -84,6 +84,18 @@ AccessoryIdentityStore::AccessoryIdentityStore(std::string path) : path_(std::mo
     }
 }
 
+void AccessoryIdentityStore::Regenerate() {
+    auto kp = Pairing::ed25519::GenerateKeyPair();
+    identity_.public_key = kp.pubKey;
+    identity_.secret_key = kp.secret;
+    generated_ = true;
+    if (Save()) {
+        CPS_LOG_INFO(kLogTag, "Regenerated and saved new accessory identity: ", path_);
+    } else {
+        CPS_LOG_WARN(kLogTag, "Could not save regenerated accessory identity to: ", path_);
+    }
+}
+
 bool AccessoryIdentityStore::Load() {
     std::ifstream file(path_);
     if (!file.is_open()) return false;

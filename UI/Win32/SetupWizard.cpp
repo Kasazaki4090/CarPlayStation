@@ -1,6 +1,7 @@
 #include "SetupWizard.h"
 #include "Core/Common/Logging.h"
 #include <algorithm>
+#include <filesystem>
 #include <commctrl.h>
 #include <shlobj.h>
 #include <commdlg.h>
@@ -1320,6 +1321,12 @@ bool SetupWizard::ShowMFiWizard(HWND parent, Application::AppSettings& settings,
         preferences_.first_run_completed = true;
         SavePreferences();
         SaveMFiSettings(settings);
+
+        // Clear stale pairing records and accessory identity so the phone immediately starts
+        // a clean /pair-setup with the new MFi credentials rather than failing pair-verify 3 times.
+        std::error_code ec;
+        std::filesystem::remove("carplay_pairings.json", ec);
+        std::filesystem::remove("carplay_accessory_identity.json", ec);
     }
 
     return ctx.confirmed;

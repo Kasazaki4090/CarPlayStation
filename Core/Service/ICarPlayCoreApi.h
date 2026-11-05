@@ -73,6 +73,9 @@ public:
     // Swap the MFi signer at runtime (e.g. after the user picks a backend in
     // the settings drawer). Safe to call before or after StartMFiAuth.
     [[nodiscard]] virtual Common::Status SetMfiSigner(std::shared_ptr<Hardware::IMfiSigner> signer) = 0;
+
+    // Reset pairing records and regenerate accessory identity (called on certificate / credential change).
+    virtual void ResetPairingData() = 0;
 };
 
 } // namespace CarPlayStation::Core::Service

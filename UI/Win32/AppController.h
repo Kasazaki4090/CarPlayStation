@@ -9,6 +9,8 @@
 #include "Win32InputRouter.h"
 #include <chrono>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <thread>
 
 namespace CarPlayStation::UI {
@@ -59,6 +61,7 @@ public:
 
 private:
     void OnUiStateChanged(const Application::AppUiState& state);
+    void ApplyUiStateOnUiThread(const Application::AppUiState& state);
     void OnSettingsChanged(const Application::AppSettings& newSettings);
 
     // Write the debounced [Video] / [Audio] settings back to the INI. Called
@@ -87,6 +90,10 @@ private:
 
     std::shared_ptr<Application::IApplicationApi> app_api_;
     Application::AppSettings settings_;
+
+    // Pending UI state queue for cross-thread dispatch without deadlocks
+    std::mutex pending_ui_state_mutex_;
+    std::optional<Application::AppUiState> pending_ui_state_;
 
     // Last recorded phone addresses persisted to the INI (to avoid redundant writes).
     std::string persisted_bt_mac_;

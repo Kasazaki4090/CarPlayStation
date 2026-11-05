@@ -63,6 +63,14 @@ Common::Status WifiSoftApManager::StartAccessPoint(const WifiApCredentials& cred
         return Common::Status::Error(Common::StatusCode::InvalidArgument, "WPA2 passphrase must be at least 8 characters");
     }
 
+    // Safely join any previously running watchdog thread before starting a new one
+    m_watchdogRunning = false;
+    if (m_watchdogThread.joinable()) {
+        if (m_watchdogThread.get_id() != std::this_thread::get_id()) {
+            m_watchdogThread.join();
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_credentials = credentials;
@@ -71,7 +79,11 @@ Common::Status WifiSoftApManager::StartAccessPoint(const WifiApCredentials& cred
     if (m_simulatedMode.load()) {
         m_state = ApState::Running;
         m_watchdogRunning = true;
-        m_watchdogThread = std::thread(&WifiSoftApManager::WatchdogLoop, this);
+        try {
+            m_watchdogThread = std::thread(&WifiSoftApManager::WatchdogLoop, this);
+        } catch (const std::exception& ex) {
+            CPS_LOG_ERROR("WifiSoftAp", "Failed to launch simulated WatchdogLoop: ", ex.what());
+        }
 
         ApStateChangedCallback cb;
         {
@@ -135,7 +147,11 @@ Common::Status WifiSoftApManager::StartAccessPoint(const WifiApCredentials& cred
 
     m_state = ApState::Running;
     m_watchdogRunning = true;
-    m_watchdogThread = std::thread(&WifiSoftApManager::WatchdogLoop, this);
+    try {
+        m_watchdogThread = std::thread(&WifiSoftApManager::WatchdogLoop, this);
+    } catch (const std::exception& ex) {
+        CPS_LOG_ERROR("WifiSoftAp", "Failed to launch WatchdogLoop thread: ", ex.what());
+    }
 
     ApStateChangedCallback cb;
     {
@@ -153,7 +169,9 @@ Common::Status WifiSoftApManager::StartAccessPoint(const WifiApCredentials& cred
 void WifiSoftApManager::StopAccessPoint() {
     m_watchdogRunning = false;
     if (m_watchdogThread.joinable()) {
-        m_watchdogThread.join();
+        if (m_watchdogThread.get_id() != std::this_thread::get_id()) {
+            m_watchdogThread.join();
+        }
     }
 
     {
@@ -274,7 +292,12 @@ void WifiSoftApManager::WatchdogLoop() {
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 #endif
     while (m_watchdogRunning.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        for (int i = 0; i < 10 && m_watchdogRunning.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (!m_watchdogRunning.load()) {
+            break;
+        }
         if (!m_simulatedMode.load()) {
             QueryNativeHostedNetworkStatus();
         }

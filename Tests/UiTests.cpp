@@ -122,6 +122,12 @@ public:
         return ui_state_;
     }
 
+    void ResetPairingData() override {
+        reset_pairing_called_ = true;
+    }
+
+    bool reset_pairing_called_{false};
+
     void NotifyState() {
         for (auto& cb : state_cbs_) {
             cb(ui_state_);

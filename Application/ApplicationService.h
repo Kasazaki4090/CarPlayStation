@@ -61,6 +61,8 @@ public:
 
     [[nodiscard]] AppUiState GetCurrentState() const override;
 
+    void ResetPairingData() override;
+
     // --- Additional accessors ---
     [[nodiscard]] std::shared_ptr<Core::Service::ICarPlayCoreApi> GetCoreApi() const { return core_api_; }
 

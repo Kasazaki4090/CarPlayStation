@@ -167,6 +167,20 @@ Core::Common::Status AppController::Initialize(
     // 5. Wire Input Router to Window Message Hook
     input_router_ = std::make_unique<Win32InputRouter>(app_api_, &renderer_, &overlay_);
     window_.SetMessageHook([this](HWND h, UINT m, WPARAM w, LPARAM l) {
+        if (m == WM_APP + 101) {
+            std::optional<Application::AppUiState> state_to_apply;
+            {
+                std::lock_guard<std::mutex> lock(pending_ui_state_mutex_);
+                if (pending_ui_state_) {
+                    state_to_apply = std::move(pending_ui_state_);
+                    pending_ui_state_.reset();
+                }
+            }
+            if (state_to_apply) {
+                ApplyUiStateOnUiThread(*state_to_apply);
+            }
+            return true;
+        }
         if (input_router_) {
             return input_router_->OnWindowMessage(h, m, w, l);
         }
@@ -263,6 +277,21 @@ bool AppController::Step() {
     if (!window_.ProcessMessages()) {
         is_running_ = false;
         return false;
+    }
+
+    // Drain pending UI state update safely on the UI thread before rendering
+    {
+        std::optional<Application::AppUiState> state_to_apply;
+        {
+            std::lock_guard<std::mutex> lock(pending_ui_state_mutex_);
+            if (pending_ui_state_) {
+                state_to_apply = std::move(pending_ui_state_);
+                pending_ui_state_.reset();
+            }
+        }
+        if (state_to_apply) {
+            ApplyUiStateOnUiThread(*state_to_apply);
+        }
     }
 
     // 1. Render D3D11 video frame (or letterbox background) without premature present
@@ -382,7 +411,7 @@ void AppController::RefreshUiState() {
     pushed_video_fps_ = state.current_video_fps;
     pushed_video_codec_ = state.current_video_codec;
     pushed_is_hardware_decode_ = state.is_hardware_decode;
-    OnUiStateChanged(state);
+    ApplyUiStateOnUiThread(state);
 }
 
 void AppController::Shutdown() {
@@ -410,6 +439,18 @@ void AppController::Shutdown() {
 }
 
 void AppController::OnUiStateChanged(const Application::AppUiState& state) {
+    // Non-blocking snapshot: never invoke synchronous Win32 APIs or Direct2D mutation
+    // from worker threads (avoids cross-thread SendMessage deadlocks).
+    {
+        std::lock_guard<std::mutex> lock(pending_ui_state_mutex_);
+        pending_ui_state_ = state;
+    }
+    if (window_.GetHwnd()) {
+        ::PostMessageW(window_.GetHwnd(), WM_APP + 101, 0, 0);
+    }
+}
+
+void AppController::ApplyUiStateOnUiThread(const Application::AppUiState& state) {
     overlay_.UpdateUiState(state);
     pushed_video_width_ = state.current_video_width;
     pushed_video_height_ = state.current_video_height;
@@ -461,6 +502,9 @@ void AppController::OnSettingsChanged(const Application::AppSettings& newSetting
     }
     if (mfi_changed) {
         wizard_.SaveMFiSettings(settings_);
+        if (app_api_) {
+            app_api_->ResetPairingData();
+        }
     }
     // The drawer fires this callback on every slider drag frame, so the video and
     // audio settings are written to the INI only once the values go quiet

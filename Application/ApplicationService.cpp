@@ -340,6 +340,13 @@ AppUiState ApplicationService::GetCurrentState() const {
     return ui_state_;
 }
 
+void ApplicationService::ResetPairingData() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (core_api_) {
+        core_api_->ResetPairingData();
+    }
+}
+
 // ============================================================================
 // Private — Core Event Handling
 // ============================================================================

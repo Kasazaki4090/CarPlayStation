@@ -848,8 +848,19 @@ public:
             bound_port_ = options_.port;
         }
 
+        if (server_thread_.joinable()) {
+            if (server_thread_.get_id() != std::this_thread::get_id()) {
+                server_thread_.join();
+            }
+        }
+
         running_ = true;
-        server_thread_ = std::thread(&Impl::AcceptLoop, this);
+        try {
+            server_thread_ = std::thread(&Impl::AcceptLoop, this);
+        } catch (const std::exception& ex) {
+            CPS_LOG_ERROR("AirPlayRtsp", "Failed to launch AcceptLoop thread: ", ex.what());
+            return Common::Status::Error(Common::StatusCode::Unavailable, "Thread spawn failed");
+        }
         CPS_LOG_INFO("AirPlayRtsp", "Server started on port ", std::to_string(bound_port_));
         return Common::Status::Ok();
     }

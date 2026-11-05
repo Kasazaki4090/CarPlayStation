@@ -94,6 +94,9 @@ public:
     // iAP2 packet handler so the next MFi exchange uses the new backend.
     [[nodiscard]] Common::Status SetMfiSigner(std::shared_ptr<Hardware::IMfiSigner> signer) override;
 
+    // Reset pairing records and regenerate accessory identity (called on certificate / credential change).
+    void ResetPairingData() override;
+
     // --- Additional accessors (not part of ICarPlayCoreApi) ---
     [[nodiscard]] std::shared_ptr<Hardware::IMfiSigner> GetMfiSigner() const;
     [[nodiscard]] std::shared_ptr<Transport::ITransportChannel> GetTransport() const;
