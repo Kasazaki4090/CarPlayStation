@@ -427,7 +427,7 @@ void OverlayRenderer::DrawStatusPill(float width, float height) {
 
     switch (ui_state_.session_state) {
         case Core::Session::SessionState::Idle:
-            statusText = L"CarPlayStation — 等待 iPhone 连接 (请开启蓝牙配对)";
+            statusText = L"CarPlayStation — 等待 iPhone 连接 (请开启蓝牙配对或点击重新拉起)";
             dotBrush = brush_status_orange_.Get();
             break;
         case Core::Session::SessionState::BtDiscovered:
@@ -499,8 +499,9 @@ void OverlayRenderer::DrawStatusPill(float width, float height) {
     const float maxPillWidth = width - 76.0f - pillX;  // keep clear of the gear button
     if (maxPillWidth > 200.0f && pillWidth > maxPillWidth) pillWidth = maxPillWidth;
 
+    status_pill_rect_ = D2D1::RectF(pillX, pillY, pillX + pillWidth, pillY + pillHeight);
     D2D1_ROUNDED_RECT pillRect = D2D1::RoundedRect(
-        D2D1::RectF(pillX, pillY, pillX + pillWidth, pillY + pillHeight),
+        status_pill_rect_,
         16.0f, 16.0f
     );
 
@@ -542,9 +543,9 @@ void OverlayRenderer::DrawStatusPill(float width, float height) {
 
 void OverlayRenderer::DrawSettingsDrawer(float width, float height) {
     float drawerW = 360.0f;
-    float drawerH = (height <= 500.0f) ? (height - 20.0f) : 410.0f;
+    float drawerH = (height <= 520.0f) ? (height - 20.0f) : 465.0f;
     float drawerX = width - drawerW - 16.0f;
-    float drawerY = (height <= 500.0f) ? 10.0f : 56.0f;
+    float drawerY = (height <= 520.0f) ? 10.0f : 56.0f;
     drawer_rect_ = D2D1::RectF(drawerX, drawerY, drawerX + drawerW, drawerY + drawerH);
 
     D2D1_ROUNDED_RECT drawerRRect = D2D1::RoundedRect(drawer_rect_, 12.0f, 12.0f);
@@ -732,6 +733,40 @@ void OverlayRenderer::DrawSettingsDrawer(float width, float height) {
 
         curY += 22.0f;
     }
+
+    // --- Section 3: 连接控制 ---
+    curY += 6.0f;
+    std::wstring connTitle = L"连接与发现控制 (Connection Discovery):";
+    D2D1_RECT_F connSecRect = D2D1::RectF(drawerX + 16.0f, curY, drawerX + drawerW - 16.0f, curY + 18.0f);
+    d2d_render_target_->DrawText(
+        connTitle.c_str(),
+        static_cast<UINT32>(connTitle.length()),
+        tf_small_.Get(),
+        &connSecRect,
+        brush_accent_blue_.Get()
+    );
+    curY += 22.0f;
+
+    float actionBtnW = drawerW - 32.0f;
+    float actionBtnH = 28.0f;
+    D2D1_RECT_F rConn = D2D1::RectF(drawerX + 16.0f, curY, drawerX + 16.0f + actionBtnW, curY + actionBtnH);
+    drawer_buttons_.push_back({L"🔄 重新发现并拉起 CarPlay", rConn, true, [this]() {
+        if (reconnect_callback_) {
+            reconnect_callback_();
+        }
+    }});
+
+    D2D1_ROUNDED_RECT bConnRect = D2D1::RoundedRect(rConn, 4.0f, 4.0f);
+    d2d_render_target_->FillRoundedRectangle(&bConnRect, brush_accent_blue_.Get());
+    D2D1_RECT_F tConnRect = D2D1::RectF(rConn.left, rConn.top + 6.0f, rConn.right, rConn.bottom);
+    std::wstring btnLabel = L"🔄 重新发现并拉起 CarPlay";
+    d2d_render_target_->DrawText(
+        btnLabel.c_str(),
+        static_cast<UINT32>(btnLabel.length()),
+        tf_small_.Get(),
+        &tConnRect,
+        brush_text_white_.Get()
+    );
 }
 
 void OverlayRenderer::DrawLogPanel(float width, float height) {
@@ -841,6 +876,16 @@ bool OverlayRenderer::OnMouseDown(float clientX, float clientY) {
             clientY >= gear_btn_rect_.top - 6.0f && clientY <= gear_btn_rect_.bottom + 6.0f) {
             show_settings_drawer_ = !show_settings_drawer_;
             CPS_LOG_INFO("Overlay", "Gear button clicked, show_settings_drawer_ = ", show_settings_drawer_ ? "true" : "false");
+            return true;
+        }
+
+        // 1.2 Check Status Pill (when not streaming: click to re-trigger discovery burst)
+        if (!ui_state_.is_streaming && clientX >= status_pill_rect_.left && clientX <= status_pill_rect_.right &&
+            clientY >= status_pill_rect_.top && clientY <= status_pill_rect_.bottom) {
+            if (reconnect_callback_) {
+                CPS_LOG_INFO("Overlay", "Status pill clicked while idle, triggering CarPlay re-discovery burst");
+                reconnect_callback_();
+            }
             return true;
         }
 

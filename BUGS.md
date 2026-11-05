@@ -1139,6 +1139,54 @@ Crash dump analysis (`crash_dump.dmp`) and code audit identified two interrelate
 
 ---
 
+## BUG-019 — Wireless CarPlay auto-reconnect fails over Wi-Fi mDNS without toggling hotspot/button
+
+**Status:** `Fixed`
+
+**Date:** 2026-11-05
+
+### Symptom
+
+On Windows, Bluetooth is only used for the initial setup to launch CarPlay. Subsequent wireless reconnections rely entirely on Wi-Fi mDNS. However, mDNS auto-discovery fails to bring up CarPlay automatically when the iPhone joins the Hotspot, requiring the user to toggle the hotspot switch or a button to force discovery.
+
+### Root Cause
+
+1. **Hotspot Adapter IP Timing Race on Windows:**
+   At startup, `StartPersistentBroadcasting()` starts the Mobile Hotspot via WinRT tethering and immediately calls `MdnsAdvertiser::Start(config)`. The virtual hotspot adapter (`192.168.137.1`) takes 1–3 seconds to bind its IPv4 address. Consequently, `setsockopt(..., IP_ADD_MEMBERSHIP, ...)` with `imr_interface = 192.168.137.1` fails with `WSAEADDRNOTAVAIL` (10049).
+   Previously, `MdnsAdvertiser::Start()` logged a warning and did not retry. Subsequent calls to `Start()` exited early (`if (m_running.load()) return Status::Ok();`), leaving the socket forever unbound to multicast on the hotspot adapter. As a result, Windows kernel dropped all inbound mDNS queries from the iPhone.
+2. **False Dummy IP & Missing Station IP Update in `WifiSoftApManager`:**
+   When an iPhone associates with the Hotspot, WinRT reports the client immediately upon 802.11 association before DHCP completes. At that instant `client.HostNames()` is empty, and the code defaulted the station IP to `"192.168.137.100"`. When DHCP later assigned the real IP (e.g. `192.168.137.2`), `WifiSoftApManager` saw the MAC already existed in `m_connectedStations` and suppressed the connection callback. The unicast announcement was sent to the dummy IP, and the real IP never received an announcement.
+3. **Lossy Single-packet Announcement & Slow 10s Broadcast Cadence:**
+   `AnnounceTo()` sent a single UDP packet and returned. During Wi-Fi link stabilization, initial UDP packets are frequently dropped by 802.11 power saving. The background loop broadcasted only once every 10 seconds, causing discovery to stall.
+4. **Missing Multicast Outbound Interface & Unicast Fallback:**
+   In `SendCtrlLookup()` and AirPlay query replies, packets were sent to `224.0.0.251` without setting `IP_MULTICAST_IF`, routing datagrams to the Windows default gateway (Ethernet/home Wi-Fi) instead of the Hotspot adapter. Furthermore, AirPlay query responses were only sent via multicast, dropping if Wi-Fi power-save buffering failed.
+
+### Fix
+
+1. **Dynamic Multicast Membership & Interface Maintenance:**
+   - In `MdnsAdvertiser`: added `EnsureMulticastMembershipLocked()` that retries `IP_ADD_MEMBERSHIP` and updates `IP_MULTICAST_IF` dynamically in `BroadcastWorkerLoop()` until the hotspot interface IP is active.
+   - Calling `Start()` with an updated interface IP dynamically drops the old membership and joins the new one.
+2. **Kernel ARP Resolution & Station IP Update in `WifiSoftApManager`:**
+   - Added `LookupIpv4ForMac()` using `GetIpNetTable2` to resolve the real IP from the Windows ARP table when WinRT `HostNames()` is pending.
+   - When a station's IP is resolved or changes after DHCP, `QueryNativeHostedNetworkStatus()` triggers the station callback with the true IP.
+   - Added periodic active-station re-notification every ~3 seconds in the watchdog loop to keep discovery warm.
+3. **5-Pulse Burst Announcement & Adaptive 2-Second Cadence:**
+   - Added asynchronous 5-pulse queue (`TargetedBurst`) in `BroadcastWorkerLoop()`, sending repeated announcements at 0ms, 350ms, 700ms, 1050ms, 1400ms.
+   - Reduced idle mDNS broadcast interval from 10s to 2s.
+   - AirPlay query replies now transmit via multicast (with `IP_MULTICAST_IF` and subnet broadcast) **and** direct unicast back to the querier.
+4. **UI Instant Re-discovery Trigger:**
+   - Added `TriggerReconnection()` across Core, Application, and UI layers.
+   - Added `[🔄 重新发现并拉起 CarPlay]` button to the Settings drawer and made clicking the Status Pill while idle immediately fire the re-discovery burst.
+
+### Verification
+
+1. `Tests/TransportTests.cpp`: verified `TestMdnsAdvertiserLifecycle` with 2-second default interval, `AnnounceTo` burst dispatch, and `ClearDialedTargets()`.
+2. `Tests/ServiceTests.cpp`: verified `TestTriggerReconnection()`.
+3. Ran all 10 unit test suites with `ctest`: 100% tests passed (10/10).
+4. Packaged updated release `dist/CarPlayStation-v0.1.58-win64.zip`.
+
+---
+
 ## Bug Template
 
 Copy the following template when adding a new bug:

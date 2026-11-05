@@ -76,6 +76,9 @@ public:
 
     // Reset pairing records and regenerate accessory identity (called on certificate / credential change).
     virtual void ResetPairingData() = 0;
+
+    // Proactively re-trigger mDNS and wireless CarPlay discovery announcement burst
+    [[nodiscard]] virtual Common::Status TriggerReconnection() = 0;
 };
 
 } // namespace CarPlayStation::Core::Service

@@ -105,7 +105,7 @@ target_compile_features(CarPlayCore PUBLIC cxx_std_20)
 target_link_libraries(CarPlayCore PUBLIC FDK-AAC::fdk-aac)
 
 if(WIN32)
-    target_link_libraries(CarPlayCore PUBLIC ws2_32 bcrypt windowsapp)
+    target_link_libraries(CarPlayCore PUBLIC ws2_32 bcrypt windowsapp iphlpapi)
     # D3D11 shared surface used to hand decoded frames to the renderer (DEC-009).
     target_link_libraries(CarPlayCore PUBLIC d3d11 dxgi)
     # WASAPI shared-mode audio pipeline + microphone uplink (DEC-008).

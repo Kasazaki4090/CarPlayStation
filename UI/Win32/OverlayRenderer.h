@@ -122,6 +122,11 @@ public:
         settings_callback_ = std::move(callback);
     }
 
+    using ReconnectCallback = std::function<void()>;
+    void SetReconnectCallback(ReconnectCallback callback) {
+        reconnect_callback_ = std::move(callback);
+    }
+
     void Shutdown();
 
     // --- Accessors ---
@@ -164,6 +169,7 @@ private:
     Application::AppUiState ui_state_{};
     Application::AppSettings settings_{};
     SettingsChangeCallback settings_callback_;
+    ReconnectCallback reconnect_callback_;
 
     // Swapchain the D2D target is bound to (kept so Draw can self-heal after a resize).
     IDXGISwapChain1* swap_chain_{nullptr};
@@ -183,6 +189,7 @@ private:
     uint64_t last_mouse_interaction_tick_{0};
 
     // UI Interactive Rectangles
+    D2D1_RECT_F status_pill_rect_{};
     D2D1_RECT_F gear_btn_rect_{};
     D2D1_RECT_F drawer_rect_{};
     D2D1_RECT_F drawer_close_btn_rect_{};

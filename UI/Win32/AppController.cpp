@@ -156,6 +156,11 @@ Core::Common::Status AppController::Initialize(
     overlay_.SetSettingsCallback([this](const Application::AppSettings& s) {
         OnSettingsChanged(s);
     });
+    overlay_.SetReconnectCallback([this]() {
+        if (app_api_) {
+            (void)app_api_->TriggerReconnection();
+        }
+    });
 
     // Match the window frame, the letterbox bars and the HUD to the Windows
     // light/dark setting the user currently has ("Choose your mode").

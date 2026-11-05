@@ -126,7 +126,13 @@ public:
         reset_pairing_called_ = true;
     }
 
+    Core::Common::Status TriggerReconnection() override {
+        trigger_reconnection_called_ = true;
+        return Core::Common::Status::Ok();
+    }
+
     bool reset_pairing_called_{false};
+    bool trigger_reconnection_called_{false};
 
     void NotifyState() {
         for (auto& cb : state_cbs_) {

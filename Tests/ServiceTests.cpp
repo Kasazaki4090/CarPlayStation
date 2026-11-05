@@ -518,6 +518,25 @@ void TestHostNightModeBeforeInitialize() {
     std::cout << "[PASS] TestHostNightModeBeforeInitialize\n";
 }
 
+void TestTriggerReconnection() {
+    auto mock_session = std::make_shared<MockSession>();
+    auto mock_decoder = std::make_shared<MockVideoDecoder>();
+    auto mock_audio = std::make_shared<MockAudioPipeline>();
+    auto mock_input = std::make_shared<MockInputSink>();
+
+    auto core_service = MakeMockCoreService(mock_session, mock_decoder, mock_audio, mock_input);
+    Application::ApplicationService app_service(core_service);
+
+    Application::AppSettings settings;
+    assert(app_service.StartCarPlay(settings).IsOk());
+
+    auto status = app_service.TriggerReconnection();
+    assert(status.IsOk());
+
+    app_service.StopCarPlay();
+    std::cout << "[PASS] TestTriggerReconnection\n";
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -533,6 +552,7 @@ int main() {
     TestApplicationServiceUiStateCallback();
     TestApplicationServiceDoubleStart();
     TestApplicationServiceApplySettingsNotRunning();
+    TestTriggerReconnection();
 
     std::cout << "=== All Service Tests Passed ===\n";
     return 0;

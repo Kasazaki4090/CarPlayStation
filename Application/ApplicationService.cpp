@@ -347,6 +347,14 @@ void ApplicationService::ResetPairingData() {
     }
 }
 
+Core::Common::Status ApplicationService::TriggerReconnection() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!core_api_) {
+        return Core::Common::MakeError(Core::Common::StatusCode::Unavailable, "Core API unavailable");
+    }
+    return core_api_->TriggerReconnection();
+}
+
 // ============================================================================
 // Private — Core Event Handling
 // ============================================================================

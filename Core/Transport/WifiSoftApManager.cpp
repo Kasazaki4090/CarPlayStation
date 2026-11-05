@@ -11,6 +11,10 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
+#include <netioapi.h>
 #include <objbase.h>
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
@@ -18,6 +22,35 @@
 #include <winrt/Windows.Networking.h>
 #include <winrt/Windows.Networking.Connectivity.h>
 #include <winrt/Windows.Networking.NetworkOperators.h>
+#pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "ws2_32.lib")
+
+static std::string LookupIpv4ForMac(const std::string& targetMac) {
+    if (targetMac.empty()) return "";
+    PMIB_IPNET_TABLE2 pTable = nullptr;
+    if (GetIpNetTable2(AF_INET, &pTable) == NO_ERROR && pTable) {
+        for (ULONG i = 0; i < pTable->NumEntries; ++i) {
+            const auto& row = pTable->Table[i];
+            if (row.PhysicalAddressLength == 6) {
+                char macBuf[32];
+                snprintf(macBuf, sizeof(macBuf), "%02x:%02x:%02x:%02x:%02x:%02x",
+                    row.PhysicalAddress[0], row.PhysicalAddress[1], row.PhysicalAddress[2],
+                    row.PhysicalAddress[3], row.PhysicalAddress[4], row.PhysicalAddress[5]);
+                if (_stricmp(targetMac.c_str(), macBuf) == 0) {
+                    char ipBuf[INET_ADDRSTRLEN] = {0};
+                    inet_ntop(AF_INET, &row.Address.Ipv4.sin_addr, ipBuf, sizeof(ipBuf));
+                    std::string res = ipBuf;
+                    if (res.rfind("192.168.137.", 0) == 0 && res != "192.168.137.1" && res != "192.168.137.255") {
+                        FreeMibTable(pTable);
+                        return res;
+                    }
+                }
+            }
+        }
+        FreeMibTable(pTable);
+    }
+    return "";
+}
 #endif
 
 namespace CarPlayStation::Core::Transport {
@@ -291,6 +324,7 @@ void WifiSoftApManager::WatchdogLoop() {
 #ifdef _WIN32
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 #endif
+    uint64_t watchdogTick = 0;
     while (m_watchdogRunning.load()) {
         for (int i = 0; i < 10 && m_watchdogRunning.load(); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -300,6 +334,28 @@ void WifiSoftApManager::WatchdogLoop() {
         }
         if (!m_simulatedMode.load()) {
             QueryNativeHostedNetworkStatus();
+
+            watchdogTick++;
+            // Every ~3 seconds (6 ticks of 500ms), re-notify connected stations
+            // to keep mDNS discovery burst and AirPlay polling fresh while awaiting session
+            if (watchdogTick % 6 == 0) {
+                std::vector<StationInfo> activeStations;
+                StationConnectedCallback connCb;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    for (const auto& [mac, info] : m_connectedStations) {
+                        if (!info.ipAddress.empty()) {
+                            activeStations.push_back(info);
+                        }
+                    }
+                    connCb = m_stationConnectedCallback;
+                }
+                if (connCb) {
+                    for (const auto& st : activeStations) {
+                        connCb(st);
+                    }
+                }
+            }
         }
     }
 #ifdef _WIN32
@@ -342,8 +398,10 @@ void WifiSoftApManager::QueryNativeHostedNetworkStatus() {
                     ip = raw;
                 }
             }
+            // If WinRT HostNames() is still empty during initial DHCP exchange,
+            // query the Windows ARP neighbor table directly for this MAC.
             if (ip.empty()) {
-                ip = "192.168.137.100";
+                ip = LookupIpv4ForMac(mac);
             }
 
             StationInfo st;
@@ -360,7 +418,12 @@ void WifiSoftApManager::QueryNativeHostedNetworkStatus() {
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             for (const auto& [mac, info] : currentClients) {
-                if (m_connectedStations.find(mac) == m_connectedStations.end()) {
+                auto it = m_connectedStations.find(mac);
+                if (it == m_connectedStations.end()) {
+                    newlyConnected.push_back(info);
+                } else if (!info.ipAddress.empty() && (it->second.ipAddress.empty() || it->second.ipAddress != info.ipAddress)) {
+                    CPS_LOG_INFO("WifiSoftAp", "Station IP resolved/updated for MAC=", mac,
+                                 " from '", it->second.ipAddress, "' to '", info.ipAddress, "'");
                     newlyConnected.push_back(info);
                 }
             }
@@ -375,7 +438,7 @@ void WifiSoftApManager::QueryNativeHostedNetworkStatus() {
         }
 
         for (const auto& st : newlyConnected) {
-            CPS_LOG_INFO("WifiSoftAp", "Station joined Mobile Hotspot: MAC=", st.macAddress, " IP=", st.ipAddress);
+            CPS_LOG_INFO("WifiSoftAp", "Station joined/active on Mobile Hotspot: MAC=", st.macAddress, " IP=", st.ipAddress);
             if (connCb) connCb(st);
         }
         for (const auto& mac : disconnected) {

@@ -63,6 +63,8 @@ public:
 
     void ResetPairingData() override;
 
+    [[nodiscard]] Core::Common::Status TriggerReconnection() override;
+
     // --- Additional accessors ---
     [[nodiscard]] std::shared_ptr<Core::Service::ICarPlayCoreApi> GetCoreApi() const { return core_api_; }
 

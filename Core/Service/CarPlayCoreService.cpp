@@ -1122,25 +1122,23 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
                                          "); announcing AirPlay service to ", station.ipAddress);
                         }
 
-                        if (!mdns_advertiser_->IsRunning()) {
-                            Transport::MdnsServiceConfig mdns_cfg{};
-                            mdns_cfg.instanceName = env_config_.identity.device_name.empty()
-                                ? "CarPlayStation" : env_config_.identity.device_name;
-                            mdns_cfg.port = env_config_.network.rtsp_port != 0
-                                ? env_config_.network.rtsp_port : 5000;
-                            mdns_cfg.ipv4Address = "192.168.137.1";
-                            if (wifi_manager_) {
-                                auto creds = wifi_manager_->GetCredentials();
-                                if (!creds.gatewayIp.empty()) {
-                                    mdns_cfg.ipv4Address = creds.gatewayIp;
-                                }
+                        Transport::MdnsServiceConfig mdns_cfg{};
+                        mdns_cfg.instanceName = env_config_.identity.device_name.empty()
+                            ? "CarPlayStation" : env_config_.identity.device_name;
+                        mdns_cfg.port = env_config_.network.rtsp_port != 0
+                            ? env_config_.network.rtsp_port : 5000;
+                        mdns_cfg.ipv4Address = "192.168.137.1";
+                        if (wifi_manager_) {
+                            auto creds = wifi_manager_->GetCredentials();
+                            if (!creds.gatewayIp.empty()) {
+                                mdns_cfg.ipv4Address = creds.gatewayIp;
                             }
-                            if (!device_id_.empty()) {
-                                mdns_cfg.deviceId = device_id_;
-                            }
-                            ApplyAirPlayPublicKey(mdns_cfg);
-                            (void)mdns_advertiser_->Start(mdns_cfg);
                         }
+                        if (!device_id_.empty()) {
+                            mdns_cfg.deviceId = device_id_;
+                        }
+                        ApplyAirPlayPublicKey(mdns_cfg);
+                        (void)mdns_advertiser_->Start(mdns_cfg);
                         (void)mdns_advertiser_->AnnounceTo(station.ipAddress);
                     }
                 }
@@ -1561,6 +1559,44 @@ void CarPlayCoreService::ResetPairingData() {
                 return ltpk;
             });
     }
+}
+
+Common::Status CarPlayCoreService::TriggerReconnection() {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    CPS_LOG_INFO("CoreService", "TriggerReconnection: re-announcing and querying CarPlay endpoints");
+    if (mdns_advertiser_) {
+        mdns_advertiser_->ClearDialedTargets();
+
+        Transport::MdnsServiceConfig mdns_cfg{};
+        mdns_cfg.instanceName = env_config_.identity.device_name.empty()
+            ? "CarPlayStation" : env_config_.identity.device_name;
+        mdns_cfg.port = env_config_.network.rtsp_port != 0
+            ? env_config_.network.rtsp_port : 5000;
+        mdns_cfg.ipv4Address = "192.168.137.1";
+        if (wifi_manager_) {
+            auto creds = wifi_manager_->GetCredentials();
+            if (!creds.gatewayIp.empty()) {
+                mdns_cfg.ipv4Address = creds.gatewayIp;
+            }
+        }
+        if (!device_id_.empty()) {
+            mdns_cfg.deviceId = device_id_;
+        }
+        ApplyAirPlayPublicKey(mdns_cfg);
+        (void)mdns_advertiser_->Start(mdns_cfg);
+
+        if (wifi_manager_) {
+            auto stations = wifi_manager_->GetConnectedStations();
+            for (const auto& st : stations) {
+                if (!st.ipAddress.empty()) {
+                    CPS_LOG_INFO("CoreService", "TriggerReconnection: announcing to station MAC=", st.macAddress, " IP=", st.ipAddress);
+                    (void)mdns_advertiser_->AnnounceTo(st.ipAddress);
+                }
+            }
+        }
+        (void)mdns_advertiser_->BroadcastAnnouncement();
+    }
+    return Common::Status::Ok();
 }
 
 std::shared_ptr<Transport::ITransportChannel> CarPlayCoreService::GetTransport() const {

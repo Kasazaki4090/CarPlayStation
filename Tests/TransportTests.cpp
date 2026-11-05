@@ -472,6 +472,13 @@ void TestMdnsAdvertiserLifecycle() {
     assert(advertiser->BroadcastAnnouncement().IsOk());
     assert(advertiser->GetBroadcastCount() == countBefore + 1);
 
+    // Targeted announcement
+    assert(advertiser->AnnounceTo("192.168.137.50").IsOk());
+    assert(advertiser->GetBroadcastCount() == countBefore + 2);
+    advertiser->ClearDialedTargets();
+
+    assert(cfg.broadcastIntervalSeconds == 2);
+
     advertiser->Stop();
     assert(!advertiser->IsRunning());
 

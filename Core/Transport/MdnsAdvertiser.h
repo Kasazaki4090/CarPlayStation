@@ -46,16 +46,27 @@ public:
     [[nodiscard]] std::optional<Common::ByteBuffer> GetLastBroadcastPacket() const;
 
 private:
+    struct TargetedBurst {
+        std::string targetIp;
+        int remainingBursts{5};
+        std::chrono::steady_clock::time_point nextTime{};
+    };
+
     void BroadcastWorkerLoop();
     Common::Status SendRawMulticast(Common::ByteSpan packet);
     void DialCarPlayControl(const std::string& host, uint16_t port);
     // Second half of the DNS-SD lookup: SRV/A query for an instance learned
     // from a _carplay-ctrl PTR (browse) answer.
     void SendCtrlLookup(const std::string& instanceName);
+    bool EnsureMulticastMembershipLocked();
+    void SendTargetedAnnouncementLocked(const std::string& targetIp);
 
     mutable std::mutex m_mutex;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_simulatedMode{false};
+    std::atomic<bool> m_multicastJoined{false};
+    std::string m_boundInterfaceIp{};
+    std::vector<TargetedBurst> m_pendingBursts{};
 
     MdnsServiceConfig m_config{};
     size_t m_broadcastCount{0};

@@ -175,6 +175,7 @@ Common::Status MdnsAdvertiser::Start(const MdnsServiceConfig& config) {
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_config = config;
+            EnsureMulticastMembershipLocked();
         }
         (void)BroadcastAnnouncement();
         return Common::Status::Ok();
@@ -243,19 +244,9 @@ Common::Status MdnsAdvertiser::Start(const MdnsServiceConfig& config) {
         CPS_LOG_INFO("MdnsAdvertiser", "bind() OK on 0.0.0.0:5353");
     }
 
-    // Join multicast group 224.0.0.251
-    ip_mreq mreq{};
-    inet_pton(AF_INET, "224.0.0.251", &mreq.imr_multiaddr);
-    if (!config.ipv4Address.empty() && config.ipv4Address != "0.0.0.0") {
-        inet_pton(AF_INET, config.ipv4Address.c_str(), &mreq.imr_interface);
-    } else {
-        mreq.imr_interface.s_addr = INADDR_ANY;
-    }
-    int mjoin = setsockopt(m_socket, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq));
-    if (mjoin == SOCKET_ERROR) {
-        CPS_LOG_WARN("MdnsAdvertiser", "IP_ADD_MEMBERSHIP failed (code ", std::to_string(WSAGetLastError()), ")");
-    } else {
-        CPS_LOG_INFO("MdnsAdvertiser", "Joined mDNS multicast group 224.0.0.251 on ", config.ipv4Address);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        (void)EnsureMulticastMembershipLocked();
     }
 
     // Multicast TTL = 255 per RFC 6762
@@ -280,10 +271,17 @@ void MdnsAdvertiser::Stop() {
         closesocket(m_socket);
         m_socket = INVALID_SOCKET;
     }
+    m_multicastJoined = false;
+    m_boundInterfaceIp.clear();
 #endif
 
     if (m_workerThread.joinable()) {
         m_workerThread.join();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_pendingBursts.clear();
     }
 }
 
@@ -324,35 +322,99 @@ Common::Status MdnsAdvertiser::AnnounceTo(const std::string& targetIp) {
         return BroadcastAnnouncement();
     }
 #ifdef _WIN32
-    if (!targetIp.empty() && m_socket != INVALID_SOCKET) {
-        MdnsServiceConfig cfg;
+    if (m_socket != INVALID_SOCKET) {
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            cfg = m_config;
+            (void)EnsureMulticastMembershipLocked();
+            m_pendingBursts.push_back(TargetedBurst{
+                targetIp,
+                /* remainingBursts = */ 5,
+                /* nextTime = */ std::chrono::steady_clock::now()
+            });
+            SendTargetedAnnouncementLocked(targetIp);
         }
-        auto packet = MdnsPacketBuilder::BuildAirPlayAnnouncement(cfg);
+        CPS_LOG_INFO("MdnsAdvertiser", "AnnounceTo: triggered immediate burst + queued 5-pulse re-announcements for ", targetIp);
+    }
+#endif
+    return Common::Status::Ok();
+}
+
+bool MdnsAdvertiser::EnsureMulticastMembershipLocked() {
+#ifdef _WIN32
+    if (m_socket == INVALID_SOCKET) return false;
+
+    std::string ifIp = m_config.ipv4Address;
+    if (ifIp.empty() || ifIp == "0.0.0.0") {
+        ifIp = "192.168.137.1";
+    }
+
+    if (m_multicastJoined.load() && m_boundInterfaceIp == ifIp) {
+        return true;
+    }
+
+    // Drop old membership if the interface changed
+    if (m_multicastJoined.load() && !m_boundInterfaceIp.empty()) {
+        ip_mreq dropReq{};
+        inet_pton(AF_INET, "224.0.0.251", &dropReq.imr_multiaddr);
+        inet_pton(AF_INET, m_boundInterfaceIp.c_str(), &dropReq.imr_interface);
+        setsockopt(m_socket, IPPROTO_IP, IP_DROP_MEMBERSHIP, reinterpret_cast<const char*>(&dropReq), sizeof(dropReq));
+        m_multicastJoined = false;
+        m_boundInterfaceIp.clear();
+    }
+
+    ip_mreq mreq{};
+    inet_pton(AF_INET, "224.0.0.251", &mreq.imr_multiaddr);
+    inet_pton(AF_INET, ifIp.c_str(), &mreq.imr_interface);
+    int mjoin = setsockopt(m_socket, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<const char*>(&mreq), sizeof(mreq));
+    if (mjoin == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        // WSAEADDRNOTAVAIL (10049) is expected if the virtual hotspot adapter IP is not yet ready on Windows
+        if (err != 10049 && err != WSAEADDRINUSE) {
+            CPS_LOG_WARN("MdnsAdvertiser", "IP_ADD_MEMBERSHIP on ", ifIp, " failed (code ", std::to_string(err), ")");
+        }
+        return false;
+    }
+
+    // Direct outbound multicast traffic to this interface
+    in_addr ifAddr{};
+    if (inet_pton(AF_INET, ifIp.c_str(), &ifAddr) == 1) {
+        setsockopt(m_socket, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<const char*>(&ifAddr), sizeof(ifAddr));
+    }
+
+    m_multicastJoined = true;
+    m_boundInterfaceIp = ifIp;
+    CPS_LOG_INFO("MdnsAdvertiser", "Joined mDNS multicast group 224.0.0.251 on ", ifIp);
+    return true;
+#else
+    return false;
+#endif
+}
+
+void MdnsAdvertiser::SendTargetedAnnouncementLocked(const std::string& targetIp) {
+#ifdef _WIN32
+    if (m_socket == INVALID_SOCKET) return;
+
+    auto packet = MdnsPacketBuilder::BuildAirPlayAnnouncement(m_config);
+    auto query = MdnsPacketBuilder::BuildCarPlayControlQuery();
+
+    if (!targetIp.empty()) {
         sockaddr_in targetAddr{};
         targetAddr.sin_family = AF_INET;
         targetAddr.sin_port = htons(5353);
         if (inet_pton(AF_INET, targetIp.c_str(), &targetAddr.sin_addr) == 1) {
-            int n1 = sendto(m_socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
-                            reinterpret_cast<const sockaddr*>(&targetAddr), sizeof(targetAddr));
-
-            // Also query targeted _carplay-ctrl._tcp.local.
-            auto query = MdnsPacketBuilder::BuildCarPlayControlQuery();
-            int n2 = sendto(m_socket, reinterpret_cast<const char*>(query.data()), static_cast<int>(query.size()), 0,
-                            reinterpret_cast<const sockaddr*>(&targetAddr), sizeof(targetAddr));
-            if (n1 == SOCKET_ERROR || n2 == SOCKET_ERROR) {
-                int err = WSAGetLastError();
-                CPS_LOG_WARN("MdnsAdvertiser", "AnnounceTo sendto ", targetIp, ":5353 returned error (code ", std::to_string(err), ")");
-            } else {
-                CPS_LOG_INFO("MdnsAdvertiser", "AnnounceTo: sent AirPlay announcement (", std::to_string(n1),
-                             " bytes) and _carplay-ctrl query (", std::to_string(n2), " bytes) to ", targetIp, ":5353");
-            }
+            sendto(m_socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
+                   reinterpret_cast<const sockaddr*>(&targetAddr), sizeof(targetAddr));
+            sendto(m_socket, reinterpret_cast<const char*>(query.data()), static_cast<int>(query.size()), 0,
+                   reinterpret_cast<const sockaddr*>(&targetAddr), sizeof(targetAddr));
         }
     }
+
+    // Also send multicast & subnet broadcast to ensure discovery
+    SendRawMulticast(Common::ByteSpan(packet.data(), packet.size()));
+    SendRawMulticast(Common::ByteSpan(query.data(), query.size()));
+#else
+    (void)targetIp;
 #endif
-    return BroadcastAnnouncement();
 }
 
 Common::Status MdnsAdvertiser::SendRawMulticast(Common::ByteSpan packet) {
@@ -414,19 +476,8 @@ void MdnsAdvertiser::SendCtrlLookup(const std::string& instanceName) {
 #ifdef _WIN32
     if (m_socket == INVALID_SOCKET) return;
     auto query = MdnsPacketBuilder::BuildCarPlayControlLookup(instanceName);
-    sockaddr_in dst{};
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(5353);
-    inet_pton(AF_INET, "224.0.0.251", &dst.sin_addr);
-    int sent = sendto(m_socket, reinterpret_cast<const char*>(query.data()),
-                      static_cast<int>(query.size()), 0,
-                      reinterpret_cast<const sockaddr*>(&dst), sizeof(dst));
-    if (sent == SOCKET_ERROR) {
-        CPS_LOG_WARN("MdnsAdvertiser", "SRV/A query for ", instanceName,
-                     " failed (WSA error ", std::to_string(WSAGetLastError()), ")");
-    } else {
-        CPS_LOG_INFO("MdnsAdvertiser", "Sent SRV/A query for _carplay-ctrl instance ", instanceName);
-    }
+    SendRawMulticast(Common::ByteSpan(query.data(), query.size()));
+    CPS_LOG_INFO("MdnsAdvertiser", "Sent SRV/A query for _carplay-ctrl instance ", instanceName);
 #else
     (void)instanceName;
 #endif
@@ -504,14 +555,42 @@ void MdnsAdvertiser::DialCarPlayControl(const std::string& host, uint16_t port) 
 void MdnsAdvertiser::BroadcastWorkerLoop() {
     while (m_running.load()) {
         auto now = std::chrono::steady_clock::now();
-        uint32_t interval = 10;
+
+#ifdef _WIN32
+        // Periodically retry joining multicast if the hotspot adapter IP was not ready at startup
+        if (!m_multicastJoined.load()) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            (void)EnsureMulticastMembershipLocked();
+        }
+
+        // Process pending targeted bursts
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            auto it = m_pendingBursts.begin();
+            while (it != m_pendingBursts.end()) {
+                if (now >= it->nextTime) {
+                    SendTargetedAnnouncementLocked(it->targetIp);
+                    it->remainingBursts--;
+                    if (it->remainingBursts <= 0) {
+                        it = m_pendingBursts.erase(it);
+                        continue;
+                    } else {
+                        it->nextTime = now + std::chrono::milliseconds(350);
+                    }
+                }
+                ++it;
+            }
+        }
+#endif
+
+        uint32_t interval = 2;
         std::chrono::steady_clock::time_point lastBcast{};
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             interval = m_config.broadcastIntervalSeconds;
             lastBcast = m_lastBroadcastTime;
         }
-        if (interval == 0) interval = 10;
+        if (interval == 0) interval = 2;
 
         if (now - lastBcast >= std::chrono::seconds(interval)) {
             (void)BroadcastAnnouncement();
@@ -527,14 +606,14 @@ void MdnsAdvertiser::BroadcastWorkerLoop() {
 
 #ifdef _WIN32
         if (m_socket != INVALID_SOCKET) {
-            // Listen for responses using select() with 1s timeout
+            // Listen for responses using select() with 250ms timeout
             fd_set readfds;
             FD_ZERO(&readfds);
             FD_SET(m_socket, &readfds);
 
             timeval tv{};
-            tv.tv_sec = 1;
-            tv.tv_usec = 0;
+            tv.tv_sec = 0;
+            tv.tv_usec = 250000;
 
             int res = select(0, &readfds, nullptr, nullptr, &tv);
             if (res > 0 && FD_ISSET(m_socket, &readfds)) {
@@ -597,8 +676,7 @@ void MdnsAdvertiser::BroadcastWorkerLoop() {
 
                     // Respond to AirPlay service queries from the iPhone.
                     // The iPhone queries _airplay._tcp.local. to discover our
-                    // RTSP endpoint (SRV -> port 5000). Without a response the
-                    // iPhone never learns where to connect for video.
+                    // RTSP endpoint (SRV -> port 5000).
                     if (rx.airplayQuery) {
                         CPS_LOG_INFO("MdnsAdvertiser", "Received AirPlay service query from ", ipStr, " — responding with SRV/TXT/A records");
                         MdnsServiceConfig cfg;
@@ -607,29 +685,22 @@ void MdnsAdvertiser::BroadcastWorkerLoop() {
                             cfg = m_config;
                         }
                         auto response = MdnsPacketBuilder::BuildAirPlayAnnouncement(cfg);
-                        // RFC 6762 §6.2: mDNS responses MUST be sent to the
-                        // multicast group 224.0.0.251:5353, NOT unicast to the
-                        // querier. The iPhone's mDNSResponder only listens on the
-                        // multicast group, so a unicast reply is never seen and
-                        // the iPhone keeps re-querying forever.
-                        sockaddr_in respAddr{};
-                        respAddr.sin_family = AF_INET;
-                        respAddr.sin_port = htons(5353);
-                        inet_pton(AF_INET, "224.0.0.251", &respAddr.sin_addr);
-                        int sent = sendto(m_socket, reinterpret_cast<const char*>(response.data()),
-                                          static_cast<int>(response.size()), 0,
-                                          reinterpret_cast<const sockaddr*>(&respAddr), sizeof(respAddr));
-                        if (sent == SOCKET_ERROR) {
-                            CPS_LOG_WARN("MdnsAdvertiser", "Failed to send AirPlay mDNS response to multicast (WSA error ", std::to_string(WSAGetLastError()), ")");
-                        }
+                        // Send multicast + subnet broadcast with IP_MULTICAST_IF properly applied
+                        SendRawMulticast(Common::ByteSpan(response.data(), response.size()));
+
+                        // Also send direct unicast reply to querier so queries with QU bit or
+                        // Wi-Fi APs dropping multicast still receive the AirPlay endpoint
+                        sendto(m_socket, reinterpret_cast<const char*>(response.data()),
+                               static_cast<int>(response.size()), 0,
+                               reinterpret_cast<const sockaddr*>(&fromAddr), sizeof(fromAddr));
                     }
                 }
             }
         } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
 #else
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
 #endif
     }
 }

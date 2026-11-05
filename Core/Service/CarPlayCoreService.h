@@ -97,6 +97,9 @@ public:
     // Reset pairing records and regenerate accessory identity (called on certificate / credential change).
     void ResetPairingData() override;
 
+    // Proactively re-trigger mDNS and wireless CarPlay discovery announcement burst
+    [[nodiscard]] Common::Status TriggerReconnection() override;
+
     // --- Additional accessors (not part of ICarPlayCoreApi) ---
     [[nodiscard]] std::shared_ptr<Hardware::IMfiSigner> GetMfiSigner() const;
     [[nodiscard]] std::shared_ptr<Transport::ITransportChannel> GetTransport() const;
