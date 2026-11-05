@@ -1248,6 +1248,7 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
                 Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
                     "Bluetooth device connected: ", endpoint);
                 session_sm->OnBluetoothDeviceDiscovered("iPhone", mac, env_config_.identity.device_name);
+                remembered_phone_bt_mac_ = mac.ToString();
 
                 // The real Bluetooth MAC is now known. Publish the
                 // device-connected event so the Application layer can persist
@@ -1417,6 +1418,12 @@ Common::Status CarPlayCoreService::Start() {
         }
     }
 
+    if (transport_ && !remembered_phone_bt_mac_.empty()) {
+        Common::Logger::Instance().Log(Common::LogLevel::Info, "CoreService",
+            "Start: Proactively paging remembered paired device over Bluetooth: ", remembered_phone_bt_mac_);
+        transport_->WakePeer(remembered_phone_bt_mac_);
+    }
+
     // Start the session (which triggers discovery / advertising).
     auto status = session_->Start();
     if (status.IsError()) {
@@ -1561,9 +1568,19 @@ void CarPlayCoreService::ResetPairingData() {
     }
 }
 
-Common::Status CarPlayCoreService::TriggerReconnection() {
+Common::Status CarPlayCoreService::TriggerReconnection(std::string_view targetBtMac) {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    CPS_LOG_INFO("CoreService", "TriggerReconnection: re-announcing and querying CarPlay endpoints");
+    if (!targetBtMac.empty()) {
+        remembered_phone_bt_mac_ = std::string(targetBtMac);
+    }
+    CPS_LOG_INFO("CoreService", "TriggerReconnection: re-announcing and querying CarPlay endpoints; targetBtMac=",
+                 remembered_phone_bt_mac_.empty() ? "none" : remembered_phone_bt_mac_);
+
+    if (transport_ && !remembered_phone_bt_mac_.empty()) {
+        CPS_LOG_INFO("CoreService", "TriggerReconnection: Actively waking paired device over Bluetooth: ", remembered_phone_bt_mac_);
+        transport_->WakePeer(remembered_phone_bt_mac_);
+    }
+
     if (mdns_advertiser_) {
         mdns_advertiser_->ClearDialedTargets();
 
@@ -1908,10 +1925,13 @@ void CarPlayCoreService::TearDownSubsystems() {
         mdns_advertiser_->Stop();
     }
     mdns_advertiser_.reset();
-    if (wifi_manager_ && wifi_manager_->IsRunning()) {
+    if (wifi_manager_) {
         wifi_manager_->StopAccessPoint();
     }
     wifi_manager_.reset();
+    if (rtsp_server_) {
+        rtsp_server_->Stop();
+    }
     rtsp_server_.reset();
 
     // Layer 3: Protocol

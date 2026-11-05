@@ -126,7 +126,7 @@ public:
         reset_pairing_called_ = true;
     }
 
-    Core::Common::Status TriggerReconnection() override {
+    Core::Common::Status TriggerReconnection(std::string_view = {}) override {
         trigger_reconnection_called_ = true;
         return Core::Common::Status::Ok();
     }

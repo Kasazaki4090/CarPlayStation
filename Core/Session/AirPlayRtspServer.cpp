@@ -25,6 +25,9 @@ constexpr int SOCK_ERR = SOCKET_ERROR;
 #ifndef CPS_SHUT_WR
 #define CPS_SHUT_WR SD_SEND
 #endif
+#ifndef CPS_SHUT_RDWR
+#define CPS_SHUT_RDWR SD_BOTH
+#endif
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -36,6 +39,9 @@ constexpr int SOCK_ERR = -1;
 #define CLOSE_SOCK(s) close(s)
 #ifndef CPS_SHUT_WR
 #define CPS_SHUT_WR SHUT_WR
+#endif
+#ifndef CPS_SHUT_RDWR
+#define CPS_SHUT_RDWR SHUT_RDWR
 #endif
 #endif
 
@@ -226,6 +232,7 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
     // listener and sends ChaCha20-Poly1305 sealed APTransportPackage records.
     socket_t data_listen_sock{INVALID_SOCK};
     uint16_t data_port{0};
+    std::atomic<socket_t> data_conn_sock{INVALID_SOCK};
     std::thread data_thread;
     std::mutex data_key_mutex;
     std::array<uint8_t, 32> data_read_key{0};
@@ -256,29 +263,24 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
             event_channel_ready = false;
         }
         event_queue_cv.notify_all();
-        // Wake a sender blocked in send() before the socket goes away.
+        // Wake sender and receiver blocked on event_stream_sock before joining.
         {
             std::lock_guard<std::mutex> lock(event_send_mutex);
             if (event_stream_sock != INVALID_SOCK) {
-                shutdown(event_stream_sock, CPS_SHUT_WR);
+                shutdown(event_stream_sock, CPS_SHUT_RDWR);
+                CLOSE_SOCK(event_stream_sock);
+                event_stream_sock = INVALID_SOCK;
             }
         }
         if (event_send_thread.joinable()) {
             event_send_thread.join();
         }
-        {
-            std::lock_guard<std::mutex> lock(event_send_mutex);
-            if (event_stream_sock != INVALID_SOCK) {
-                CLOSE_SOCK(event_stream_sock);
-                event_stream_sock = INVALID_SOCK;
-            }
+        if (event_drain_thread.joinable()) {
+            event_drain_thread.join();
         }
         {
             std::lock_guard<std::mutex> lock(event_channel_mutex);
             event_channel.reset();
-        }
-        if (event_drain_thread.joinable()) {
-            event_drain_thread.join();
         }
         if (keepalive_sock != INVALID_SOCK) {
             CLOSE_SOCK(keepalive_sock);
@@ -296,6 +298,11 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
         if (data_listen_sock != INVALID_SOCK) {
             CLOSE_SOCK(data_listen_sock);
             data_listen_sock = INVALID_SOCK;
+        }
+        socket_t active_conn = data_conn_sock.exchange(INVALID_SOCK);
+        if (active_conn != INVALID_SOCK) {
+            shutdown(active_conn, CPS_SHUT_RDWR);
+            CLOSE_SOCK(active_conn);
         }
         if (data_thread.joinable()) {
             data_thread.join();
@@ -633,9 +640,11 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
                 int peer_len = sizeof(peer);
                 socket_t conn = accept(data_listen_sock, reinterpret_cast<sockaddr*>(&peer), &peer_len);
                 if (conn == INVALID_SOCK) continue;
+                data_conn_sock.store(conn);
                 CPS_LOG_INFO("AirPlayRtsp", "iAP data tunnel TCP accepted from ",
                              inet_ntoa(peer.sin_addr), ":", std::to_string(ntohs(peer.sin_port)));
                 RunDataTunnelConnection(conn, key_copy);
+                data_conn_sock.store(INVALID_SOCK);
                 CLOSE_SOCK(conn);
                 if (!alive.load()) break;
             }
@@ -866,6 +875,8 @@ public:
     }
 
     void Stop() {
+        std::vector<std::thread> workers_to_join;
+        std::map<socket_t, std::shared_ptr<ClientSession>> sessions_to_close;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!running_) return;
@@ -878,26 +889,29 @@ public:
 
             for (socket_t sock : client_sockets_) {
                 if (sock != INVALID_SOCK) {
+                    shutdown(sock, CPS_SHUT_RDWR);
                     CLOSE_SOCK(sock);
                 }
             }
             client_sockets_.clear();
-            sessions_.clear();
+            sessions_to_close = std::move(sessions_);
+            workers_to_join = std::move(worker_threads_);
         }
 
         if (server_thread_.joinable()) {
             server_thread_.join();
         }
 
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            for (auto& th : worker_threads_) {
-                if (th.joinable()) {
-                    th.join();
-                }
+        for (auto& th : workers_to_join) {
+            if (th.joinable()) {
+                th.join();
             }
-            worker_threads_.clear();
         }
+
+        // Sessions (and their child threads: timing, keepalive, event, data)
+        // are destroyed and joined here safely outside mutex_ after worker threads exit.
+        sessions_to_close.clear();
+
         CPS_LOG_INFO("AirPlayRtsp", "Server stopped");
     }
 

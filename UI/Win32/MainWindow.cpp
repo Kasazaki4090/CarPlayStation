@@ -482,7 +482,9 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             if (close_callback_) {
                 close_callback_();
             }
-            DestroyWindow(hwnd);
+            if (hwnd != nullptr && IsWindow(hwnd)) {
+                DestroyWindow(hwnd);
+            }
             return 0;
         }
 

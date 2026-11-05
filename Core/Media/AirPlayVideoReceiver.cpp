@@ -139,14 +139,15 @@ void AirPlayVideoReceiver::Stop() {
         udp_thread_.join();
     }
 
+    std::vector<std::thread> threads_to_join;
     {
         std::lock_guard<std::mutex> lock(client_mutex_);
-        for (auto& th : client_threads_) {
-            if (th.joinable()) {
-                th.join();
-            }
+        threads_to_join = std::move(client_threads_);
+    }
+    for (auto& th : threads_to_join) {
+        if (th.joinable()) {
+            th.join();
         }
-        client_threads_.clear();
     }
 }
 

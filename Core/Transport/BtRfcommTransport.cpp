@@ -7,7 +7,9 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <bluetoothapis.h>
 #include <combaseapi.h>
+#pragma comment(lib, "bthprops.lib")
 #endif
 
 namespace CarPlayStation::Core::Transport {
@@ -36,6 +38,18 @@ Common::Status BtRfcommTransport::StartServer(uint8_t channel) {
     CPS_LOG_INFO("BtRfcomm", "StartServer: creating AF_BTH RFCOMM socket ...");
 
 #ifdef _WIN32
+    // Ensure Windows Bluetooth radio is discoverable and accepts incoming connections
+    BLUETOOTH_FIND_RADIO_PARAMS radioParams = { sizeof(BLUETOOTH_FIND_RADIO_PARAMS) };
+    HANDLE hRadio = nullptr;
+    HBLUETOOTH_RADIO_FIND hFind = BluetoothFindFirstRadio(&radioParams, &hRadio);
+    if (hFind) {
+        BluetoothEnableDiscovery(hRadio, TRUE);
+        BluetoothEnableIncomingConnections(hRadio, TRUE);
+        CloseHandle(hRadio);
+        BluetoothFindRadioClose(hFind);
+        CPS_LOG_INFO("BtRfcomm", "Bluetooth radio discovery and incoming connections enabled");
+    }
+
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         return Common::Status::Error(Common::StatusCode::Unavailable, "WSAStartup failed");
@@ -109,6 +123,10 @@ void BtRfcommTransport::StopServer() {
     m_running = false;
     m_isListening = false;
 
+    if (m_wakeThread.joinable()) {
+        m_wakeThread.join();
+    }
+
 #ifdef _WIN32
     if (m_clientSocket != INVALID_SOCKET) {
         shutdown(m_clientSocket, SD_BOTH);
@@ -165,6 +183,12 @@ void BtRfcommTransport::ServerWorkerLoop() {
         int addrLen = sizeof(clientAddr);
         SOCKET client = accept(m_serverSocket, reinterpret_cast<sockaddr*>(&clientAddr), &addrLen);
         if (client == INVALID_SOCKET) {
+            continue;
+        }
+
+        if (m_clientSocket != INVALID_SOCKET) {
+            CPS_LOG_INFO("BtRfcomm", "Duplicate incoming connection while already connected, closing.");
+            closesocket(client);
             continue;
         }
 
@@ -248,8 +272,11 @@ void BtRfcommTransport::HandleClientIo(SOCKET clientSock, const std::string& rem
         }
     }
 
-    closesocket(m_clientSocket);
+    SOCKET sToClose = m_clientSocket;
     m_clientSocket = INVALID_SOCKET;
+    if (sToClose != INVALID_SOCKET) {
+        closesocket(sToClose);
+    }
     m_state = TransportState::Disconnected;
     CPS_LOG_INFO("BtRfcomm", "Client disconnected: ", remoteAddr);
 
@@ -426,6 +453,101 @@ void BtRfcommTransport::SimulatePeerDisconnect() {
     if (cb) {
         cb(TransportState::Disconnected, Common::Status::Ok());
     }
+}
+
+void BtRfcommTransport::WakePairedDevice(const std::string& bthMacAddress) {
+#ifdef _WIN32
+    if (bthMacAddress.empty()) {
+        return;
+    }
+
+    if (m_state.load() == TransportState::Connected || m_clientSocket != INVALID_SOCKET) {
+        CPS_LOG_INFO("BtRfcomm", "WakePairedDevice: Transport already connected to ", m_remoteEndpoint);
+        return;
+    }
+
+    if (m_wakeInProgress.exchange(true)) {
+        CPS_LOG_INFO("BtRfcomm", "WakePairedDevice: Wake operation already in progress, skipping");
+        return;
+    }
+
+    if (m_wakeThread.joinable()) {
+        m_wakeThread.join();
+    }
+
+    m_wakeThread = std::thread([this, bthMacAddress]() {
+        HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        const bool comInitialized = SUCCEEDED(comHr);
+
+        uint64_t bthAddr = BtSdpHelper::ParseBluetoothAddress(bthMacAddress);
+        if (bthAddr == 0) {
+            CPS_LOG_WARN("BtRfcomm", "WakePairedDevice: Invalid MAC address: ", bthMacAddress);
+            if (comInitialized) CoUninitialize();
+            m_wakeInProgress = false;
+            return;
+        }
+
+        // Ensure Windows radio is discoverable and accepts incoming connections
+        BLUETOOTH_FIND_RADIO_PARAMS radioParams = { sizeof(BLUETOOTH_FIND_RADIO_PARAMS) };
+        HANDLE hRadio = nullptr;
+        HBLUETOOTH_RADIO_FIND hFind = BluetoothFindFirstRadio(&radioParams, &hRadio);
+        if (hFind) {
+            BluetoothEnableDiscovery(hRadio, TRUE);
+            BluetoothEnableIncomingConnections(hRadio, TRUE);
+            CloseHandle(hRadio);
+            BluetoothFindRadioClose(hFind);
+        }
+
+        if (!m_running.load()) {
+            m_running = true;
+        }
+
+        SOCKET clientSock = socket(AF_BTH, SOCK_STREAM, BTHPROTO_RFCOMM);
+        if (clientSock == INVALID_SOCKET) {
+            int err = WSAGetLastError();
+            CPS_LOG_ERROR("BtRfcomm", "WakePairedDevice: socket(AF_BTH) failed: ", std::to_string(err));
+            if (comInitialized) CoUninitialize();
+            m_wakeInProgress = false;
+            return;
+        }
+
+        SOCKADDR_BTH sa{};
+        sa.addressFamily = AF_BTH;
+        sa.btAddr = bthAddr;
+        sa.serviceClassId = BtSdpHelper::kIap2ServiceClassGuidLegacy; // 0xFE
+        sa.port = 0;
+
+        CPS_LOG_INFO("BtRfcomm", "WakePairedDevice: Connecting RFCOMM to iPhone at ", bthMacAddress, " (UUID ...CAFE)...");
+        int res = connect(clientSock, reinterpret_cast<const sockaddr*>(&sa), sizeof(sa));
+        if (res == SOCKET_ERROR) {
+            int err = WSAGetLastError();
+            CPS_LOG_WARN("BtRfcomm", "Connect to ...CAFE failed (code ", std::to_string(err), "), trying ...CAFF...");
+            closesocket(clientSock);
+            clientSock = socket(AF_BTH, SOCK_STREAM, BTHPROTO_RFCOMM);
+            sa.serviceClassId = BtSdpHelper::kIap2ServiceClassGuid; // 0xFF
+            res = connect(clientSock, reinterpret_cast<const sockaddr*>(&sa), sizeof(sa));
+        }
+
+        if (res == SOCKET_ERROR) {
+            int err = WSAGetLastError();
+            CPS_LOG_WARN("BtRfcomm", "WakePairedDevice: RFCOMM connect to ", bthMacAddress, " failed: code ", std::to_string(err));
+            closesocket(clientSock);
+            if (comInitialized) CoUninitialize();
+            m_wakeInProgress = false;
+            return;
+        }
+
+        CPS_LOG_INFO("BtRfcomm", "WakePairedDevice: RFCOMM connected to iPhone successfully! Handing socket to HandleClientIo...");
+        m_wakeInProgress = false;
+
+        // Drive the active iAP2 session over this connected RFCOMM socket
+        HandleClientIo(clientSock, bthMacAddress);
+
+        if (comInitialized) {
+            CoUninitialize();
+        }
+    });
+#endif
 }
 
 } // namespace CarPlayStation::Core::Transport

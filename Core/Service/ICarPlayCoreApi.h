@@ -78,7 +78,7 @@ public:
     virtual void ResetPairingData() = 0;
 
     // Proactively re-trigger mDNS and wireless CarPlay discovery announcement burst
-    [[nodiscard]] virtual Common::Status TriggerReconnection() = 0;
+    [[nodiscard]] virtual Common::Status TriggerReconnection(std::string_view targetBtMac = {}) = 0;
 };
 
 } // namespace CarPlayStation::Core::Service

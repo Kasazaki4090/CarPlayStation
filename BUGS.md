@@ -1076,6 +1076,17 @@ Investigation identified multiple thread synchronization issues:
 2. **Responsive Watchdog Thread Lifecycle:**
    - Sliced `WatchdogLoop` wait time in `WifiSoftApManager` into 50ms intervals so thread termination signals are processed immediately.
    - Added thread self-join prevention guards across `StopAccessPoint()` and `StartAccessPoint()`.
+3. **Elimination of Mutex-Held `thread::join()` Deadlocks on Window Close / Shutdown:**
+   - **`AirPlayRtspServer`**: In `Impl::Stop()`, previously held `mutex_` while joining `worker_threads_`. When `ClientWorker` threads exited, they attempted to acquire `mutex_` to erase their session (`sessions_.erase(sock)`), causing an unresolvable join deadlock. Fixed by moving worker threads out of the list, shutting down client sockets with `shutdown(sock, SD_BOTH)` to unblock pending `recv()` calls, releasing `mutex_`, and then joining worker threads.
+   - **`AirPlayVideoReceiver`**: In `Stop()`, previously held `client_mutex_` while joining `client_threads_`. Exiting workers called `cleanupSock()` which acquires `client_mutex_`. Fixed by extracting threads into a local list and joining outside `client_mutex_`.
+   - **`WasapiAudioPipeline`**: In `Shutdown()`, previously held `mutex_` while joining `pumpThread_`. The audio pump loop required `mutex_` on each cycle, deadlocking teardown. Fixed by setting `pumpStop_ = true`, signaling `wasapiEvent_`, releasing `mutex_`, and then joining `pumpThread_`.
+   - **`WasapiMicrophoneUplink`**: In `Shutdown()`, released `backendMutex_` before joining `captureThread_`.
+   - **`CarPlayCoreService::TearDownSubsystems`**: Unconditionally called `StopAccessPoint()` on `wifi_manager_` (even if in Starting/Failed states) and explicitly called `rtsp_server_->Stop()` before destruction.
+   - **`MainWindow::WndProc`**: Guarded `DestroyWindow(hwnd)` in `WM_CLOSE` with `IsWindow(hwnd)` to prevent redundant re-entrant destruction.
+
+### Verification
+
+All 10 unit test suites pass (10/10), clean MSVC x64 compilation, window close path verified without thread-join deadlock.
 
 ---
 
@@ -1184,6 +1195,43 @@ On Windows, Bluetooth is only used for the initial setup to launch CarPlay. Subs
 2. `Tests/ServiceTests.cpp`: verified `TestTriggerReconnection()`.
 3. Ran all 10 unit test suites with `ctest`: 100% tests passed (10/10).
 4. Packaged updated release `dist/CarPlayStation-v0.1.58-win64.zip`.
+
+---
+
+## BUG-020 — Crash on launch due to stack-allocated AppController ABI mismatch and analysis of Wireless CarPlay mDNS vs Bluetooth trigger
+
+**Status:** `Fixed`
+
+**Date:** 2026-11-05
+
+### Symptom
+
+1. Double clicking `CarPlayStation.exe` crashes on the first attempt (`crash_dump.dmp` generated with exception `0xC0000005`), but sometimes opens on subsequent attempts.
+2. mDNS does not pull up wireless CarPlay automatically even when the iPhone has already joined the PC's Wi-Fi hotspot; the user is forced to manually toggle Bluetooth or tap the car in iPhone settings.
+
+### Root Cause / Investigation
+
+1. **Stack Buffer Overflow in `main()` from ABI Mismatch:**
+   - Analysis of `crash_dump.dmp` via WinDbg/CDB showed an Access Violation writing to `0x0000006aedd00008` inside `AppController::AppController+0xa2`.
+   - Thread 0 `StackBase` was `0x0000006aedd00000`. Writing to `rbx + 0xDE8` exceeded `StackBase` by 8 bytes, causing an immediate page fault.
+   - Root cause: In `UI/Win32/main.cpp`, `CarPlayStation::UI::AppController controller;` was allocated on the stack. `main.cpp.obj` was not recompiled by NMake after `AppController.h` was updated (which added `pending_ui_state_mutex_` and `pending_ui_state_`). The older `main.cpp.obj` allocated an outdated, smaller stack frame (`0xC50`), causing the newer constructor to smash the stack past `StackBase`.
+   - Moreover, `AppController` is a large object (>3.7 KB) holding Direct3D, Direct2D, and windowing structures; allocating it on the thread stack is unsafe.
+2. **Wireless CarPlay Protocol Architecture — mDNS vs Bluetooth Trigger:**
+   - Packet logs show that when the iPhone (`192.168.137.84`) connects to the Wi-Fi hotspot, it only queries `_rdlink._tcp` and `_companion-link._tcp`. It never advertises `_carplay-ctrl._tcp` and never queries `_airplay._tcp`.
+   - `_carplay-ctrl._tcp` with `GET /ctrl-int/1/connect` is Apple's Wired NCM CarPlay mechanism. In Wireless CarPlay, iOS enforces a strict security model: iOS will **never** spontaneously initiate screen projection or connect to an AirPlay receiver simply by being on a Wi-Fi network (to prevent rogue Wi-Fi APs from hijacking the display).
+   - In Apple's Wireless CarPlay specification, wireless sessions are **strictly triggered via Bluetooth RFCOMM / iAP2**.
+   - Factory vehicles connect automatically because their automotive Bluetooth controllers actively page/connect to paired phones upon startup. On Windows, `BtRfcommTransport` only runs a passive listener (`listen()`); when the iPhone is in standby/locked, iOS does not initiate outbound RFCOMM to paired PCs, requiring the user to tap the connection on the phone.
+
+### Fix
+
+1. In `UI/Win32/main.cpp`, replaced stack allocation with heap allocation `auto controller = std::make_unique<CarPlayStation::UI::AppController>();`.
+2. Removed obsolete `main.cpp.obj` and performed a clean rebuild.
+3. Implemented computer-initiated Bluetooth active paging and full iAP2 outbound connection:
+   - Identified from `carplaystation.log` that the previous probe connected to the iPhone's RFCOMM service and closed immediately without handing the socket to the iAP2 engine, while the server was passively waiting on dynamic channel 4 (which iOS never connects to).
+   - In reference implementations (e.g. DiPlay / XCertPlay `CarPlayController.kt`), head units actively connect outbound to the iPhone's Apple Wireless iAP2 RFCOMM UUID (`00000000-deca-fade-deca-deafdecacafe`) and run the iAP2 link directly over that outbound socket.
+   - Verified live over the air: WinSock AF_BTH `connect()` to `...CAFE` connects in 0ms, and sending the iAP2 DETECT prelude (`FF 55 02 00 EE 10`) immediately elicits `FF 55 02 00 EE 10` from the iPhone.
+   - Updated `BtRfcommTransport::WakePairedDevice` to connect via WinSock AF_BTH to `...CAFE` (fallback `...CAFF`) and directly hand the connected socket to `HandleClientIo(clientSock, bthMacAddress)`. This fires `TransportState::Connected` into `CarPlayCoreService`, sending DETECT + SYN and establishing the live wireless iAP2 session without any manual action on the iPhone.
+4. Verified headless launch (`--headless`), live iAP2 handshake, and full test suite (10/10 passed).
 
 ---
 

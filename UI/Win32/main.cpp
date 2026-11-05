@@ -136,16 +136,17 @@ int main(int argc, char* argv[]) {
     auto coreService = std::make_shared<CarPlayStation::Core::Service::CarPlayCoreService>();
     auto appService = std::make_shared<CarPlayStation::Application::ApplicationService>(coreService);
 
-    // 3. Initialize UI Controller
-    CarPlayStation::UI::AppController controller;
+    // 3. Initialize UI Controller on the heap to prevent stack overflow / ABI frame smashing
+    auto controller = std::make_unique<CarPlayStation::UI::AppController>();
     CarPlayStation::UI::WindowConfig winConfig;
     winConfig.title = L"CarPlayStation — Wireless CarPlay Receiver";
     winConfig.client_width = 1280;
     winConfig.client_height = 720;
 
-    auto status = controller.Initialize(appService, winConfig, headless);
+    auto status = controller->Initialize(appService, winConfig, headless);
     if (status.IsError()) {
         CPS_LOG_ERROR("CarPlayStation", "Initialization failed: ", status.Message());
+        controller.reset();
         CoUninitialize();
         return (status.Code() == CarPlayStation::Core::Common::StatusCode::Unavailable) ? 0 : 1;
     }
@@ -154,12 +155,14 @@ int main(int argc, char* argv[]) {
     // 4. Run UI Loop
     int exitCode = 0;
     if (!headless) {
-        exitCode = controller.Run();
+        exitCode = controller->Run();
     } else {
         // Headless single-frame step verification
-        controller.Step();
-        controller.Shutdown();
+        controller->Step();
+        controller->Shutdown();
     }
+
+    controller.reset();
 
     CPS_LOG_INFO("CarPlayStation", "UI loop exited with code ", exitCode);
     CoUninitialize();

@@ -104,8 +104,8 @@ public:
     // Reset pairing records and regenerate accessory identity (called on certificate / credential change)
     virtual void ResetPairingData() = 0;
 
-    // Proactively re-trigger mDNS and wireless CarPlay discovery announcement burst
-    [[nodiscard]] virtual Core::Common::Status TriggerReconnection() = 0;
+    // Proactively re-trigger mDNS and wireless CarPlay discovery announcement burst (and active BT wake)
+    [[nodiscard]] virtual Core::Common::Status TriggerReconnection(std::string_view targetBtMac = {}) = 0;
 };
 
 } // namespace CarPlayStation::Application

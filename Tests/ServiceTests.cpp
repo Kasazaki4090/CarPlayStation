@@ -533,6 +533,9 @@ void TestTriggerReconnection() {
     auto status = app_service.TriggerReconnection();
     assert(status.IsOk());
 
+    auto status_wake = app_service.TriggerReconnection("6C:1F:8A:09:98:7D");
+    assert(status_wake.IsOk());
+
     app_service.StopCarPlay();
     std::cout << "[PASS] TestTriggerReconnection\n";
 }

@@ -37,6 +37,13 @@ public:
     [[nodiscard]] bool IsListening() const noexcept;
     [[nodiscard]] uint8_t GetChannel() const noexcept;
 
+    /**
+     * @brief Actively page/wake a paired iPhone via Bluetooth (Windows Baseband Paging & iAP2 probe).
+     * @param bthMacAddress Bluetooth MAC of the paired iPhone (e.g. "6C:1F:8A:09:98:7D").
+     */
+    void WakePeer(const std::string& peerAddress) override { WakePairedDevice(peerAddress); }
+    void WakePairedDevice(const std::string& bthMacAddress);
+
     // --- Simulation & Test Mode (No Hardware Required) ---
     void EnableSimulatedMode(bool enable);
     [[nodiscard]] bool IsSimulatedMode() const noexcept;
@@ -53,6 +60,7 @@ private:
     std::atomic<bool> m_isListening{false};
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_simulatedMode{false};
+    std::atomic<bool> m_wakeInProgress{false};
 
     uint8_t m_channel{1};
     SOCKET m_serverSocket{INVALID_SOCKET};
@@ -66,6 +74,7 @@ private:
     StateChangedCallback m_stateCallback;
 
     std::thread m_workerThread;
+    std::thread m_wakeThread;
 };
 
 } // namespace CarPlayStation::Core::Transport

@@ -158,7 +158,7 @@ Core::Common::Status AppController::Initialize(
     });
     overlay_.SetReconnectCallback([this]() {
         if (app_api_) {
-            (void)app_api_->TriggerReconnection();
+            (void)app_api_->TriggerReconnection(persisted_bt_mac_);
         }
     });
 
@@ -244,6 +244,9 @@ Core::Common::Status AppController::Initialize(
         snprintf(buf, sizeof(buf), "[AppController] StartCarPlay failed: %s\n",
                  startSt.Message().c_str());
         OutputDebugStringA(buf);
+    } else if (!persisted_bt_mac_.empty()) {
+        CPS_LOG_INFO("AppController", "Proactively triggering wake-up/reconnection for paired phone: ", persisted_bt_mac_);
+        (void)app_api_->TriggerReconnection(persisted_bt_mac_);
     }
 
     is_initialized_ = true;

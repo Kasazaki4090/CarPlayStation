@@ -93,6 +93,9 @@ public:
 
     // Channel runtime statistics
     [[nodiscard]] virtual TransportStats GetStats() const { return {}; }
+
+    // Proactively page / wake a paired peer device (e.g. over Bluetooth baseband)
+    virtual void WakePeer(const std::string& /*peerAddress*/) {}
 };
 
 } // namespace CarPlayStation::Core::Transport

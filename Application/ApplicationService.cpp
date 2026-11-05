@@ -347,12 +347,12 @@ void ApplicationService::ResetPairingData() {
     }
 }
 
-Core::Common::Status ApplicationService::TriggerReconnection() {
+Core::Common::Status ApplicationService::TriggerReconnection(std::string_view targetBtMac) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!core_api_) {
         return Core::Common::MakeError(Core::Common::StatusCode::Unavailable, "Core API unavailable");
     }
-    return core_api_->TriggerReconnection();
+    return core_api_->TriggerReconnection(targetBtMac);
 }
 
 // ============================================================================

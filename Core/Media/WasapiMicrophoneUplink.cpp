@@ -301,11 +301,20 @@ bool WasapiMicrophoneUplink::StartCaptureBackend() {
 }
 
 void WasapiMicrophoneUplink::StopCaptureBackend() {
-    std::lock_guard<std::mutex> backendLock(backendMutex_);
-    captureStop_ = true;
+    {
+        std::lock_guard<std::mutex> backendLock(backendMutex_);
+        captureStop_ = true;
+#ifdef _WIN32
+        if (wasapiEvent_) {
+            SetEvent(static_cast<HANDLE>(wasapiEvent_));
+        }
+#endif
+    }
     if (captureThread_.joinable()) {
         captureThread_.join();
     }
+
+    std::lock_guard<std::mutex> backendLock(backendMutex_);
     if (wasapiCapture_) {
         auto* client = static_cast<IAudioClient*>(wasapiCapture_);
         client->Stop();

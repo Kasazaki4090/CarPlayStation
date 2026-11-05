@@ -342,13 +342,22 @@ void WasapiAudioPipeline::StopLane(AudioLane lane) {
 }
 
 void WasapiAudioPipeline::Shutdown() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    running_ = false;
-    wasapiActive_ = false;
-    pumpStop_ = true;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        running_ = false;
+        wasapiActive_ = false;
+        pumpStop_ = true;
+#ifdef _WIN32
+        if (wasapiEvent_) {
+            SetEvent(static_cast<HANDLE>(wasapiEvent_));
+        }
+#endif
+    }
     if (pumpThread_.joinable()) {
         pumpThread_.join();
     }
+
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 #ifdef _WIN32
     if (wasapiClient_) {
         auto* client = reinterpret_cast<IAudioClient*>(wasapiClient_);

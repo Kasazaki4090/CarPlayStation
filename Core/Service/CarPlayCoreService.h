@@ -98,7 +98,7 @@ public:
     void ResetPairingData() override;
 
     // Proactively re-trigger mDNS and wireless CarPlay discovery announcement burst
-    [[nodiscard]] Common::Status TriggerReconnection() override;
+    [[nodiscard]] Common::Status TriggerReconnection(std::string_view targetBtMac = {}) override;
 
     // --- Additional accessors (not part of ICarPlayCoreApi) ---
     [[nodiscard]] std::shared_ptr<Hardware::IMfiSigner> GetMfiSigner() const;
@@ -167,6 +167,8 @@ private:
     // Real device identity (Bluetooth MAC string) used for the mDNS
     // AirPlay-Receiver-Device-ID so the iPhone accepts the connection.
     std::string device_id_;
+    // Remembered paired iPhone Bluetooth MAC used for active waking via paging & iAP2 probe.
+    std::string remembered_phone_bt_mac_;
     // Last observed iPhone WiFi (station) MAC, captured when the station
     // joins the SoftAP. Used to publish the device-connected event once the
     // real Bluetooth MAC becomes known (the BT connection establishes after
