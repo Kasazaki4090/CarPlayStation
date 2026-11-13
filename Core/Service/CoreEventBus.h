@@ -60,6 +60,11 @@ struct CallStateEvent {
     bool is_incoming{false};
 };
 
+// Emitted when the iPhone requests host UI (e.g. CarPlayStation OEM settings icon tap).
+struct HostUiRequestedEvent {
+    std::string reason{"oem_icon_tap"};
+};
+
 // Variant type for all Core events.
 using CoreEvent = std::variant<
     ConnectionStateChangedEvent,
@@ -67,7 +72,8 @@ using CoreEvent = std::variant<
     AlbumArtworkEvent,
     AudioRouteChangedEvent,
     DeviceConnectedEvent,
-    CallStateEvent
+    CallStateEvent,
+    HostUiRequestedEvent
 >;
 
 using CoreEventCallback = std::function<void(const CoreEvent&)>;

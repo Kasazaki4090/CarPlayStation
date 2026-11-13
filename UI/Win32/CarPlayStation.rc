@@ -1,5 +1,7 @@
-#include <windows.h>
+#include "resources/resource.h"
 
-// Embed the UAC manifest so the process runs elevated (required for the
-// AF_BTH RFCOMM Bluetooth server socket and SDP registration).
-1 RT_MANIFEST "CarPlayStation.manifest"
+// Application Icon (IDI_APP_ICON = 101, lowest ID so Windows Explorer and Taskbar pick it)
+IDI_APP_ICON ICON "resources/app_icon.ico"
+
+// Embed application manifest (RT_MANIFEST = 24)
+1 24 "CarPlayStation.manifest"

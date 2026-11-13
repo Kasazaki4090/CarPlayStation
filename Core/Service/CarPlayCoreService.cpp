@@ -1011,6 +1011,11 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
             }
         });
 
+        rtsp_server_->SetHostUiRequestedCallback([this]() {
+            CPS_LOG_INFO("CoreService", "CarPlayStation OEM settings entry requested by iPhone; notifying event bus");
+            event_bus_.Publish(HostUiRequestedEvent{});
+        });
+
         rtsp_server_->SetStreamTeardownCallback([this](uint32_t stream_type) {
             CPS_LOG_INFO("CoreService", "Audio stream teardown: type=", stream_type);
             if (stream_type == 101) {

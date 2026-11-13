@@ -417,8 +417,13 @@ void ApplicationService::OnCoreEvent(const Core::Service::CoreEvent& event) {
             }
             ui_state_.status_message = "Device connected";
         }
+        else if (std::holds_alternative<Core::Service::HostUiRequestedEvent>(event)) {
+            ui_state_.host_ui_requested = true;
+            ui_state_.status_message = "CarPlayStation 设置";
+        }
 
         state_snapshot = ui_state_;
+        ui_state_.host_ui_requested = false;
     }
 
     // Refresh the video facts outside the lock (this calls into Core).

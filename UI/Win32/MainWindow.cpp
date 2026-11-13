@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "D3D11Renderer.h"
 #include "Core/Common/Logging.h"
+#include "resources/resource.h"
 #include <windowsx.h>
 #include <dwmapi.h>
 
@@ -68,11 +69,33 @@ Core::Common::Status MainWindow::Create(const WindowConfig& config) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     // 3. Register Window Class
+    HICON hAppIcon = reinterpret_cast<HICON>(LoadImageW(
+        hinstance_,
+        MAKEINTRESOURCEW(IDI_APP_ICON),
+        IMAGE_ICON,
+        GetSystemMetrics(SM_CXICON),
+        GetSystemMetrics(SM_CYICON),
+        LR_DEFAULTCOLOR
+    ));
+    HICON hAppIconSm = reinterpret_cast<HICON>(LoadImageW(
+        hinstance_,
+        MAKEINTRESOURCEW(IDI_APP_ICON),
+        IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON),
+        GetSystemMetrics(SM_CYSMICON),
+        LR_DEFAULTCOLOR
+    ));
+    if (!hAppIcon) {
+        hAppIcon = LoadIconW(hinstance_, MAKEINTRESOURCEW(IDI_APP_ICON));
+    }
+
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(WNDCLASSEXW);
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = StaticWndProc;
     wc.hInstance = hinstance_;
+    wc.hIcon = hAppIcon;
+    wc.hIconSm = hAppIconSm;
     wc.hCursor = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
     wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
     wc.lpszClassName = kWindowClassName;
@@ -143,6 +166,13 @@ Core::Common::Status MainWindow::Create(const WindowConfig& config) {
     }
     CPS_LOG_INFO("MainWindow", "CreateWindowExW succeeded: HWND=", reinterpret_cast<uintptr_t>(hwnd_),
                  " rect=", posX, ",", posY, " ", windowWidth, "x", windowHeight);
+
+    if (hAppIcon) {
+        SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hAppIcon));
+    }
+    if (hAppIconSm) {
+        SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hAppIconSm));
+    }
 
     // The window frame size depends on the monitor DPI (this process is
     // Per-Monitor-V2 aware), so the real client area can differ from the

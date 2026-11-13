@@ -1321,3 +1321,60 @@ Aligning the UI experience with `xcertplay` and standard automotive HUD expectat
 - `UI/Win32/OverlayRenderer.cpp` (`DrawStatusPill`, `ui_state_.session_state`)
 - `Reference/xcertplay/` UI progress indicators and stage machines
 - `BUGS.md` `BUG-010`, `BUG-019`
+
+
+## DEC-015 — Brand Visual Identity, Multi-Resolution App Icon, and CarPlay On-Screen OEM Button Integration
+
+**Status:** `Accepted`
+
+**Date:** 2026-11-06
+
+### Context
+
+CarPlayStation lacked an integrated visual identity and application icon:
+1. **Windows Desktop & Shell Identity:**
+   - The compiled `CarPlayStation.exe` displayed the generic Windows application executable icon.
+   - The taskbar, Alt+Tab app switcher, and top-left window title bar used default fallback placeholders.
+   - The user requested a brand-new logo and icon designed specifically for "CarPlay on Windows" — incorporating modern Windows 11 Fluent Design and automotive cockpit aesthetics, while strictly avoiding gaming console or PlayStation controller clichés.
+2. **CarPlay In-Car Screen OEM Button & Icon:**
+   - In Apple CarPlay, an OEM head-unit application icon and label appear on the CarPlay home screen to allow users to navigate back to the host vehicle settings.
+   - In RTSP `/info`, the application previously lacked `oemIconVisible`, `oemIconLabel`, and `oemIcons` (PNG asset), causing the OEM button to be blank or missing.
+   - When tapped on the CarPlay screen, iOS dispatches RTSP `POST /command` with binary plist `type = "requestUI"` (or `requestCarUI`). The application lacked a hook to bring up the host settings drawer.
+
+### Decision
+
+1. **Brand Identity & Icon Design:**
+   - **Form Factor:** Windows 11 Fluent rounded squircle plate with subtle glassmorphism rim and glowing cyan aura.
+   - **Aesthetic:** High-tech automotive cockpit instrumentation merging a 270° speedometer gauge arc, electric speed tick marks, dual wireless connectivity transmission waves (representing 5GHz Wi-Fi and Bluetooth), and a sleek forward "Play" chevron at the center (signifying media streaming and CarPlay performance).
+   - **Multi-Resolution Packaging:**
+     - Master 512x512 high-resolution PNG (`UI/Win32/resources/app_icon_512.png`).
+     - Standard 256x256 PNG (`UI/Win32/resources/app_icon_256.png` and `oem_icon.png`).
+     - Multi-layer Windows `.ico` containing 256, 128, 64, 48, 32, and 16 pixel frames (`UI/Win32/resources/app_icon.ico`).
+2. **Win32 Shell Integration:**
+   - Compiled `resources/app_icon.ico` into `CarPlayStation.exe` via `CarPlayStation.rc` with resource ID `IDI_APP_ICON` (101).
+   - In `MainWindow.cpp`, initialized `WNDCLASSEXW` with `hIcon` and `hIconSm` via `LoadImageW`, and dispatched `WM_SETICON` (`ICON_BIG` and `ICON_SMALL`) on window creation.
+3. **Apple CarPlay RTSP Protocol Advertisement:**
+   - Embedded `oem_icon.png` directly into `Core/Session/OemIconAsset.h` and `OemIconAsset.cpp` as static data bytes.
+   - In `AirPlayRtspServer.cpp` (`HandleInfo`):
+     - `name`: `"CarPlayStation 设置"`
+     - `oemIconVisible`: `true`
+     - `oemIconLabel`: `"CarPlayStation 设置"`
+     - `oemIcons`: Array of icon dictionaries with `widthPixels: 256`, `heightPixels: 256`, `prerendered: true`, and `imageData: <PNG bytes>`.
+4. **CarPlay On-Screen OEM Button Tap Handling:**
+   - In `AirPlayRtspServer.cpp` (`HandleCommand`), intercepted `requestUI` and `requestCarUI` commands.
+   - Dispatched `HostUiRequestedEvent` across `CoreEventBus` to `ApplicationService` and `AppController`.
+   - In `AppController`, invoking `overlay_.OpenSettingsDrawer()` and bringing the host window to foreground via `SetForegroundWindow()`.
+
+### Consequences
+
+- CarPlayStation now has a polished, professional brand identity across the entire OS (File Explorer, Desktop, Taskbar, Window Title Bar, Alt+Tab).
+- The Apple CarPlay home screen displays the custom OEM icon labeled **"CarPlayStation 设置"**.
+- Tapping the OEM icon in CarPlay instantly opens the host settings drawer on Windows, providing a unified hardware and session control entry point.
+
+### References
+
+- `DECISIONS.md` `DEC-002`, `DEC-014`
+- `Core/Session/AirPlayRtspServer.cpp` (`HandleInfo`, `HandleCommand`)
+- `Core/Session/OemIconAsset.h`, `OemIconAsset.cpp`
+- `UI/Win32/MainWindow.cpp`, `CarPlayStation.rc`
+

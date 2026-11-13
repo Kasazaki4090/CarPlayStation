@@ -86,6 +86,11 @@ public:
     void ToggleSettingsDrawer();
 
     /**
+     * @brief Explicitly open settings drawer (e.g. via CarPlay on-screen OEM button).
+     */
+    void OpenSettingsDrawer();
+
+    /**
      * @brief Toggle the standalone log panel visibility (e.g. via F4).
      */
     void ToggleLogPanel();

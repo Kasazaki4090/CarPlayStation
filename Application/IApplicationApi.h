@@ -47,6 +47,9 @@ struct AppUiState {
     // Now Playing & Telephony states
     NowPlayingUi now_playing;
     CallStateUi call_state;
+
+    // Triggered when CarPlay on-screen OEM settings button is tapped by user
+    bool host_ui_requested{false};
 };
 
 using UiStateChangeCallback = std::function<void(const AppUiState& state)>;

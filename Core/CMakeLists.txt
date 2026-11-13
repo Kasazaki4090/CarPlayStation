@@ -21,6 +21,7 @@ add_library(CarPlayCore STATIC
     Session/AccessoryIdentityStore.cpp
     Session/AirPlayRtspCodec.cpp
     Session/AirPlayRtspServer.cpp
+    Session/OemIconAsset.cpp
     Session/CarPlaySessionStateMachine.cpp
     Session/Pairing/ed25519/fe.c
     Session/Pairing/ed25519/ge.c

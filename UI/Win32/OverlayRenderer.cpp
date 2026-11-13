@@ -245,6 +245,12 @@ void OverlayRenderer::ToggleSettingsDrawer() {
     overlay_alpha_ = 1.0f;
 }
 
+void OverlayRenderer::OpenSettingsDrawer() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    show_settings_drawer_ = true;
+    overlay_alpha_ = 1.0f;
+}
+
 void OverlayRenderer::ToggleLogPanel() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     show_log_panel_ = !show_log_panel_;

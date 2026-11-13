@@ -1,4 +1,5 @@
 #include "Core/Session/AirPlayRtspServer.h"
+#include "Core/Session/OemIconAsset.h"
 #include "Core/Common/Logging.h"
 #include "Core/Hardware/IMfiSigner.h"
 #include "Core/Session/Pairing/AuthSetup.h"
@@ -943,6 +944,11 @@ public:
         duck_cb_ = std::move(callback);
     }
 
+    void SetHostUiRequestedCallback(HostUiRequestedCallback callback) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        host_ui_cb_ = std::move(callback);
+    }
+
     void SetStreamTeardownCallback(StreamTeardownCallback callback) {
         std::lock_guard<std::mutex> lock(mutex_);
         stream_teardown_cb_ = std::move(callback);
@@ -1545,13 +1551,30 @@ private:
         }
 
         BplistDict root;
-        root.emplace_back("name", BplistValue("CarPlay"));
+        root.emplace_back("name", BplistValue("CarPlayStation 设置"));
         root.emplace_back("model", BplistValue("CarPlayStation"));
         root.emplace_back("manufacturer", BplistValue("CarPlayStation"));
         root.emplace_back("sourceVersion", BplistValue("320.17"));
         root.emplace_back("firmwareRevision", BplistValue("1.0"));
         root.emplace_back("deviceID", BplistValue(dev_id));
         root.emplace_back("pi", BplistValue(dev_id));
+
+        // OEM Icon configuration for Apple CarPlay home screen.
+        // Advertises OEM button visibility, label ("CarPlayStation 设置"), and icon PNG data.
+        root.emplace_back("oemIconVisible", BplistValue(true));
+        root.emplace_back("oemIconLabel", BplistValue("CarPlayStation 设置"));
+        if (kDefaultOemIconPngSize > 0) {
+            BplistDict icon_entry;
+            std::vector<uint8_t> png_bytes(kDefaultOemIconPng, kDefaultOemIconPng + kDefaultOemIconPngSize);
+            icon_entry.emplace_back("imageData", BplistValue(std::move(png_bytes)));
+            icon_entry.emplace_back("widthPixels", BplistValue(static_cast<int64_t>(256)));
+            icon_entry.emplace_back("heightPixels", BplistValue(static_cast<int64_t>(256)));
+            icon_entry.emplace_back("prerendered", BplistValue(true));
+
+            BplistArray icons_arr;
+            icons_arr.push_back(BplistValue(icon_entry));
+            root.emplace_back("oemIcons", BplistValue(icons_arr));
+        }
         // xcertplay always advertises a Bluetooth address list and the drive side. iOS uses the
         // list to decide whether the car's radio can take calls, which is part of the same
         // audio-routing decision that produces the MainAudio borrow. We have no local radio, so
@@ -1898,6 +1921,9 @@ private:
             if (duck_cb_) duck_cb_(true);
         } else if (cmd_type == "unduckAudio") {
             if (duck_cb_) duck_cb_(false);
+        } else if (cmd_type == "requestUI" || cmd_type == "requestCarUI") {
+            CPS_LOG_INFO("AirPlayRtsp", "CarPlay host UI requested by iPhone (OEM icon clicked)");
+            if (host_ui_cb_) host_ui_cb_();
         }
 
         auto resp = AirPlayRtspCodec::MakeOkResponse(cseq);
@@ -2275,6 +2301,7 @@ private:
     RtspRequestHandler custom_handler_;
     StreamingStartedCallback streaming_cb_;
     DuckAudioCallback duck_cb_;
+    HostUiRequestedCallback host_ui_cb_;
     StreamTeardownCallback stream_teardown_cb_;
 
     // Pair-setup (POST /pair-setup) state.
@@ -2326,6 +2353,10 @@ void AirPlayRtspServer::SetStreamingStartedCallback(StreamingStartedCallback cal
 
 void AirPlayRtspServer::SetDuckAudioCallback(DuckAudioCallback callback) {
     impl_->SetDuckAudioCallback(std::move(callback));
+}
+
+void AirPlayRtspServer::SetHostUiRequestedCallback(HostUiRequestedCallback callback) {
+    impl_->SetHostUiRequestedCallback(std::move(callback));
 }
 
 void AirPlayRtspServer::SetStreamTeardownCallback(StreamTeardownCallback callback) {

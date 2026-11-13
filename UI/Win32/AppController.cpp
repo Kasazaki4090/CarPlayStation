@@ -459,6 +459,14 @@ void AppController::OnUiStateChanged(const Application::AppUiState& state) {
 }
 
 void AppController::ApplyUiStateOnUiThread(const Application::AppUiState& state) {
+    if (state.host_ui_requested) {
+        CPS_LOG_INFO("AppController", "CarPlayStation on-screen settings button tapped: opening drawer");
+        overlay_.OpenSettingsDrawer();
+        if (window_.GetHwnd()) {
+            ::SetForegroundWindow(window_.GetHwnd());
+        }
+    }
+
     overlay_.UpdateUiState(state);
     pushed_video_width_ = state.current_video_width;
     pushed_video_height_ = state.current_video_height;

@@ -160,6 +160,12 @@ public:
     void SetDuckAudioCallback(DuckAudioCallback callback);
 
     /**
+     * @brief Register a callback invoked when the iPhone requests host UI (e.g. OEM icon tap).
+     */
+    using HostUiRequestedCallback = std::function<void()>;
+    void SetHostUiRequestedCallback(HostUiRequestedCallback callback);
+
+    /**
      * @brief Register a callback invoked when a specific stream is torn down.
      */
     using StreamTeardownCallback = std::function<void(uint32_t stream_type)>;
