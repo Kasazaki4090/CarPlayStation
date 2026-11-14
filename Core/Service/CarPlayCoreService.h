@@ -10,8 +10,12 @@
 #include "Core/Media/IAudioPipeline.h"
 #include "Core/Media/IMicrophoneUplink.h"
 #include "Core/Input/IInputEventSink.h"
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 namespace CarPlayStation::Core::Transport {
@@ -121,6 +125,12 @@ private:
     // phase-2 negotiation and hand each lane its stream decryption key.
     void ConfigureAudioReceivers(const Session::NegotiatedMediaParams& params);
     void ConfigureMicrophoneUplink(const Session::NegotiatedMediaParams& params);
+    void RequestSessionReset(const std::string& reason, bool wakeBluetooth);
+    void RequestBluetoothWake();
+    void StartReconnectWorker();
+    void StopReconnectWorker();
+    void ReconnectWorkerLoop();
+    void ResetActiveMediaStreams(const std::string& reason);
 
     CarPlayCoreDependencies deps_;
     CoreEventBus event_bus_;
@@ -183,6 +193,17 @@ private:
     bool initialized_{false};
     bool started_{false};
     mutable std::mutex lifecycle_mutex_;
+
+    std::mutex reconnect_mutex_;
+    std::condition_variable reconnect_cv_;
+    std::thread reconnect_thread_;
+    std::atomic<bool> reconnect_stop_{false};
+    bool pending_session_reset_{false};
+    std::string pending_reset_reason_;
+    bool pending_bt_wake_{false};
+    std::chrono::steady_clock::time_point last_disconnect_time_{};
+    std::chrono::steady_clock::time_point last_bt_wake_attempt_{};
+    std::mutex media_mutex_;
 };
 
 } // namespace CarPlayStation::Core::Service

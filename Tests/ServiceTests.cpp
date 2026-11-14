@@ -536,6 +536,12 @@ void TestTriggerReconnection() {
     auto status_wake = app_service.TriggerReconnection("6C:1F:8A:09:98:7D");
     assert(status_wake.IsOk());
 
+    // Verify balanced audio defaults (BUG-023): nav has headroom above media, deep ducking
+    const Application::AudioPreferences defaults;
+    assert(defaults.navigation_volume > defaults.media_volume);
+    assert(defaults.navigation_volume > 1.0f);
+    assert(defaults.ducking_ratio <= 0.10f);
+
     app_service.StopCarPlay();
     std::cout << "[PASS] TestTriggerReconnection\n";
 }

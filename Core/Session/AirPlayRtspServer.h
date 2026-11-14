@@ -172,6 +172,12 @@ public:
     void SetStreamTeardownCallback(StreamTeardownCallback callback);
 
     /**
+     * @brief Register a callback invoked when the last active RTSP client disconnects.
+     */
+    using ClientDisconnectedCallback = std::function<void(int error_code)>;
+    void SetClientDisconnectedCallback(ClientDisconnectedCallback callback);
+
+    /**
      * @brief Enable the RTSP pair-setup handshake (POST /pair-setup) with the given
      *        accessory identity and a callback that records each newly-paired controller.
      */

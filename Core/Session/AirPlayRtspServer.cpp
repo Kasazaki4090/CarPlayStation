@@ -954,6 +954,11 @@ public:
         stream_teardown_cb_ = std::move(callback);
     }
 
+    void SetClientDisconnectedCallback(ClientDisconnectedCallback callback) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        client_disconnected_cb_ = std::move(callback);
+    }
+
     void SetPairSetupIdentity(Pairing::AccessoryIdentity identity, Pairing::PeerSaver saver) {
         std::lock_guard<std::mutex> lock(mutex_);
         pair_setup_enabled_ = true;
@@ -1138,18 +1143,21 @@ private:
         plaintext_buffer.reserve(4096);
         uint8_t temp[2048];
 
+        int disconnect_err = 0;
         while (running_) {
             int bytes_read = recv(sock, reinterpret_cast<char*>(temp), sizeof(temp), 0);
             if (bytes_read <= 0) {
 #ifdef _WIN32
-                int err = WSAGetLastError();
+                int err = (bytes_read < 0) ? WSAGetLastError() : 0;
+                disconnect_err = err;
                 if (bytes_read == 0) {
                     CPS_LOG_INFO("AirPlayRtsp", "recv() returned 0 (iPhone sent TCP FIN - graceful close)");
                 } else {
                     CPS_LOG_ERROR("AirPlayRtsp", "recv() error: ret=", std::to_string(bytes_read), ", WSAGetLastError=", std::to_string(err));
                 }
 #else
-                int err = errno;
+                int err = (bytes_read < 0) ? errno : 0;
+                disconnect_err = err;
                 if (bytes_read == 0) {
                     CPS_LOG_INFO("AirPlayRtsp", "recv() returned 0 (iPhone sent TCP FIN - graceful close)");
                 } else {
@@ -1271,13 +1279,24 @@ private:
         CPS_LOG_INFO("AirPlayRtsp", "iPhone RTSP connection closed");
         CLOSE_SOCK(sock);
 
-        std::lock_guard<std::mutex> lock(mutex_);
-        sessions_.erase(sock);
-        for (auto it = client_sockets_.begin(); it != client_sockets_.end(); ++it) {
-            if (*it == sock) {
-                client_sockets_.erase(it);
-                break;
+        ClientDisconnectedCallback disc_cb;
+        bool should_notify = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            sessions_.erase(sock);
+            for (auto it = client_sockets_.begin(); it != client_sockets_.end(); ++it) {
+                if (*it == sock) {
+                    client_sockets_.erase(it);
+                    break;
+                }
             }
+            if (running_.load() && sessions_.empty() && client_disconnected_cb_) {
+                disc_cb = client_disconnected_cb_;
+                should_notify = true;
+            }
+        }
+        if (should_notify) {
+            disc_cb(disconnect_err);
         }
     }
 
@@ -2303,6 +2322,7 @@ private:
     DuckAudioCallback duck_cb_;
     HostUiRequestedCallback host_ui_cb_;
     StreamTeardownCallback stream_teardown_cb_;
+    ClientDisconnectedCallback client_disconnected_cb_;
 
     // Pair-setup (POST /pair-setup) state.
     bool pair_setup_enabled_{false};
@@ -2361,6 +2381,10 @@ void AirPlayRtspServer::SetHostUiRequestedCallback(HostUiRequestedCallback callb
 
 void AirPlayRtspServer::SetStreamTeardownCallback(StreamTeardownCallback callback) {
     impl_->SetStreamTeardownCallback(std::move(callback));
+}
+
+void AirPlayRtspServer::SetClientDisconnectedCallback(ClientDisconnectedCallback callback) {
+    impl_->SetClientDisconnectedCallback(std::move(callback));
 }
 
 void AirPlayRtspServer::SetPairSetupIdentity(Pairing::AccessoryIdentity identity, Pairing::PeerSaver saver) {

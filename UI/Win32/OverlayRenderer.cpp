@@ -696,8 +696,8 @@ void OverlayRenderer::DrawSettingsDrawer(float width, float height) {
     // Sliders setup
     sliders_.clear();
     sliders_.push_back({ L"媒体音乐音量 (MainMedia)", &settings_.audio.media_volume, 0.0f, 1.0f, {}, false });
-    sliders_.push_back({ L"导航播报音量 (AltNav)", &settings_.audio.navigation_volume, 0.0f, 1.0f, {}, false });
-    sliders_.push_back({ L"通话/Siri音量 (Telephony)", &settings_.audio.telephony_volume, 0.0f, 1.0f, {}, false });
+    sliders_.push_back({ L"导航播报音量 (AltNav)", &settings_.audio.navigation_volume, 0.0f, 2.0f, {}, false });
+    sliders_.push_back({ L"通话/Siri音量 (Telephony)", &settings_.audio.telephony_volume, 0.0f, 2.0f, {}, false });
     sliders_.push_back({ L"智能压音比率 (Ducking)", &settings_.audio.ducking_ratio, 0.0f, 1.0f, {}, false });
 
     for (size_t i = 0; i < sliders_.size(); ++i) {
@@ -705,7 +705,7 @@ void OverlayRenderer::DrawSettingsDrawer(float width, float height) {
         float val = (sl.value_ptr) ? *sl.value_ptr : 1.0f;
 
         // Label + percentage
-        std::wstring labelWithVal = sl.label + L": " + std::to_wstring(static_cast<int>(val * 100.0f)) + L"%";
+        std::wstring labelWithVal = sl.label + L": " + std::to_wstring(static_cast<int>(val * 100.0f + 0.5f)) + L"%";
         D2D1_RECT_F labelRect = D2D1::RectF(drawerX + 16.0f, curY, drawerX + drawerW - 16.0f, curY + 16.0f);
         d2d_render_target_->DrawText(
             labelWithVal.c_str(),
@@ -725,8 +725,11 @@ void OverlayRenderer::DrawSettingsDrawer(float width, float height) {
         D2D1_ROUNDED_RECT trackRRect = D2D1::RoundedRect(sl.track_rect, 3.0f, 3.0f);
         d2d_render_target_->FillRoundedRectangle(&trackRRect, brush_slider_track_.Get());
 
-        // Filled active track
-        float fillRight = trackLeft + trackWidth * std::clamp(val, 0.0f, 1.0f);
+        // Filled active track (normalized over [min_val, max_val])
+        float normVal = (sl.max_val > sl.min_val)
+            ? std::clamp((val - sl.min_val) / (sl.max_val - sl.min_val), 0.0f, 1.0f)
+            : 0.0f;
+        float fillRight = trackLeft + trackWidth * normVal;
         D2D1_ROUNDED_RECT activeRRect = D2D1::RoundedRect(
             D2D1::RectF(trackLeft, curY, fillRight, curY + 6.0f),
             3.0f, 3.0f
@@ -962,7 +965,8 @@ bool OverlayRenderer::OnMouseDown(float clientX, float clientY) {
                             active_dragging_slider_ = static_cast<int>(i);
                             float w = sl.track_rect.right - sl.track_rect.left;
                             if (w > 0.0f && sl.value_ptr) {
-                                *sl.value_ptr = std::clamp((clientX - sl.track_rect.left) / w, sl.min_val, sl.max_val);
+                                float t = std::clamp((clientX - sl.track_rect.left) / w, 0.0f, 1.0f);
+                                *sl.value_ptr = sl.min_val + t * (sl.max_val - sl.min_val);
                                 cb = settings_callback_;
                                 settings_copy = settings_;
                                 CPS_LOG_INFO("Overlay", "Slider started dragging");
@@ -1006,7 +1010,8 @@ bool OverlayRenderer::OnMouseMove(float clientX, float clientY) {
             auto& sl = sliders_[active_dragging_slider_];
             float w = sl.track_rect.right - sl.track_rect.left;
             if (w > 0.0f && sl.value_ptr) {
-                *sl.value_ptr = std::clamp((clientX - sl.track_rect.left) / w, sl.min_val, sl.max_val);
+                float t = std::clamp((clientX - sl.track_rect.left) / w, 0.0f, 1.0f);
+                *sl.value_ptr = sl.min_val + t * (sl.max_val - sl.min_val);
                 cb = settings_callback_;
                 settings_copy = settings_;
             }

@@ -2,6 +2,7 @@
 
 #include "Core/Transport/IWifiSoftApManager.h"
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <map>
@@ -40,13 +41,19 @@ public:
     void SimulateStateChange(ApState state, Common::Status status = Common::Status::Ok());
 
 private:
+    struct NativeWifiDirectState;
+
     void WatchdogLoop();
     void QueryNativeHostedNetworkStatus();
+    bool TryStartWindowsMobileHotspot(WifiApCredentials& creds);
+    bool TryStartWifiDirectLegacyAp(WifiApCredentials& creds);
+    void StopWifiDirectLegacyAp();
 
     mutable std::mutex m_mutex;
     std::atomic<ApState> m_state{ApState::Disabled};
     std::atomic<bool> m_simulatedMode{false};
     std::atomic<bool> m_watchdogRunning{false};
+    std::atomic<bool> m_wifiDirectActive{false};
 
     WifiApCredentials m_credentials{};
     std::map<std::string, StationInfo> m_connectedStations;
@@ -55,6 +62,7 @@ private:
     StationDisconnectedCallback m_stationDisconnectedCallback;
     ApStateChangedCallback m_stateCallback;
 
+    std::unique_ptr<NativeWifiDirectState> m_wifiDirect;
     std::thread m_watchdogThread;
 };
 

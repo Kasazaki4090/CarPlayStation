@@ -1141,6 +1141,47 @@ void TestOptimalAudioSampleRateResolution() {
     std::cout << "[PASS] TestOptimalAudioSampleRateResolution" << std::endl;
 }
 
+void TestNavigationBoostAndDuckedMediaBalance() {
+    std::cout << "[RUN] TestNavigationBoostAndDuckedMediaBalance" << std::endl;
+
+    WasapiAudioPipeline pipeline;
+    Common::AudioOutputFormat format{
+        .sample_rate = 48000,
+        .channels = 2,
+        .bit_depth = 16,
+        .sample_type = Common::AudioSampleType::PcmInt16
+    };
+    pipeline.SetRenderPumpEnabled(false);
+    ASSERT_TRUE(pipeline.Start(format).IsOk());
+
+    // BUG-023 defaults: media 0.45, nav 1.50 (+3.5dB), ducking 0.08 (-22dB)
+    pipeline.SetLaneVolume(AudioLane::MainMedia, 0.45f);
+    pipeline.SetLaneVolume(AudioLane::AltNavigation, 1.50f);
+    pipeline.SetTargetDuckingRatio(0.08f);
+    pipeline.SetDuckingActive(true);
+
+    const float music[4] = {0.5f, 0.5f, 0.5f, 0.5f};
+    const float nav[4] = {0.3f, 0.3f, 0.3f, 0.3f};
+    pipeline.PushLaneSamples(AudioLane::MainMedia, music, 4);    // 0.5 * 0.45 * 0.08 = 0.018
+    pipeline.PushLaneSamples(AudioLane::AltNavigation, nav, 4);  // 0.3 * 1.50 = 0.450
+
+    auto mixed = pipeline.RenderMixed(4);
+    ASSERT_EQ(mixed.size(), 4U);
+    // Navigation clearly dominates ducked background music (~0.468)
+    ASSERT_TRUE(mixed[0] > 0.45f && mixed[0] < 0.48f);
+
+    // High navigation peak (+6dB boost) must still be soft-limited safely <= 0.95
+    pipeline.ClearMixBuffers();
+    pipeline.SetLaneVolume(AudioLane::AltNavigation, 2.0f);
+    const float loudNav[4] = {0.8f, 0.8f, 0.8f, 0.8f};
+    pipeline.PushLaneSamples(AudioLane::AltNavigation, loudNav, 4); // 1.6 -> soft-limited
+    auto limited = pipeline.RenderMixed(4);
+    ASSERT_TRUE(limited[0] <= 0.95f && limited[0] > 0.90f);
+
+    pipeline.Shutdown();
+    std::cout << "[PASS] TestNavigationBoostAndDuckedMediaBalance" << std::endl;
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "  CarPlayStation Media Tests (Step 1-4) " << std::endl;
@@ -1161,6 +1202,7 @@ int main() {
     TestWasapiAudioPipelineFifoBounds();
     TestWasapiAudioPipelineResampler();
     TestWasapiMicrophoneUplink();
+    TestNavigationBoostAndDuckedMediaBalance();
 
     // Step 4: end-to-end mock integration.
     TestMockEndToEndIntegration();

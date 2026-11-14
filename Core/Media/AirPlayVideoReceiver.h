@@ -10,6 +10,7 @@
 #include <vector>
 #include <array>
 #include <mutex>
+#include <functional>
 
 namespace CarPlayStation::Core::Media {
 
@@ -63,6 +64,12 @@ public:
         decrypt_key_set_ = true;
     }
 
+    using StreamDisconnectedCallback = std::function<void(int error_code)>;
+    void SetStreamDisconnectedCallback(StreamDisconnectedCallback callback) {
+        std::lock_guard<std::mutex> lock(client_mutex_);
+        stream_disconnected_cb_ = std::move(callback);
+    }
+
 private:
     void TcpListenLoop();
     void TcpClientWorker(uintptr_t clientSock);
@@ -88,6 +95,7 @@ private:
     std::thread udp_thread_;
     std::vector<std::thread> client_threads_;
     std::vector<uintptr_t> client_sockets_;
+    StreamDisconnectedCallback stream_disconnected_cb_;
     mutable std::mutex client_mutex_;
 };
 

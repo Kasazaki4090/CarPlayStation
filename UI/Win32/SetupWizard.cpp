@@ -447,20 +447,21 @@ namespace {
 constexpr uint32_t kMinCustomDimension = 320;
 constexpr uint32_t kMaxCustomDimension = 4096;
 
-// Read an integer percentage and turn it into a 0..1 volume. Absent key -> default.
+// Read an integer percentage and turn it into a 0..max_unit multiplier. Absent key -> default (-1.0f).
 float ReadIniPercentAsUnit(const std::wstring& ini, const wchar_t* section, const wchar_t* key,
-                          int default_percent) {
+                           int default_percent, int max_percent = 100) {
     const int raw = static_cast<int>(GetPrivateProfileIntW(section, key, default_percent, ini.c_str()));
     // GetPrivateProfileIntW hands the default back as a UINT, so the "not present"
     // sentinel (-1) arrives as 0xFFFFFFFF. Report that as a negative value before
     // clamping so callers can restore their built-in default.
     if (raw < 0) return -1.0f;
-    return static_cast<float>(std::clamp(raw, 0, 100)) / 100.0f;
+    return static_cast<float>(std::clamp(raw, 0, max_percent)) / 100.0f;
 }
 
-// Write a 0..1 volume as a whole percentage.
-void WriteUnitAsIniPercent(const std::wstring& ini, const wchar_t* section, const wchar_t* key, float value) {
-    const int percent = static_cast<int>(std::clamp(value, 0.0f, 1.0f) * 100.0f + 0.5f);
+// Write a 0..max_unit volume multiplier as a whole percentage.
+void WriteUnitAsIniPercent(const std::wstring& ini, const wchar_t* section, const wchar_t* key,
+                           float value, float max_unit = 1.0f) {
+    const int percent = static_cast<int>(std::clamp(value, 0.0f, max_unit) * 100.0f + 0.5f);
     WritePrivateProfileStringW(section, key, std::to_wstring(percent).c_str(), ini.c_str());
 }
 
@@ -569,16 +570,36 @@ void SetupWizard::LoadVideoAudioSettings(Application::AppSettings& settings) con
     // Volumes and ducking ratio are user settings. SampleRate follows the
     // Windows default endpoint (with integer multiple downsampling to reduce SRC),
     // and bitrate is fixed at default 320 kbps.
-    settings.audio.media_volume = ReadIniPercentAsUnit(ini, L"Audio", L"MediaVolume", -1);
-    settings.audio.navigation_volume = ReadIniPercentAsUnit(ini, L"Audio", L"NavigationVolume", -1);
-    settings.audio.telephony_volume = ReadIniPercentAsUnit(ini, L"Audio", L"TelephonyVolume", -1);
-    settings.audio.ducking_ratio = ReadIniPercentAsUnit(ini, L"Audio", L"DuckingRatio", -1);
+    settings.audio.media_volume = ReadIniPercentAsUnit(ini, L"Audio", L"MediaVolume", -1, 100);
+    settings.audio.navigation_volume = ReadIniPercentAsUnit(ini, L"Audio", L"NavigationVolume", -1, 200);
+    settings.audio.telephony_volume = ReadIniPercentAsUnit(ini, L"Audio", L"TelephonyVolume", -1, 200);
+    settings.audio.ducking_ratio = ReadIniPercentAsUnit(ini, L"Audio", L"DuckingRatio", -1, 100);
     // GetPrivateProfileIntW returns the default when the key is missing, so the
     // -1 default above means "not present": restore the built-in value instead.
     if (settings.audio.media_volume < 0.0f) settings.audio.media_volume = Application::AudioPreferences{}.media_volume;
     if (settings.audio.navigation_volume < 0.0f) settings.audio.navigation_volume = Application::AudioPreferences{}.navigation_volume;
     if (settings.audio.telephony_volume < 0.0f) settings.audio.telephony_volume = Application::AudioPreferences{}.telephony_volume;
     if (settings.audio.ducking_ratio < 0.0f) settings.audio.ducking_ratio = Application::AudioPreferences{}.ducking_ratio;
+
+    // One-time migration from legacy flat 100/100/20..30% audio balance to
+    // balanced navigation headroom + deeper ducking defaults (BUG-023).
+    const UINT balance_ver = GetPrivateProfileIntW(L"Audio", L"AudioBalanceVersion", 0, ini.c_str());
+    if (balance_ver < 1) {
+        if (settings.audio.media_volume >= 0.80f && settings.audio.navigation_volume <= 1.05f) {
+            const Application::AudioPreferences defaults{};
+            settings.audio.media_volume = defaults.media_volume;
+            settings.audio.navigation_volume = defaults.navigation_volume;
+            settings.audio.telephony_volume = defaults.telephony_volume;
+            if (settings.audio.ducking_ratio >= 0.15f) {
+                settings.audio.ducking_ratio = defaults.ducking_ratio;
+            }
+            WriteUnitAsIniPercent(ini, L"Audio", L"MediaVolume", settings.audio.media_volume, 1.0f);
+            WriteUnitAsIniPercent(ini, L"Audio", L"NavigationVolume", settings.audio.navigation_volume, 2.0f);
+            WriteUnitAsIniPercent(ini, L"Audio", L"TelephonyVolume", settings.audio.telephony_volume, 2.0f);
+            WriteUnitAsIniPercent(ini, L"Audio", L"DuckingRatio", settings.audio.ducking_ratio, 1.0f);
+        }
+        WritePrivateProfileStringW(L"Audio", L"AudioBalanceVersion", L"1", ini.c_str());
+    }
 }
 
 void SetupWizard::SaveVideoAudioSettings(const Application::AppSettings& settings) const {
@@ -625,10 +646,11 @@ void SetupWizard::SaveVideoAudioSettings(const Application::AppSettings& setting
     WritePrivateProfileStringW(L"Video", L"HardwareDecode",
         video.hardware_decode ? L"1" : L"0", ini.c_str());
 
-    WriteUnitAsIniPercent(ini, L"Audio", L"MediaVolume", audio.media_volume);
-    WriteUnitAsIniPercent(ini, L"Audio", L"NavigationVolume", audio.navigation_volume);
-    WriteUnitAsIniPercent(ini, L"Audio", L"TelephonyVolume", audio.telephony_volume);
-    WriteUnitAsIniPercent(ini, L"Audio", L"DuckingRatio", audio.ducking_ratio);
+    WriteUnitAsIniPercent(ini, L"Audio", L"MediaVolume", audio.media_volume, 1.0f);
+    WriteUnitAsIniPercent(ini, L"Audio", L"NavigationVolume", audio.navigation_volume, 2.0f);
+    WriteUnitAsIniPercent(ini, L"Audio", L"TelephonyVolume", audio.telephony_volume, 2.0f);
+    WriteUnitAsIniPercent(ini, L"Audio", L"DuckingRatio", audio.ducking_ratio, 1.0f);
+    WritePrivateProfileStringW(L"Audio", L"AudioBalanceVersion", L"1", ini.c_str());
 }
 
 // --- Recorded device (iPhone) address persistence ---------------------------

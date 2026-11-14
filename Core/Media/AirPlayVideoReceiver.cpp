@@ -224,12 +224,26 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
                      ": ", initSt.IsOk() ? "OK" : initSt.Message());
     }
 
-    auto cleanupSock = [&]() {
+    auto cleanupSock = [&](int disconnectErr) {
         closesocket(sock);
-        std::lock_guard<std::mutex> lock(client_mutex_);
-        auto it = std::find(client_sockets_.begin(), client_sockets_.end(), clientSockRaw);
-        if (it != client_sockets_.end()) {
-            client_sockets_.erase(it);
+        StreamDisconnectedCallback cb;
+        bool notify = false;
+        {
+            std::lock_guard<std::mutex> lock(client_mutex_);
+            auto it = std::find(client_sockets_.begin(), client_sockets_.end(), clientSockRaw);
+            if (it != client_sockets_.end()) {
+                client_sockets_.erase(it);
+            }
+            if (client_sockets_.empty()) {
+                decoder_initialized_.store(false);
+                if (running_.load()) {
+                    cb = stream_disconnected_cb_;
+                    notify = static_cast<bool>(cb);
+                }
+            }
+        }
+        if (notify) {
+            cb(disconnectErr);
         }
     };
 
@@ -269,8 +283,8 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
                                  ", hdrRead=", std::to_string(hdrRead),
                                  ", WSAGetLastError=", std::to_string(err));
                 }
-                cleanupSock();
                 CPS_LOG_INFO("VideoReceiver", "TCP video stream disconnected");
+                cleanupSock(err);
                 return;
             }
             hdrRead += static_cast<size_t>(n);
@@ -311,7 +325,7 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
                 CPS_LOG_DEBUG("VideoReceiver", "recv(body) returned ", std::to_string(n),
                               ", bodyRead=", std::to_string(bodyRead), "/", std::to_string(bodySize),
                               ", WSAGetLastError=", std::to_string(err));
-                cleanupSock();
+                cleanupSock(err);
                 return;
             }
             bodyRead += static_cast<size_t>(n);
@@ -513,7 +527,7 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
         }
     }
 
-    cleanupSock();
+    cleanupSock(0);
 #else
     (void)clientSockRaw;
 #endif

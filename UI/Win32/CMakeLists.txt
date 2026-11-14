@@ -44,10 +44,11 @@ target_compile_features(CarPlayStation PRIVATE cxx_std_20)
 
 if(WIN32)
     # Win32 subsystem configuration (no console window pop-up).
-    # ENABLE_EMBED_MANIFESTS OFF stops CMake from auto-embedding its own
-    # manifest (ID=1); the manifest and application icon are provided by CarPlayStation.rc.
+    # Disable linker auto-generated manifest so it does not collide with CarPlayStation.rc (ID=1).
     set_target_properties(CarPlayStation PROPERTIES
         WIN32_EXECUTABLE TRUE
-        ENABLE_EMBED_MANIFESTS OFF
     )
+    if(MSVC)
+        target_link_options(CarPlayStation PRIVATE /MANIFEST:NO)
+    endif()
 endif()

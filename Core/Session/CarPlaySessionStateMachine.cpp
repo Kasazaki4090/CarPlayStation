@@ -114,11 +114,16 @@ Common::Status CarPlaySessionStateMachine::OnBluetoothDeviceDiscovered(
     SessionState old_state;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (state_ != SessionState::Idle && state_ != SessionState::Reconnecting) {
+        if (state_ != SessionState::Idle &&
+            state_ != SessionState::Reconnecting &&
+            state_ != SessionState::Error) {
             return Common::MakeError(Common::StatusCode::InvalidState, "Cannot discover BT device from current state");
         }
 
         old_state = state_;
+        if (old_state == SessionState::Idle || old_state == SessionState::Error) {
+            active_session_.reconnect_attempts = 0;
+        }
         active_session_.device_id = std::string(device_id);
         active_session_.bluetooth_mac = mac;
         active_session_.device_name = std::string(device_name);
@@ -258,10 +263,16 @@ Common::Status CarPlaySessionStateMachine::OnWifiConnected(const Common::MacAddr
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (state_ != SessionState::WifiHandoff) {
-            if (state_ == SessionState::Idle || state_ == SessionState::BtDiscovered) {
+            if (state_ == SessionState::Idle ||
+                state_ == SessionState::BtDiscovered ||
+                state_ == SessionState::Reconnecting ||
+                state_ == SessionState::Error) {
                 CPS_LOG_INFO("SessionSM", "OnWifiConnected: device reconnected on Wi-Fi from state ",
                              static_cast<int>(state_), ", transitioning to WifiHandoff");
                 old_state = state_;
+                if (old_state == SessionState::Idle || old_state == SessionState::Error) {
+                    active_session_.reconnect_attempts = 0;
+                }
                 state_ = SessionState::WifiHandoff;
                 active_session_.state_entered_time = std::chrono::steady_clock::now();
                 observers_to_notify = observers_;
@@ -371,7 +382,9 @@ Common::Status CarPlaySessionStateMachine::OnAirPlayTeardown() {
     SessionState old_state;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (state_ == SessionState::Idle || state_ == SessionState::Teardown) {
+        if (state_ == SessionState::Idle ||
+            state_ == SessionState::Teardown ||
+            state_ == SessionState::Reconnecting) {
             return Common::Status::Ok();
         }
 

@@ -73,10 +73,10 @@ struct VideoPreferences {
 // and 88.2k->44.1k to eliminate fractional SRC). The stream encode bitrate defaults
 // to 320 kbps. Neither sample rate nor bitrate is exposed in user settings.
 struct AudioPreferences {
-    float media_volume{1.0f};     // 0.0 to 1.0
-    float navigation_volume{1.0f};// 0.0 to 1.0
-    float telephony_volume{1.0f}; // 0.0 to 1.0
-    float ducking_ratio{0.20f};   // Media volume multiplier during navigation prompt (0.0 to 1.0)
+    float media_volume{0.45f};      // 0.0 to 1.0 (default lowered so music doesn't overpower nav)
+    float navigation_volume{1.50f}; // 0.0 to 2.0 (+dB headroom for AltNavigation; protected by soft limiter)
+    float telephony_volume{1.20f};  // 0.0 to 2.0 (+dB headroom for Siri/Telephony)
+    float ducking_ratio{0.08f};     // Media volume multiplier during navigation prompt (0.0 to 1.0)
 };
 
 struct DevicePreferences {

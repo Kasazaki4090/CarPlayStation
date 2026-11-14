@@ -702,6 +702,21 @@ void TestCarPlayStateMachineWatchdogAndReconnect() {
     sm.TickWatchdog(t4);
     assert(sm.GetState() == SessionState::Error);
 
+    // Recovery after leaving PC & returning: OnBluetoothDeviceDiscovered and OnWifiConnected
+    // must recover cleanly from Error and Reconnecting (BUG-022).
+    MacAddress bt_mac(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
+    assert(sm.OnBluetoothDeviceDiscovered("dev_recover", bt_mac, "TestPhone").IsOk());
+    assert(sm.GetState() == SessionState::BtDiscovered);
+    sm.OnDisconnect("drop to reconnecting");
+    assert(sm.GetState() == SessionState::Reconnecting);
+    // Duplicate OnDisconnect while already Reconnecting must not burn reconnect attempts.
+    const uint32_t attempts_before = sm.GetActiveSessionInfo().reconnect_attempts;
+    sm.OnDisconnect("duplicate disconnect");
+    assert(sm.GetActiveSessionInfo().reconnect_attempts == attempts_before);
+    // Wi-Fi reconnect directly from Reconnecting must transition to WifiHandoff.
+    assert(sm.OnWifiConnected(bt_mac, "192.168.137.40").IsOk());
+    assert(sm.GetState() == SessionState::WifiHandoff);
+
     std::cout << "  [PASS] TestCarPlayStateMachineWatchdogAndReconnect\n";
 }
 

@@ -1235,6 +1235,182 @@ On Windows, Bluetooth is only used for the initial setup to launch CarPlay. Subs
 
 ---
 
+## BUG-021 — Streaming freezes permanently on TCP abort (`WSAGetLastError=10053`) and 3-second mDNS re-announcement storm
+
+**Status:** `Fixed`
+
+**Date:** 2026-11-14
+
+### Symptom
+
+1. While streaming wireless CarPlay (`2560x1440@60 HEVC`) in a moving vehicle, video stutters repeatedly (`60 -> 15 -> 48 -> 20 fps`, `WasapiAudioPipeline` `underruns=1..7`).
+2. Suddenly, the screen freezes permanently on the last decoded frame (`decoded=1798` / `decoded=7476`, `ringAvail=0`). Closing and reopening the app connects briefly (~2 minutes) before freezing identically again.
+
+### Reproduction
+
+1. Connect iPhone via Wireless CarPlay over Windows Mobile Hotspot (`SURFACE 1780`).
+2. Drive through an area with RF/wireless interference or SoftAP link jitter.
+3. Observe `CarPlayStation` log when `WSAGetLastError=10053` occurs across TCP channels.
+
+### Expected
+
+1. Once `AirPlayStreaming` (`state=4`) is active, SoftAP watchdog should NOT spam mDNS re-announcements every 3 seconds.
+2. When TCP media/RTSP connections drop unexpectedly (`WSAGetLastError=10053`), the session should tear down cleanly, clear the stale decoder/RTSP state, and allow automatic reconnection instead of staying stuck forever in `state=4`.
+
+### Actual
+
+1. `WifiSoftApManager::WatchdogLoop()` (`Core/Transport/WifiSoftApManager.cpp:339-358`) re-emits `connCb(st)` every ~3 seconds (`watchdogTick % 6 == 0`) even while streaming (`state=4`), causing `CarPlayCoreService` (`Core/Service/CarPlayCoreService.cpp:1066-1148`) to call `ClearDialedTargets()` + `MdnsAdvertiser::AnnounceTo()` (immediate burst + 5-pulse queue) continuously every ~3.15s.
+2. At `19:54:52.289` and `19:58:37.807` (2m03s after streaming start), `VideoReceiver`, `AirPlayRtsp`, `Event channel`, and `iAP data tunnel` all abort simultaneously with `WSAGetLastError=10053` (`WSAECONNABORTED`, Windows local adapter/SoftAP abort).
+3. Neither `AirPlayVideoReceiver::RunTcpLoop` (`Core/Media/AirPlayVideoReceiver.cpp:268-274`) nor `AirPlayRtspServer` (`Core/Session/AirPlayRtspServer.cpp:1145-1281`) notifies `CarPlayCoreService` / `CarPlaySessionStateMachine` upon socket error. The state machine stays stuck in `AirPlayStreaming` (`state=4`) with a frozen frame forever until process restart.
+4. Secondary observation in Run 2 (`19:55:00`): `ResetPairingData` cleared pairing store and `0x4301 CarPlayStartSession` fell back to `ssid='CarPlayStation'` instead of `'SURFACE 1780'` before SoftAP discovery completed.
+
+### Root Cause
+
+1. Unconditional 3s station re-notification in `WifiSoftApManager::WatchdogLoop()` triggering repeated mDNS bursts during active streaming.
+2. Missing disconnect callbacks from `AirPlayRtspServer` / `AirPlayVideoReceiver` / `WifiSoftApManager::SetStationDisconnectedCallback` into `CarPlayCoreService` to tear down stale media sessions and reset state on `10053` / link loss.
+
+### Fix
+
+- Guarded `CarPlayCoreService`'s `SetStationConnectedCallback` to skip repeated `AnnounceTo` mDNS bursts when already in `SessionState::AirPlayStreaming` (and `SessionState::Paused`).
+- Added `AirPlayVideoReceiver::SetStreamDisconnectedCallback` (resetting `decoder_initialized_` when the last video socket exits and reporting unexpected socket abort) and `AirPlayRtspServer::SetClientDisconnectedCallback` (notifying when the RTSP client channel closes with no active sessions remaining).
+- Registered station disconnect, RTSP disconnect, and video stream disconnect handlers in `CarPlayCoreService` to trigger `RequestSessionReset(...)` -> `ResetActiveMediaStreams()` + `CarPlaySessionStateMachine::OnDisconnect(...)` + `WifiSoftApManager::StopAccessPoint`/`BroadcastAnnouncement` cleanup as needed.
+
+### Verification
+
+- Release build (`CarPlayCore.lib`, `CarPlayStation.exe`) and `ctest --test-dir build-release --output-on-failure` (`10/10` test suites passed).
+- Live moving-vehicle `10053` link-drop recovery requires real-world drive testing.
+
+---
+
+## BUG-022 — No automatic reconnection after user leaves PC (Wi-Fi & Bluetooth disconnect) and returns
+
+**Status:** `Fixed`
+
+**Date:** 2026-11-14
+
+### Symptom
+
+If the user walks away from the PC with their iPhone until both Wi-Fi (Mobile Hotspot) and Bluetooth disconnect, returning within range of the PC later does not automatically restore the CarPlay session; manual reconnect or app restart is required.
+
+### Reproduction
+
+1. Establish a Wireless CarPlay session with a paired iPhone.
+2. Walk out of Bluetooth and Wi-Fi range until both links drop.
+3. Wait >10–30 seconds, then walk back beside the PC with Bluetooth and Wi-Fi still enabled on the iPhone.
+
+### Expected
+
+When the iPhone comes back in range, `CarPlayStation` should detect station join / periodically re-page the paired iPhone over Bluetooth RFCOMM (`WakePairedDevice` to `...CAFE`/`...CAFF`), rebuild iAP2/mDNS state cleanly, and resume CarPlay automatically.
+
+### Actual
+
+1. `BtRfcommTransport::WakePairedDevice` (`Core/Transport/BtRfcommTransport.cpp:458`) is only called once on `CarPlayCoreService::Start()` / `AppController::Initialize()` or manual UI button click, never periodically while disconnected/idle.
+2. `CarPlayCoreService` does not register `wifi_manager_->SetStationDisconnectedCallback(...)`, so Wi-Fi loss is not reported to the session state machine.
+3. On Bluetooth disconnect, `CarPlayCoreService` (`Core/Service/CarPlayCoreService.cpp:1289`) calls `session_sm->OnDisconnect()`, which transitions `CarPlaySessionStateMachine` to `SessionState::Reconnecting` (`state=6`) without tearing down media/RTSP receivers, and `enable_background_watchdog` is `false` (`Core/Session/CarPlaySessionStateMachine.h:32`), leaving `state_` stuck in `Reconnecting`. Even `OnWifiConnected` rejects `Reconnecting` (`Core/Session/CarPlaySessionStateMachine.cpp:260-273`).
+
+### Root Cause
+
+1. One-shot `WakePeer` only at app startup; no background reconnect/paging loop for remembered paired BT MAC when `Idle` or `Reconnecting`.
+2. Incomplete disconnect/teardown plumbing across Wi-Fi SoftAP, RTSP, VideoReceiver, and `CarPlaySessionStateMachine` (`Reconnecting` rejects `OnWifiConnected`).
+
+### Fix
+
+- Updated `CarPlaySessionStateMachine` (`Core/Session/CarPlaySessionStateMachine.cpp`) to allow `OnBluetoothDeviceDiscovered` from `Error`, allow `OnWifiConnected` from `Reconnecting` and `Error`, reset `reconnect_attempts` to `0` when starting/recovering from `Idle` or `Error`, and ignore duplicate `OnAirPlayTeardown` calls while already `Reconnecting`.
+- Added `CarPlayCoreService::StartReconnectWorker` / `StopReconnectWorker` / `ReconnectWorkerLoop` (`Core/Service/CarPlayCoreService.cpp`) to periodically re-page `remembered_phone_bt_mac_` via `WakePeer` (5s within 30s of disconnect, 15s thereafter) while `Idle`, `Reconnecting`, or `Error`.
+- Wired `wifi_manager_->SetStationDisconnectedCallback` in `CarPlayCoreService` and moved `StartPersistentBroadcasting()` before initial `WakePeer` in `CarPlayCoreService::Start()`.
+
+### Verification
+
+- Added `TestCarPlayStateMachineWatchdogAndReconnect` assertions in `Tests/SessionTests.cpp` and verified `10/10` CTest suites pass.
+- Physical walk-away & return recovery requires live hardware verification.
+
+---
+
+## BUG-023 — MainMedia music volume remains disproportionately louder than AltNavigation prompts, even when ducked
+
+**Status:** `Fixed`
+
+**Date:** 2026-11-14
+
+### Symptom
+
+During CarPlay playback, music (`MainMedia`) sounds far louder than navigation voice (`AltNavigation`)—feeling out of the same order of magnitude—and even when `duckAudio` attenuates music (e.g., `duckingRatio` 0.20 / 0.30), background music is still too loud and drowns out navigation prompts.
+
+### Reproduction
+
+1. Play music over CarPlay (`MainMedia`) while running turn-by-turn navigation (`AltNavigation`).
+2. Wait for a navigation prompt (`POST /command` `duckAudio` -> `WasapiAudioPipeline` logs `media gain ducked to 0.300000`).
+3. Compare perceived loudness between `AltNavigation` voice and `MainMedia` music at default settings.
+
+### Expected
+
+1. Music volume should feel balanced against navigation voice by default (music not overpowering navigation).
+2. During ducking, music attenuation should be deep enough perceptually (e.g., `-20 dB` to `-26 dB`, or boosted navigation / lower default music level) so navigation prompts are clearly audible.
+
+### Actual
+
+1. `Application::AudioPreferences` (`Application/AppSettings.h:75-80`) defaults `media_volume` to `1.0f` (100%, 0 dB), `navigation_volume` to `1.0f` (max 100%, 0 dB with no headroom for >1.0x gain in `OverlayRenderer.cpp:699`), and `ducking_ratio` to `0.20f` (user config `0.30f`).
+2. `WasapiAudioPipeline::PushLaneSamplesLocked` (`Core/Media/WasapiAudioPipeline.cpp:440-453`) applies `laneVolumes_` and `duckingRatio_` **linearly** (`samples[i] * gain * duckingRatio_`). Linear `0.30` is only `-10.46 dB` (~half perceived loudness) and `0.20` is `-13.98 dB`, which cannot offset the loudness difference between heavily mastered music (`~0 dBFS` high RMS) and spoken TTS navigation prompts (`nav` peak RMS `0.138`–`0.343` in log).
+
+### Root Cause
+
+Linear amplitude gain mapping (no perceptual/dB curve), `1.0f` default for `MainMedia`, linear `0.20f` default for `ducking_ratio`, and UI/mixer clamping `navigation_volume` at `1.0f` despite `ApplySoftLimiter` already protecting the mixed sum.
+
+### Fix
+
+- Updated `Application::AudioPreferences` defaults (`Application/AppSettings.h`): `media_volume = 0.45f`, `navigation_volume = 1.50f`, `telephony_volume = 1.20f`, `ducking_ratio = 0.08f`.
+- Expanded `AltNavigation` and `SiriTelephony` sliders in `UI/Win32/OverlayRenderer.cpp` to `0.0f .. 2.0f` (`0% .. 200%`), updated `SetupWizard.cpp` INI read/write clamping (`200%` max for navigation & telephony), and added one-time `AudioBalanceVersion=1` INI migration for legacy flat (`>=80% / <=105%`) configs.
+
+### Verification
+
+- Added `TestNavigationBoostAndDuckedMediaBalance` in `Tests/MediaTests.cpp` and updated `TestTriggerReconnection` in `Tests/ServiceTests.cpp`; all `10/10` CTest suites passed.
+
+---
+
+## BUG-024 — Cannot start Windows 11 SoftAP / Mobile Hotspot when PC has no Internet connection
+
+**Status:** `Fixed`
+
+**Date:** 2026-11-14
+
+### Symptom
+
+When Windows 11 has no active Internet connection (e.g., in-car offline laptop/tablet without Wi-Fi/LTE), Windows refuses to turn on Mobile Hotspot, and `CarPlayStation` falls back to default `ssid='CarPlayStation'` without starting any Wi-Fi AP, preventing Wireless CarPlay from connecting.
+
+### Reproduction
+
+1. Disconnect the Windows 11 PC from all Wi-Fi / Ethernet / cellular networks.
+2. Launch `CarPlayStation.exe`.
+3. Observe `WifiSoftAp` fails silently (`NetworkInformation::GetInternetConnectionProfile()` returns `nullptr`) and `0x4301 CarPlayStartSession` sends fallback `ssid='CarPlayStation'`.
+
+### Expected
+
+`CarPlayStation` should still bring up a local SoftAP (either by falling back to any non-Internet connection profile / Loopback Adapter via `GetConnectionProfiles()`, or via WinRT `WiFiDirectAdvertisementPublisher` with `LegacySettings.IsEnabled = true`) even when completely offline.
+
+### Actual
+
+1. `WifiSoftApManager::StartAccessPoint()` (`Core/Transport/WifiSoftApManager.cpp:138-139`) and `QueryNativeHostedNetworkStatus()` (`Core/Transport/WifiSoftApManager.cpp:374-375`) only call `NetworkInformation::GetInternetConnectionProfile()`. When offline, `profile` is null and both immediately return without attempting to start or query tethering.
+2. Windows 11 Settings GUI blocks turning on Mobile Hotspot unless at least one network connection profile is active.
+
+### Root Cause
+
+Exclusive reliance on `GetInternetConnectionProfile()` and native Mobile Hotspot without fallback to `GetConnectionProfiles()` or `WiFiDirectAdvertisementPublisher` legacy SoftAP mode.
+
+### Fix
+
+- Implemented 3-tier Windows SoftAP startup in `Core/Transport/WifiSoftApManager.cpp`:
+  1. Primary `NetworkInformation::GetInternetConnectionProfile()`.
+  2. `ForEachCandidateConnectionProfile()` enumerating local / non-Internet `NetworkInformation::GetConnectionProfiles()` profiles.
+  3. Offline WinRT `WiFiDirectAdvertisementPublisher` fallback (`LegacySettings.IsEnabled = true` with configured SSID/passphrase).
+- Updated `QueryNativeHostedNetworkStatus()` to inspect candidate `GetConnectionProfiles()` and `EnumerateHotspotArpClients()` when Wi-Fi Direct Legacy AP is active.
+
+### Verification
+
+- Release build (`CarPlayCore.lib`, `CarPlayStation.exe`) compiled cleanly and `TransportTests` / `10/10` CTest suites passed.
+- Offline no-adapter Windows 11 environment requires physical hardware verification.
+
+---
+
 ## Bug Template
 
 Copy the following template when adding a new bug:
