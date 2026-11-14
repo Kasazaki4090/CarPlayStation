@@ -1064,6 +1064,14 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
         });
 
         rtsp_server_->SetClientDisconnectedCallback([this](int error_code) {
+            if (auto session_sm = std::dynamic_pointer_cast<Session::CarPlaySessionStateMachine>(session_)) {
+                const auto st = session_sm->GetState();
+                if (st != Session::SessionState::AirPlayStreaming &&
+                    st != Session::SessionState::Paused &&
+                    st != Session::SessionState::WifiHandoff) {
+                    return;
+                }
+            }
             CPS_LOG_WARN("CoreService", "RTSP control session disconnected (err=", error_code,
                          "); scheduling stream teardown & reconnection recovery");
             RequestSessionReset("RTSP control connection lost (err=" + std::to_string(error_code) + ")", true);
@@ -1181,6 +1189,14 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
     video_receiver_ = std::make_shared<Media::AirPlayVideoReceiver>(video_decoder_, static_cast<uint16_t>(7100));
     video_receiver_->SetDefaultStreamSpec(video_spec_);
     video_receiver_->SetStreamDisconnectedCallback([this](int error_code) {
+        if (auto session_sm = std::dynamic_pointer_cast<Session::CarPlaySessionStateMachine>(session_)) {
+            const auto st = session_sm->GetState();
+            if (st != Session::SessionState::AirPlayStreaming &&
+                st != Session::SessionState::Paused &&
+                st != Session::SessionState::WifiHandoff) {
+                return;
+            }
+        }
         CPS_LOG_WARN("CoreService", "Video stream socket disconnected (err=", error_code,
                      "); scheduling session reset for recovery");
         RequestSessionReset("Video stream disconnected (err=" + std::to_string(error_code) + ")", true);
@@ -1315,7 +1331,12 @@ Common::Status CarPlayCoreService::Initialize(const Common::CoreEnvironmentConfi
                 if (iap2_link_) {
                     iap2_link_->Reset();
                 }
-                RequestSessionReset("Bluetooth transport disconnected", true);
+                const auto st = session_sm->GetState();
+                if (st != Session::SessionState::Idle &&
+                    st != Session::SessionState::Reconnecting &&
+                    st != Session::SessionState::Error) {
+                    RequestSessionReset("Bluetooth transport disconnected", true);
+                }
             }
         });
     }
@@ -1555,7 +1576,6 @@ Common::Status CarPlayCoreService::SetMfiSigner(std::shared_ptr<Hardware::IMfiSi
     if (!signer) {
         return Common::Status::Error(Common::StatusCode::InvalidArgument, "MFi signer is null");
     }
-    const bool changed = (mfi_signer_ != nullptr && mfi_signer_ != signer);
     mfi_signer_ = std::move(signer);
 
     if (auto handler = std::dynamic_pointer_cast<CoreIap2PacketHandler>(iap2_handler_)) {
@@ -1563,9 +1583,6 @@ Common::Status CarPlayCoreService::SetMfiSigner(std::shared_ptr<Hardware::IMfiSi
     }
     if (rtsp_server_) {
         rtsp_server_->SetMfiSigner(mfi_signer_);
-    }
-    if (changed) {
-        ResetPairingData();
     }
     return Common::Status::Ok();
 }
@@ -1605,6 +1622,32 @@ void CarPlayCoreService::ResetPairingData() {
                 return ltpk;
             });
     }
+    if (accessory_identity_) {
+        const auto& ltpk = accessory_identity_->Identity().public_key;
+        if (auto handler = std::dynamic_pointer_cast<CoreIap2PacketHandler>(iap2_handler_)) {
+            const uint16_t port = env_config_.network.rtsp_port != 0 ? env_config_.network.rtsp_port : 5000;
+            handler->SetAirPlayReceiver(port, device_id_, Common::ToHexCompact(ltpk));
+        }
+        if (mdns_advertiser_ && mdns_advertiser_->IsRunning()) {
+            Transport::MdnsServiceConfig mdns_cfg{};
+            mdns_cfg.instanceName = env_config_.identity.device_name.empty()
+                ? "CarPlayStation" : env_config_.identity.device_name;
+            mdns_cfg.port = env_config_.network.rtsp_port != 0 ? env_config_.network.rtsp_port : 5000;
+            mdns_cfg.ipv4Address = "192.168.137.1";
+            if (wifi_manager_) {
+                auto creds = wifi_manager_->GetCredentials();
+                if (!creds.gatewayIp.empty()) {
+                    mdns_cfg.ipv4Address = creds.gatewayIp;
+                }
+            }
+            if (!device_id_.empty()) {
+                mdns_cfg.deviceId = device_id_;
+            }
+            ApplyAirPlayPublicKey(mdns_cfg);
+            (void)mdns_advertiser_->Start(mdns_cfg);
+            (void)mdns_advertiser_->BroadcastAnnouncement();
+        }
+    }
 }
 
 Common::Status CarPlayCoreService::TriggerReconnection(std::string_view targetBtMac) {
@@ -1619,6 +1662,23 @@ Common::Status CarPlayCoreService::TriggerReconnection(std::string_view targetBt
     }
     CPS_LOG_INFO("CoreService", "TriggerReconnection: re-announcing and querying CarPlay endpoints; targetBtMac=",
                  bt_mac.empty() ? "none" : bt_mac);
+
+    auto session_sm = std::dynamic_pointer_cast<Session::CarPlaySessionStateMachine>(session_);
+    const bool has_live_session =
+        (rtsp_server_ && rtsp_server_->GetActiveClientCount() > 0) ||
+        (session_sm && session_sm->GetState() != Session::SessionState::Idle);
+    const bool bt_connected = transport_ && (transport_->GetState() == Transport::TransportState::Connected);
+
+    if (has_live_session || bt_connected) {
+        ResetActiveMediaStreams("Manual reconnection requested");
+        if (bt_connected) {
+            CPS_LOG_INFO("CoreService", "TriggerReconnection: disconnecting stale Bluetooth link before re-paging");
+            transport_->Disconnect();
+            if (iap2_link_) {
+                iap2_link_->Reset();
+            }
+        }
+    }
 
     if (transport_ && !bt_mac.empty()) {
         CPS_LOG_INFO("CoreService", "TriggerReconnection: Actively waking paired device over Bluetooth: ", bt_mac);
@@ -1973,6 +2033,12 @@ void CarPlayCoreService::StopReconnectWorker() {
 
 void CarPlayCoreService::ResetActiveMediaStreams(const std::string& reason) {
     CPS_LOG_INFO("CoreService", "ResetActiveMediaStreams: reason=", reason);
+    if (rtsp_server_) {
+        rtsp_server_->CloseActiveSessions();
+    }
+    if (video_receiver_) {
+        video_receiver_->CloseActiveStreams();
+    }
     {
         std::lock_guard<std::mutex> media_lock(media_mutex_);
         for (auto& receiver : audio_receivers_) {
@@ -1998,7 +2064,13 @@ void CarPlayCoreService::ResetActiveMediaStreams(const std::string& reason) {
     }
 
     if (auto session_sm = std::dynamic_pointer_cast<Session::CarPlaySessionStateMachine>(session_)) {
-        (void)session_sm->OnDisconnect(reason);
+        const auto st = session_sm->GetState();
+        if (st == Session::SessionState::AirPlayStreaming ||
+            st == Session::SessionState::Paused ||
+            st == Session::SessionState::WifiHandoff ||
+            st == Session::SessionState::iAP2Authenticated) {
+            (void)session_sm->OnDisconnect(reason);
+        }
     }
 
     if (mdns_advertiser_ && mdns_advertiser_->IsRunning()) {
@@ -2064,13 +2136,29 @@ void CarPlayCoreService::ReconnectWorkerLoop() {
             session_state == Session::SessionState::BtDiscovered ||
             session_state == Session::SessionState::iAP2Authenticated;
 
-        if (is_busy_or_streaming || transport_->GetState() == Transport::TransportState::Connected) {
+        if (is_busy_or_streaming) {
             continue;
         }
 
         const auto now = std::chrono::steady_clock::now();
+        const bool has_disconnect_time = (disconnect_time != std::chrono::steady_clock::time_point{});
+        const bool bt_connected = (transport_->GetState() == Transport::TransportState::Connected);
+        if (bt_connected) {
+            // Wi-Fi/AirPlay dropped while BT stayed open (often a zombie half-open
+            // RFCOMM handle after walking out of range). If AirPlay has not recovered
+            // within 8 seconds, recycle the stale BT connection so we can re-page.
+            if (!has_disconnect_time || (now - disconnect_time) < std::chrono::seconds(8)) {
+                continue;
+            }
+            CPS_LOG_INFO("CoreService", "Auto-reconnect: resetting stale Bluetooth RFCOMM link after disconnect");
+            transport_->Disconnect();
+            if (iap2_link_) {
+                iap2_link_->Reset();
+            }
+        }
+
         const bool recently_disconnected =
-            (disconnect_time != std::chrono::steady_clock::time_point{}) &&
+            has_disconnect_time &&
             ((now - disconnect_time) < std::chrono::seconds(30));
         const auto interval = recently_disconnected
             ? std::chrono::seconds(5)

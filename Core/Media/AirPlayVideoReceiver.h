@@ -28,6 +28,7 @@ public:
 
     [[nodiscard]] Common::Status Start();
     void Stop();
+    void CloseActiveStreams();
     [[nodiscard]] bool IsRunning() const noexcept;
     [[nodiscard]] uint64_t GetReceivedFrames() const noexcept;
     [[nodiscard]] uint16_t GetPort() const noexcept { return port_; }

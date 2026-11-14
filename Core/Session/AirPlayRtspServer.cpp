@@ -18,6 +18,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 using socket_t = SOCKET;
 constexpr socket_t INVALID_SOCK = INVALID_SOCKET;
@@ -240,6 +241,7 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
     bool data_key_ready{false};
 
     std::atomic<bool> alive{true};
+    std::atomic<bool> record_received{false};
 
     ~ClientSession() {
         StopSessionSockets();
@@ -571,6 +573,14 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
             uint8_t temp[2048];
             std::vector<uint8_t> rx;
             #ifdef _WIN32
+            int keepalive = 1;
+            setsockopt(event_stream_sock, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&keepalive), sizeof(keepalive));
+            tcp_keepalive ka{};
+            ka.onoff = 1;
+            ka.keepalivetime = 3000;
+            ka.keepaliveinterval = 1000;
+            DWORD bytesReturned = 0;
+            WSAIoctl(event_stream_sock, SIO_KEEPALIVE_VALS, &ka, sizeof(ka), nullptr, 0, &bytesReturned, nullptr, nullptr);
             DWORD tv = 500;
             setsockopt(event_stream_sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
             #else
@@ -610,6 +620,11 @@ struct ClientSession : public std::enable_shared_from_this<ClientSession> {
                 }
             }
             CPS_LOG_INFO("AirPlayRtsp", "Event channel reader thread finished");
+            // If the event channel dropped unexpectedly while the RTSP control socket
+            // is still considered alive, wake the RTSP ClientWorker immediately so it tears down.
+            if (alive.load() && sock != INVALID_SOCK) {
+                shutdown(sock, CPS_SHUT_RDWR);
+            }
         });
     }
 
@@ -929,6 +944,20 @@ public:
         return client_sockets_.size();
     }
 
+    void CloseActiveSessions() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (socket_t sock : client_sockets_) {
+            if (sock != INVALID_SOCK) {
+                shutdown(sock, CPS_SHUT_RDWR);
+            }
+        }
+        for (auto& [_, sess] : sessions_) {
+            if (sess) {
+                sess->alive.store(false);
+            }
+        }
+    }
+
     void SetRequestHandler(RtspRequestHandler handler) {
         std::lock_guard<std::mutex> lock(mutex_);
         custom_handler_ = std::move(handler);
@@ -1136,6 +1165,19 @@ private:
 #ifdef _WIN32
         int nodelay = 1;
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
+        int keepalive = 1;
+        setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&keepalive), sizeof(keepalive));
+        tcp_keepalive ka{};
+        ka.onoff = 1;
+        ka.keepalivetime = 3000;
+        ka.keepaliveinterval = 1000;
+        DWORD bytesReturned = 0;
+        WSAIoctl(sock, SIO_KEEPALIVE_VALS, &ka, sizeof(ka), nullptr, 0, &bytesReturned, nullptr, nullptr);
+        DWORD rcvTimeoutMs = 1000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rcvTimeoutMs), sizeof(rcvTimeoutMs));
+#else
+        struct timeval rcv_tv{1, 0};
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rcv_tv), sizeof(rcv_tv));
 #endif
         std::vector<uint8_t> rx_raw;
         rx_raw.reserve(4096);
@@ -1144,11 +1186,23 @@ private:
         uint8_t temp[2048];
 
         int disconnect_err = 0;
-        while (running_) {
+        auto last_rx_time = std::chrono::steady_clock::now();
+        constexpr auto kStreamingSilenceTimeout = std::chrono::seconds(10);
+        while (running_ && (!sess || sess->alive.load())) {
             int bytes_read = recv(sock, reinterpret_cast<char*>(temp), sizeof(temp), 0);
             if (bytes_read <= 0) {
 #ifdef _WIN32
                 int err = (bytes_read < 0) ? WSAGetLastError() : 0;
+                if (bytes_read < 0 && (err == WSAETIMEDOUT || err == WSAEINTR || err == WSAEWOULDBLOCK) &&
+                    running_ && (!sess || sess->alive.load())) {
+                    if (sess && sess->record_received.load() &&
+                        (std::chrono::steady_clock::now() - last_rx_time) >= kStreamingSilenceTimeout) {
+                        CPS_LOG_WARN("AirPlayRtsp", "RTSP control channel stalled (>10s without feedback/traffic after RECORD); closing dead session");
+                        disconnect_err = WSAETIMEDOUT;
+                        break;
+                    }
+                    continue;
+                }
                 disconnect_err = err;
                 if (bytes_read == 0) {
                     CPS_LOG_INFO("AirPlayRtsp", "recv() returned 0 (iPhone sent TCP FIN - graceful close)");
@@ -1157,6 +1211,16 @@ private:
                 }
 #else
                 int err = (bytes_read < 0) ? errno : 0;
+                if (bytes_read < 0 && (err == EAGAIN || err == EWOULDBLOCK || err == EINTR) &&
+                    running_ && (!sess || sess->alive.load())) {
+                    if (sess && sess->record_received.load() &&
+                        (std::chrono::steady_clock::now() - last_rx_time) >= kStreamingSilenceTimeout) {
+                        CPS_LOG_WARN("AirPlayRtsp", "RTSP control channel stalled (>10s without feedback/traffic after RECORD); closing dead session");
+                        disconnect_err = ETIMEDOUT;
+                        break;
+                    }
+                    continue;
+                }
                 disconnect_err = err;
                 if (bytes_read == 0) {
                     CPS_LOG_INFO("AirPlayRtsp", "recv() returned 0 (iPhone sent TCP FIN - graceful close)");
@@ -1166,6 +1230,7 @@ private:
 #endif
                 break;
             }
+            last_rx_time = std::chrono::steady_clock::now();
 
             rx_raw.insert(rx_raw.end(), temp, temp + bytes_read);
 
@@ -1277,7 +1342,6 @@ private:
         }
 
         CPS_LOG_INFO("AirPlayRtsp", "iPhone RTSP connection closed");
-        CLOSE_SOCK(sock);
 
         ClientDisconnectedCallback disc_cb;
         bool should_notify = false;
@@ -1295,6 +1359,7 @@ private:
                 should_notify = true;
             }
         }
+        CLOSE_SOCK(sock);
         if (should_notify) {
             disc_cb(disconnect_err);
         }
@@ -1377,6 +1442,7 @@ private:
                 if (params_.session_id.empty()) params_.session_id = "1";
 
                 if (sess) {
+                    sess->record_received.store(true);
                     sess->TryAcceptEventChannel(2000);
                 }
 
@@ -2349,6 +2415,10 @@ Common::Status AirPlayRtspServer::Start() {
 
 void AirPlayRtspServer::Stop() {
     impl_->Stop();
+}
+
+void AirPlayRtspServer::CloseActiveSessions() {
+    impl_->CloseActiveSessions();
 }
 
 bool AirPlayRtspServer::IsRunning() const noexcept {

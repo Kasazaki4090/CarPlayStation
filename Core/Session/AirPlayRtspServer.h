@@ -129,6 +129,11 @@ public:
     void Stop();
 
     /**
+     * @brief Close active client sessions while keeping the listener running.
+     */
+    void CloseActiveSessions();
+
+    /**
      * @brief Check whether the listener is active.
      */
     [[nodiscard]] bool IsRunning() const noexcept;

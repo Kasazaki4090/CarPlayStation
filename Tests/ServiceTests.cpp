@@ -546,6 +546,33 @@ void TestTriggerReconnection() {
     std::cout << "[PASS] TestTriggerReconnection\n";
 }
 
+void TestApplySettingsPreservesMfiAndPairing() {
+    auto mock_session = std::make_shared<MockSession>();
+    auto mock_decoder = std::make_shared<MockVideoDecoder>();
+    auto mock_audio = std::make_shared<MockAudioPipeline>();
+    auto mock_input = std::make_shared<MockInputSink>();
+
+    auto core_service = MakeMockCoreService(mock_session, mock_decoder, mock_audio, mock_input);
+    Application::ApplicationService app_service(core_service);
+
+    Application::AppSettings settings;
+    assert(app_service.StartCarPlay(settings).IsOk());
+
+    // Inject a distinct signer after startup; unrelated settings changes must NOT
+    // re-apply MFi credentials or clear pairing state.
+    auto sentinel_signer = std::make_shared<MockMfiSigner>();
+    assert(core_service->SetMfiSigner(sentinel_signer).IsOk());
+    assert(core_service->GetMfiSigner() == sentinel_signer);
+
+    Application::AppSettings updated = settings;
+    updated.audio.media_volume = 0.25f;
+    assert(app_service.ApplySettings(updated).IsOk());
+    assert(core_service->GetMfiSigner() == sentinel_signer);
+
+    app_service.StopCarPlay();
+    std::cout << "[PASS] TestApplySettingsPreservesMfiAndPairing\n";
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -562,6 +589,7 @@ int main() {
     TestApplicationServiceDoubleStart();
     TestApplicationServiceApplySettingsNotRunning();
     TestTriggerReconnection();
+    TestApplySettingsPreservesMfiAndPairing();
 
     std::cout << "=== All Service Tests Passed ===\n";
     return 0;

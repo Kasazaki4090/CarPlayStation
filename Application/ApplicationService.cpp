@@ -137,6 +137,11 @@ Core::Common::Status ApplicationService::ApplySettings(const AppSettings& newSet
             "CarPlay is not running");
     }
 
+    const bool mfi_changed =
+        (newSettings.mfi.backend_type != current_settings_.mfi.backend_type ||
+         newSettings.mfi.certificate_path != current_settings_.mfi.certificate_path ||
+         newSettings.mfi.private_key_path != current_settings_.mfi.private_key_path);
+
     current_settings_ = newSettings;
 
     // Resolve and hot-update the core environment.
@@ -152,8 +157,10 @@ Core::Common::Status ApplicationService::ApplySettings(const AppSettings& newSet
         return status;
     }
 
-    // Rebuild + inject the MFi signer if the MFi backend changed.
-    ApplyMfiSigner(newSettings);
+    // Rebuild + inject the MFi signer only if the MFi backend/credentials changed.
+    if (mfi_changed) {
+        ApplyMfiSigner(newSettings);
+    }
 
     // Reconfigure video decoder if resolution/codec changed.
     {

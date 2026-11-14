@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #endif
 
 namespace CarPlayStation::Core::Media {
@@ -155,6 +156,17 @@ bool AirPlayVideoReceiver::IsRunning() const noexcept {
     return running_.load();
 }
 
+void AirPlayVideoReceiver::CloseActiveStreams() {
+#ifdef _WIN32
+    std::lock_guard<std::mutex> lock(client_mutex_);
+    for (uintptr_t s : client_sockets_) {
+        if (s != ~0ULL) {
+            shutdown(static_cast<SOCKET>(s), SD_BOTH);
+        }
+    }
+#endif
+}
+
 uint64_t AirPlayVideoReceiver::GetReceivedFrames() const noexcept {
     return received_frames_.load(std::memory_order_relaxed);
 }
@@ -179,9 +191,16 @@ void AirPlayVideoReceiver::TcpListenLoop() {
         int nodelay = 1;
         setsockopt(clientSock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
 
-        // Enable TCP keep-alive
+        // Enable TCP keep-alive with fast Windows probes (3s idle, 1s interval)
+        // so silent Wi-Fi drops are detected promptly instead of the 2-hour OS default.
         int keepalive = 1;
         setsockopt(clientSock, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&keepalive), sizeof(keepalive));
+        tcp_keepalive ka{};
+        ka.onoff = 1;
+        ka.keepalivetime = 3000;
+        ka.keepaliveinterval = 1000;
+        DWORD bytesReturned = 0;
+        WSAIoctl(clientSock, SIO_KEEPALIVE_VALS, &ka, sizeof(ka), nullptr, 0, &bytesReturned, nullptr, nullptr);
 
         // Set receive timeout (1000ms) so worker thread does not block indefinitely if connection drops
         DWORD timeoutMs = 1000;
@@ -225,7 +244,6 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
     }
 
     auto cleanupSock = [&](int disconnectErr) {
-        closesocket(sock);
         StreamDisconnectedCallback cb;
         bool notify = false;
         {
@@ -242,6 +260,7 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
                 }
             }
         }
+        closesocket(sock);
         if (notify) {
             cb(disconnectErr);
         }
@@ -249,6 +268,8 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
 
     uint64_t last_stat_time_ms = 0;
     uint64_t frames_since_stat = 0;
+    auto last_rx = std::chrono::steady_clock::now();
+    constexpr auto kPartialPacketStallTimeout = std::chrono::seconds(5);
 
     // Reused across frames. At 60 fps a per-frame allocation on this thread is
     // pure added latency in front of the decoder, and the ring-buffer notify is
@@ -267,10 +288,17 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
 #ifdef _WIN32
                 if (n < 0) {
                     err = WSAGetLastError();
-                    // Transient errors (timeout, interrupted by a signal/console
-                    // event) are not real disconnects: retry the recv.
+                    // Retry idle waits, unless we already received part of a header
+                    // and the peer stopped mid-packet for >5 seconds (silent Wi-Fi drop).
                     if ((err == WSAETIMEDOUT || err == WSAEINTR || err == WSAEWOULDBLOCK) &&
                         running_.load()) {
+                        if (hdrRead > 0 &&
+                            (std::chrono::steady_clock::now() - last_rx) >= kPartialPacketStallTimeout) {
+                            CPS_LOG_WARN("VideoReceiver", "Partial video header stalled (>5s, hdrRead=",
+                                         std::to_string(hdrRead), "); closing dead socket");
+                            cleanupSock(WSAETIMEDOUT);
+                            return;
+                        }
                         continue;
                     }
                 }
@@ -287,6 +315,7 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
                 cleanupSock(err);
                 return;
             }
+            last_rx = std::chrono::steady_clock::now();
             hdrRead += static_cast<size_t>(n);
         }
 
@@ -314,10 +343,15 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
 #ifdef _WIN32
                 if (n < 0) {
                     err = WSAGetLastError();
-                    // Transient errors (timeout, interrupted, would-block) are
-                    // not real disconnects: retry the recv.
                     if ((err == WSAETIMEDOUT || err == WSAEINTR || err == WSAEWOULDBLOCK) &&
                         running_.load()) {
+                        if ((std::chrono::steady_clock::now() - last_rx) >= kPartialPacketStallTimeout) {
+                            CPS_LOG_WARN("VideoReceiver", "Video frame body stalled (>5s, bodyRead=",
+                                         std::to_string(bodyRead), "/", std::to_string(bodySize),
+                                         "); closing dead socket");
+                            cleanupSock(WSAETIMEDOUT);
+                            return;
+                        }
                         continue;
                     }
                 }
@@ -328,6 +362,7 @@ void AirPlayVideoReceiver::TcpClientWorker(uintptr_t clientSockRaw) {
                 cleanupSock(err);
                 return;
             }
+            last_rx = std::chrono::steady_clock::now();
             bodyRead += static_cast<size_t>(n);
         }
 

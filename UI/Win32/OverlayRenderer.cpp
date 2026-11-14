@@ -763,7 +763,7 @@ void OverlayRenderer::DrawSettingsDrawer(float width, float height) {
         if (reconnect_callback_) {
             reconnect_callback_();
         }
-    }});
+    }, false});
 
     D2D1_ROUNDED_RECT bConnRect = D2D1::RoundedRect(rConn, 4.0f, 4.0f);
     d2d_render_target_->FillRoundedRectangle(&bConnRect, brush_accent_blue_.Get());
@@ -943,17 +943,25 @@ bool OverlayRenderer::OnMouseDown(float clientX, float clientY) {
                 clientY >= drawer_rect_.top && clientY <= drawer_rect_.bottom) {
 
                 // Check button clicks first
+                bool handled_action_button = false;
                 for (const auto& btn : drawer_buttons_) {
                     if (clientX >= btn.rect.left && clientX <= btn.rect.right &&
                         clientY >= btn.rect.top && clientY <= btn.rect.bottom) {
                         if (btn.on_click) {
                             btn.on_click();
-                            cb = settings_callback_;
-                            settings_copy = settings_;
+                            if (btn.modifies_settings) {
+                                cb = settings_callback_;
+                                settings_copy = settings_;
+                            } else {
+                                handled_action_button = true;
+                            }
                             CPS_LOG_INFO("Overlay", "Drawer button clicked");
                         }
                         break;
                     }
+                }
+                if (handled_action_button) {
+                    return true;
                 }
 
                 if (!cb) {

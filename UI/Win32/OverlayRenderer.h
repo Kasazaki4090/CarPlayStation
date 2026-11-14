@@ -32,6 +32,7 @@ struct ButtonItem {
     D2D1_RECT_F rect{};
     bool is_active{false};
     std::function<void()> on_click;
+    bool modifies_settings{true};
 };
 
 class OverlayRenderer {
